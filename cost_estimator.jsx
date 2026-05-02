@@ -1,0 +1,431 @@
+import { useState, useMemo } from "react";
+
+const TIERS = [
+  { label: "Seed", providers: 50, consumers: 500, bookingsPerDay: 15, description: "City pilot — 1 area" },
+  { label: "Early", providers: 200, consumers: 2000, bookingsPerDay: 60, description: "Single city launch" },
+  { label: "Growth", providers: 500, consumers: 8000, bookingsPerDay: 200, description: "Multi-area city" },
+  { label: "Scale", providers: 2000, consumers: 30000, bookingsPerDay: 800, description: "Multi-city expansion" },
+  { label: "Mature", providers: 5000, consumers: 100000, bookingsPerDay: 2500, description: "Regional dominance" },
+];
+
+function calculateCosts(tier) {
+  const { providers, consumers, bookingsPerDay } = tier;
+  const totalUsers = providers + consumers;
+  const bookingsPerMonth = bookingsPerDay * 30;
+  const avgTicket = 500; // ₹500 average service
+  const gmv = bookingsPerMonth * avgTicket;
+  const revenue = gmv * 0.2; // 20% commission
+
+  // --- AWS COMPUTE ---
+  let ec2Type, ec2Cost, ec2Desc;
+  if (totalUsers < 1000) {
+    ec2Type = "t3.small"; ec2Cost = 1500; ec2Desc = "2 vCPU, 2GB RAM";
+  } else if (totalUsers < 5000) {
+    ec2Type = "t3.medium"; ec2Cost = 3000; ec2Desc = "2 vCPU, 4GB RAM";
+  } else if (totalUsers < 20000) {
+    ec2Type = "t3.large"; ec2Cost = 6000; ec2Desc = "2 vCPU, 8GB RAM";
+  } else if (totalUsers < 50000) {
+    ec2Type = "t3.xlarge x2 + ALB"; ec2Cost = 18000; ec2Desc = "2 instances, load balanced";
+  } else {
+    ec2Type = "ECS Fargate (4 tasks)"; ec2Cost = 30000; ec2Desc = "Auto-scaling containers";
+  }
+
+  // --- DATABASE ---
+  let rdsType, rdsCost, rdsDesc;
+  if (totalUsers < 1000) {
+    rdsType = "db.t3.micro"; rdsCost = 1800; rdsDesc = "1 vCPU, 1GB, 20GB";
+  } else if (totalUsers < 5000) {
+    rdsType = "db.t3.small"; rdsCost = 3500; rdsDesc = "2 vCPU, 2GB, 50GB";
+  } else if (totalUsers < 20000) {
+    rdsType = "db.t3.medium"; rdsCost = 7000; rdsDesc = "2 vCPU, 4GB, 100GB";
+  } else if (totalUsers < 50000) {
+    rdsType = "db.r6g.large + replica"; rdsCost = 22000; rdsDesc = "Primary + read replica";
+  } else {
+    rdsType = "db.r6g.xlarge + 2 replicas"; rdsCost = 45000; rdsDesc = "Primary + 2 read replicas";
+  }
+
+  // --- REDIS ---
+  let redisType, redisCost;
+  if (totalUsers < 5000) {
+    redisType = "cache.t3.micro"; redisCost = 1200;
+  } else if (totalUsers < 20000) {
+    redisType = "cache.t3.small"; redisCost = 2500;
+  } else if (totalUsers < 50000) {
+    redisType = "cache.m6g.large"; redisCost = 8000;
+  } else {
+    redisType = "cache.m6g.xlarge"; redisCost = 15000;
+  }
+
+  // --- S3 ---
+  const storageGB = Math.max(5, Math.ceil(totalUsers * 0.02));
+  const s3Cost = Math.max(50, Math.ceil(storageGB * 2));
+
+  // --- TWILIO SMS ---
+  // OTP: each user logs in ~2x/month, providers get booking SMS
+  const otpMessages = totalUsers * 2 + bookingsPerMonth * 2; // login + booking confirmations
+  const smsCostPerMsg = 0.22; // ₹ per SMS (MSG91 India)
+  const smsCost = Math.ceil(otpMessages * smsCostPerMsg);
+
+  // --- TWILIO WHATSAPP (future) ---
+  // Booking confirmations + invoices via WhatsApp BSP
+  const waMsgs = bookingsPerMonth * 3; // confirmation, update, invoice
+  const waCostPerMsg = 0.65; // ₹ per utility template
+  const whatsappCost = Math.ceil(waMsgs * waCostPerMsg);
+
+  // --- GOOGLE MAPS ---
+  // Geocoding on address save + distance matrix on booking
+  const mapsRequests = bookingsPerMonth * 3 + consumers * 0.5; // geocode, distance, directions
+  const mapsFreeTier = 28000; // ~$200 free credit ≈ 28K requests
+  const mapsCost = mapsRequests > mapsFreeTier
+    ? Math.ceil((mapsRequests - mapsFreeTier) * 0.35)
+    : 0;
+
+  // --- FIREBASE FCM ---
+  const fcmCost = 0; // Free
+
+  // --- RAZORPAY ---
+  const onlineBookings = bookingsPerMonth * 0.6; // assume 60% online
+  const razorpayTxnFee = 0.02; // 2%
+  const razorpayCost = Math.ceil(onlineBookings * avgTicket * razorpayTxnFee);
+
+  // --- DOMAIN + SSL ---
+  const domainCost = 100; // amortized monthly
+
+  // --- MONITORING (Sentry/Grafana) ---
+  let monitoringCost;
+  if (totalUsers < 5000) monitoringCost = 0; // free tiers
+  else if (totalUsers < 50000) monitoringCost = 2000;
+  else monitoringCost = 5000;
+
+  // --- CI/CD (GitHub Actions) ---
+  const ciCost = totalUsers < 10000 ? 0 : 800;
+
+  const awsTotal = ec2Cost + rdsCost + redisCost + s3Cost;
+  const commsTotal = smsCost + whatsappCost;
+  const thirdPartyTotal = mapsCost + fcmCost + razorpayCost + domainCost + monitoringCost + ciCost;
+  const grandTotal = awsTotal + commsTotal + thirdPartyTotal;
+
+  return {
+    totalUsers,
+    bookingsPerMonth,
+    gmv,
+    revenue,
+    // AWS
+    ec2: { type: ec2Type, cost: ec2Cost, desc: ec2Desc },
+    rds: { type: rdsType, cost: rdsCost, desc: rdsDesc },
+    redis: { type: redisType, cost: redisCost },
+    s3: { cost: s3Cost, gb: storageGB },
+    awsTotal,
+    // Comms
+    sms: { messages: otpMessages, cost: smsCost },
+    whatsapp: { messages: waMsgs, cost: whatsappCost },
+    commsTotal,
+    // Third party
+    maps: { requests: mapsRequests, cost: mapsCost },
+    razorpay: { txns: Math.round(onlineBookings), cost: razorpayCost },
+    domain: domainCost,
+    monitoring: monitoringCost,
+    ci: ciCost,
+    thirdPartyTotal,
+    grandTotal,
+  };
+}
+
+function formatINR(num) {
+  if (num >= 100000) return `₹${(num / 100000).toFixed(1)}L`;
+  if (num >= 1000) return `₹${(num / 1000).toFixed(1)}K`;
+  return `₹${num}`;
+}
+
+function formatNum(num) {
+  if (num >= 100000) return `${(num / 100000).toFixed(1)}L`;
+  if (num >= 1000) return `${(num / 1000).toFixed(1)}K`;
+  return num.toString();
+}
+
+function CostRow({ label, detail, cost, highlight }) {
+  return (
+    <div style={{
+      display: "flex", justifyContent: "space-between", alignItems: "center",
+      padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)",
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ color: "#e0e0e0", fontSize: 14, fontWeight: 500 }}>{label}</div>
+        {detail && <div style={{ color: "#888", fontSize: 12, marginTop: 2 }}>{detail}</div>}
+      </div>
+      <div style={{
+        fontSize: 15, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace",
+        color: highlight ? "#4ade80" : "#f0f0f0",
+      }}>
+        {formatINR(cost)}<span style={{ color: "#666", fontSize: 11, fontWeight: 400 }}>/mo</span>
+      </div>
+    </div>
+  );
+}
+
+function SectionHeader({ title, total }) {
+  return (
+    <div style={{
+      display: "flex", justifyContent: "space-between", alignItems: "baseline",
+      marginTop: 20, marginBottom: 6, paddingBottom: 6,
+      borderBottom: "2px solid rgba(108, 92, 231, 0.3)",
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1.5, color: "#a78bfa" }}>
+        {title}
+      </div>
+      <div style={{
+        fontSize: 14, fontWeight: 700, color: "#c4b5fd",
+        fontFamily: "'JetBrains Mono', monospace",
+      }}>
+        {formatINR(total)}
+      </div>
+    </div>
+  );
+}
+
+export default function CostEstimator() {
+  const [selectedIdx, setSelectedIdx] = useState(1);
+  const tier = TIERS[selectedIdx];
+  const costs = useMemo(() => calculateCosts(tier), [selectedIdx]);
+
+  const profitMargin = costs.revenue > 0
+    ? ((costs.revenue - costs.grandTotal) / costs.revenue * 100).toFixed(0)
+    : 0;
+  const isProfitable = costs.revenue > costs.grandTotal;
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "#0a0a0f",
+      fontFamily: "'Inter', -apple-system, sans-serif",
+      color: "#f0f0f0", padding: "24px 16px",
+    }}>
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+      {/* Header */}
+      <div style={{ textAlign: "center", marginBottom: 28 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 3, color: "#6C5CE7", textTransform: "uppercase", marginBottom: 6 }}>
+          ServiceConnect
+        </div>
+        <h1 style={{ fontSize: 26, fontWeight: 800, margin: 0, lineHeight: 1.2,
+          background: "linear-gradient(135deg, #e0e0e0, #a78bfa)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+        }}>
+          Infrastructure Cost Model
+        </h1>
+        <p style={{ color: "#666", fontSize: 13, marginTop: 6 }}>Monthly burn at each scale tier — AWS Mumbai region</p>
+      </div>
+
+      {/* Tier Selector */}
+      <div style={{
+        display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8, marginBottom: 20,
+        scrollbarWidth: "none",
+      }}>
+        {TIERS.map((t, i) => {
+          const isActive = i === selectedIdx;
+          return (
+            <button key={i} onClick={() => setSelectedIdx(i)} style={{
+              flex: "0 0 auto", padding: "10px 14px", borderRadius: 12, border: "none",
+              cursor: "pointer", transition: "all 0.2s",
+              background: isActive ? "linear-gradient(135deg, #6C5CE7, #a78bfa)" : "#161620",
+              color: isActive ? "#fff" : "#888",
+              minWidth: 90, textAlign: "center",
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>{t.label}</div>
+              <div style={{ fontSize: 11, opacity: 0.8, marginTop: 2 }}>{t.providers} providers</div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Tier Summary Cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 20 }}>
+        {[
+          { label: "Providers", value: formatNum(tier.providers), sub: "active" },
+          { label: "Consumers", value: formatNum(tier.consumers), sub: `${tier.consumers / tier.providers}x ratio` },
+          { label: "Bookings/day", value: tier.bookingsPerDay, sub: `${costs.bookingsPerMonth}/mo` },
+        ].map((c, i) => (
+          <div key={i} style={{
+            background: "#12121a", borderRadius: 12, padding: "12px 10px", textAlign: "center",
+            border: "1px solid rgba(255,255,255,0.05)",
+          }}>
+            <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace" }}>{c.value}</div>
+            <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>{c.label}</div>
+            <div style={{ fontSize: 10, color: "#555", marginTop: 1 }}>{c.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Revenue vs Cost headline */}
+      <div style={{
+        background: isProfitable
+          ? "linear-gradient(135deg, rgba(74, 222, 128, 0.08), rgba(74, 222, 128, 0.02))"
+          : "linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(239, 68, 68, 0.02))",
+        border: `1px solid ${isProfitable ? "rgba(74,222,128,0.2)" : "rgba(239,68,68,0.2)"}`,
+        borderRadius: 14, padding: 16, marginBottom: 20,
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+      }}>
+        <div>
+          <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase", letterSpacing: 1 }}>
+            Monthly GMV → Revenue (20%)
+          </div>
+          <div style={{ marginTop: 4 }}>
+            <span style={{ fontSize: 14, color: "#aaa", fontFamily: "'JetBrains Mono', monospace" }}>
+              {formatINR(costs.gmv)}
+            </span>
+            <span style={{ color: "#555", margin: "0 8px" }}>→</span>
+            <span style={{ fontSize: 20, fontWeight: 800, color: isProfitable ? "#4ade80" : "#ef4444",
+              fontFamily: "'JetBrains Mono', monospace",
+            }}>
+              {formatINR(costs.revenue)}
+            </span>
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontSize: 11, color: "#888" }}>
+            {isProfitable ? "OPERATING MARGIN" : "BURN RATE"}
+          </div>
+          <div style={{
+            fontSize: 22, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace",
+            color: isProfitable ? "#4ade80" : "#ef4444",
+          }}>
+            {isProfitable ? `${profitMargin}%` : `-${formatINR(costs.grandTotal - costs.revenue)}`}
+          </div>
+        </div>
+      </div>
+
+      {/* Cost Breakdown */}
+      <div style={{
+        background: "#12121a", borderRadius: 16, padding: "16px 18px",
+        border: "1px solid rgba(255,255,255,0.05)",
+      }}>
+        <SectionHeader title="AWS Infrastructure" total={costs.awsTotal} />
+        <CostRow label={`EC2 — ${costs.ec2.type}`} detail={costs.ec2.desc} cost={costs.ec2.cost} />
+        <CostRow label={`RDS PostgreSQL — ${costs.rds.type}`} detail={costs.rds.desc} cost={costs.rds.cost} />
+        <CostRow label={`ElastiCache Redis — ${costs.redis.type}`} detail="Sessions, cache, pub/sub, Celery broker" cost={costs.redis.cost} />
+        <CostRow label={`S3 Storage — ${costs.s3.gb}GB`} detail="Profile photos, invoices, documents" cost={costs.s3.cost} />
+
+        <SectionHeader title="Communications" total={costs.commsTotal} />
+        <CostRow label={`SMS (OTP + Alerts)`} detail={`~${formatNum(costs.sms.messages)} messages @ ₹0.22/msg`} cost={costs.sms.cost} />
+        <CostRow label={`WhatsApp BSP (Phase 2)`} detail={`~${formatNum(costs.whatsapp.messages)} template msgs @ ₹0.65`} cost={costs.whatsapp.cost} />
+
+        <SectionHeader title="Third-Party Services" total={costs.thirdPartyTotal} />
+        <CostRow label="Google Maps API" detail={`~${formatNum(costs.maps.requests)} requests (₹16K free credit)`} cost={costs.maps.cost} />
+        <CostRow label="Razorpay (2% on online)" detail={`~${formatNum(costs.razorpay.txns)} online txns @ ₹${(costs.razorpay.txns > 0 ? costs.razorpay.cost / costs.razorpay.txns : 0).toFixed(0)}/txn`} cost={costs.razorpay.cost} />
+        <CostRow label="Firebase FCM" detail="Push notifications — unlimited free" cost={0} />
+        <CostRow label="Domain + SSL" detail=".in domain + Let's Encrypt" cost={costs.domain} />
+        <CostRow label="Monitoring" detail={costs.monitoring > 0 ? "Sentry + Grafana Cloud" : "Free tiers"} cost={costs.monitoring} />
+        {costs.ci > 0 && <CostRow label="CI/CD" detail="GitHub Actions minutes" cost={costs.ci} />}
+
+        {/* Grand Total */}
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          marginTop: 16, padding: "14px 0 4px", borderTop: "2px solid rgba(108, 92, 231, 0.4)",
+        }}>
+          <div style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>TOTAL MONTHLY COST</div>
+          <div style={{
+            fontSize: 24, fontWeight: 900, fontFamily: "'JetBrains Mono', monospace",
+            background: "linear-gradient(135deg, #f0f0f0, #a78bfa)",
+            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+          }}>
+            {formatINR(costs.grandTotal)}
+          </div>
+        </div>
+      </div>
+
+      {/* Quick comparison table */}
+      <div style={{
+        marginTop: 20, background: "#12121a", borderRadius: 16, padding: "16px 14px",
+        border: "1px solid rgba(255,255,255,0.05)", overflowX: "auto",
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#a78bfa", textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 12 }}>
+          All tiers at a glance
+        </div>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 500 }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+              {["Tier", "Providers", "Users", "Book/mo", "GMV", "Revenue", "Cost", "Margin"].map(h => (
+                <th key={h} style={{ padding: "8px 6px", textAlign: "right", color: "#666", fontWeight: 600, fontSize: 11 }}>
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {TIERS.map((t, i) => {
+              const c = calculateCosts(t);
+              const margin = c.revenue > 0 ? ((c.revenue - c.grandTotal) / c.revenue * 100).toFixed(0) : -100;
+              const isSelected = i === selectedIdx;
+              return (
+                <tr key={i}
+                  onClick={() => setSelectedIdx(i)}
+                  style={{
+                    cursor: "pointer",
+                    background: isSelected ? "rgba(108, 92, 231, 0.1)" : "transparent",
+                    borderBottom: "1px solid rgba(255,255,255,0.04)",
+                  }}
+                >
+                  <td style={{ padding: "10px 6px", fontWeight: 700, color: isSelected ? "#a78bfa" : "#ccc", textAlign: "right" }}>
+                    {t.label}
+                  </td>
+                  <td style={{ padding: "10px 6px", textAlign: "right", color: "#aaa", fontFamily: "'JetBrains Mono', monospace" }}>
+                    {formatNum(t.providers)}
+                  </td>
+                  <td style={{ padding: "10px 6px", textAlign: "right", color: "#aaa", fontFamily: "'JetBrains Mono', monospace" }}>
+                    {formatNum(c.totalUsers)}
+                  </td>
+                  <td style={{ padding: "10px 6px", textAlign: "right", color: "#aaa", fontFamily: "'JetBrains Mono', monospace" }}>
+                    {formatNum(c.bookingsPerMonth)}
+                  </td>
+                  <td style={{ padding: "10px 6px", textAlign: "right", color: "#aaa", fontFamily: "'JetBrains Mono', monospace" }}>
+                    {formatINR(c.gmv)}
+                  </td>
+                  <td style={{ padding: "10px 6px", textAlign: "right", color: "#4ade80", fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>
+                    {formatINR(c.revenue)}
+                  </td>
+                  <td style={{ padding: "10px 6px", textAlign: "right", color: "#f0f0f0", fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>
+                    {formatINR(c.grandTotal)}
+                  </td>
+                  <td style={{
+                    padding: "10px 6px", textAlign: "right", fontWeight: 700,
+                    fontFamily: "'JetBrains Mono', monospace",
+                    color: Number(margin) > 0 ? "#4ade80" : "#ef4444",
+                  }}>
+                    {margin}%
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Assumptions */}
+      <div style={{
+        marginTop: 20, background: "#12121a", borderRadius: 16, padding: "16px 18px",
+        border: "1px solid rgba(255,255,255,0.05)", marginBottom: 20,
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#a78bfa", textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 10 }}>
+          Assumptions
+        </div>
+        {[
+          "Average ticket size: ₹500 per booking",
+          "Platform commission: 20% of service amount",
+          "60% bookings paid online, 40% cash",
+          "Consumer:Provider ratio scales from 10x to 20x",
+          "AWS Mumbai region (ap-south-1) pricing",
+          "SMS via MSG91 @ ₹0.22/msg, WhatsApp BSP @ ₹0.65/template",
+          "Razorpay transaction fee: 2% on online payments",
+          "Google Maps: ₹16K free credit covers ~28K requests/mo",
+          "Razorpay cost is NOT your burn — it's deducted from GMV before settlement",
+        ].map((a, i) => (
+          <div key={i} style={{
+            fontSize: 12, color: "#777", padding: "4px 0",
+            paddingLeft: 12, position: "relative",
+          }}>
+            <span style={{ position: "absolute", left: 0, color: "#555" }}>•</span>
+            {a}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,47 @@
+[project]
+name = "serviceconnect"
+version = "1.0.0"
+description = "On-demand home services marketplace backend"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<0.116",
+    "uvicorn[standard]>=0.34,<0.35",
+    "uvloop>=0.21,<0.22",
+    "sqlalchemy[asyncio]>=2.0,<2.1",
+    "asyncpg>=0.30,<0.31",
+    "psycopg2-binary>=2.9,<2.10",
+    "geoalchemy2>=0.15,<0.16",
+    "alembic>=1.14,<1.15",
+    "pydantic>=2.10,<2.11",
+    "pydantic-settings>=2.7,<2.8",
+    "redis[hiredis]>=5.2,<5.3",
+    "celery>=5.4,<5.5",
+    "python-jose[cryptography]>=3.3,<3.4",
+    "passlib[bcrypt]>=1.7,<1.8",
+    "razorpay>=1.4,<1.5",
+    "firebase-admin>=6.6,<6.7",
+    "boto3>=1.36,<1.37",
+    "httpx>=0.28,<0.29",
+    "python-multipart>=0.0.20,<0.1",
+    "cryptography>=42.0,<43.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<0.25",
+    "factory-boy>=3.3,<4.0",
+    "anyio>=4.7,<5.0",
+    "coverage>=7.6,<8.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

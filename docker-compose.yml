@@ -1,0 +1,70 @@
+services:
+  api:
+    build: .
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 2
+      --loop uvloop
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/code/app
+
+  celery-worker:
+    build: .
+    command: >
+      celery -A app.tasks.celery_app worker
+      --loglevel=info
+      --concurrency=2
+      -Q default,notifications,payments
+    env_file: .env
+    depends_on:
+      - redis
+      - postgres
+
+  celery-beat:
+    build: .
+    command: >
+      celery -A app.tasks.celery_app beat
+      --loglevel=info
+    env_file: .env
+    depends_on:
+      - redis
+
+  postgres:
+    image: postgis/postgis:16-3.4
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: serviceconnect
+      POSTGRES_USER: sc_user
+      POSTGRES_PASSWORD: sc_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sc_user -d serviceconnect"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
