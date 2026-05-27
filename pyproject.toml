@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<0.116",
     "uvicorn[standard]>=0.34,<0.35",
-    "uvloop>=0.21,<0.22",
+    "uvloop>=0.21,<0.22; sys_platform != 'win32'",
     "sqlalchemy[asyncio]>=2.0,<2.1",
     "asyncpg>=0.30,<0.31",
     "psycopg2-binary>=2.9,<2.10",
@@ -24,6 +24,7 @@ dependencies = [
     "httpx>=0.28,<0.29",
     "python-multipart>=0.0.20,<0.1",
     "cryptography>=42.0,<43.0",
+    "setuptools>=75.0,<81",
 ]
 
 [dependency-groups]

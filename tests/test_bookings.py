@@ -1,7 +1,7 @@
 """
 Booking integration tests.
 Covers: create booking (commission split), state-machine transitions,
-invalid transitions, doorstep OTP verification.
+invalid transitions, doorstep OTP verification, single booking fetch.
 """
 import pytest
 from uuid import uuid4
@@ -12,14 +12,45 @@ from tests.factories.user_factory import UserFactory
 from tests.factories.booking_factory import BookingFactory
 
 
+async def _create_booking_with_deps(db_session, consumer, provider, **kwargs):
+    """Create a booking with all required FK dependencies (service, address)."""
+    from app.models.category import Category
+    from app.models.service import Service
+    from app.models.address import Address
+
+    category = Category(name="Cleaning", slug="cleaning", is_active=True, sort_order=1)
+    db_session.add(category)
+    await db_session.flush()
+
+    service = Service(
+        category_id=category.id,
+        name="Deep Clean",
+        base_price=200.0,
+        duration_minutes=90,
+        is_active=True,
+    )
+    db_session.add(service)
+
+    address = Address(user_id=consumer.id, label="home", full_address="456 Test St")
+    db_session.add(address)
+    await db_session.flush()
+
+    return service, address, await BookingFactory.create(
+        db_session,
+        consumer_id=consumer.id,
+        provider_id=provider.id,
+        service_id=service.id,
+        address_id=address.id,
+        **kwargs,
+    )
+
+
 @pytest.mark.asyncio
 async def test_create_booking_success(client, auth_headers, db_session):
     """Commission split must be exactly 20% platform / 80% provider."""
     consumer = await UserFactory.create(db_session, role="consumer")
     provider_user = await UserFactory.create(db_session, role="provider")
 
-    # Build supporting records directly on db_session
-    from app.models.provider_profile import ProviderProfile
     from app.models.category import Category
     from app.models.service import Service
     from app.models.address import Address
@@ -28,12 +59,7 @@ async def test_create_booking_success(client, auth_headers, db_session):
     db_session.add(category)
     await db_session.flush()
 
-    profile = ProviderProfile(user_id=provider_user.id)
-    db_session.add(profile)
-    await db_session.flush()
-
     service = Service(
-        provider_id=profile.id,
         category_id=category.id,
         name="Basic Pipe Fix",
         base_price=100.0,
@@ -71,11 +97,8 @@ async def test_invalid_state_transition(client, auth_headers, db_session):
     """REQUESTED → COMPLETED must be rejected with 409."""
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
-    booking = await BookingFactory.create(
-        db_session,
-        consumer_id=consumer.id,
-        provider_id=provider.id,
-        status=BookingStatus.REQUESTED,
+    _, _, booking = await _create_booking_with_deps(
+        db_session, consumer, provider, status=BookingStatus.REQUESTED,
     )
 
     response = await client.patch(
@@ -93,11 +116,8 @@ async def test_accept_booking_wrong_provider(client, auth_headers, db_session):
     consumer = await UserFactory.create(db_session, role="consumer")
     correct_provider = await UserFactory.create(db_session, role="provider")
     wrong_provider = await UserFactory.create(db_session, role="provider")
-    booking = await BookingFactory.create(
-        db_session,
-        consumer_id=consumer.id,
-        provider_id=correct_provider.id,
-        status=BookingStatus.REQUESTED,
+    _, _, booking = await _create_booking_with_deps(
+        db_session, consumer, correct_provider, status=BookingStatus.REQUESTED,
     )
 
     response = await client.patch(
@@ -113,12 +133,9 @@ async def test_start_booking_wrong_otp(client, auth_headers, db_session):
     """Invalid doorstep OTP must return 400."""
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
-    booking = await BookingFactory.create(
-        db_session,
-        consumer_id=consumer.id,
-        provider_id=provider.id,
-        status=BookingStatus.EN_ROUTE,
-        doorstep_otp="1234",
+    _, _, booking = await _create_booking_with_deps(
+        db_session, consumer, provider,
+        status=BookingStatus.EN_ROUTE, doorstep_otp="1234",
     )
 
     response = await client.patch(
@@ -128,3 +145,71 @@ async def test_start_booking_wrong_otp(client, auth_headers, db_session):
     )
 
     assert response.status_code == 400
+
+
+# ------------------------------------------------------------------
+# SVC-21: GET /bookings/{booking_id}
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_booking_success(client, auth_headers, db_session):
+    """Consumer can fetch their own booking and gets 200."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    _, _, booking = await _create_booking_with_deps(db_session, consumer, provider)
+
+    response = await client.get(
+        f"/api/v1/bookings/{booking.id}",
+        headers=auth_headers(str(consumer.id), "consumer"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == str(booking.id)
+    assert data["consumer_id"] == str(consumer.id)
+
+
+@pytest.mark.asyncio
+async def test_get_booking_wrong_user(client, auth_headers, db_session):
+    """A user who is neither consumer nor provider on the booking gets 403."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    stranger = await UserFactory.create(db_session, role="consumer")
+    _, _, booking = await _create_booking_with_deps(db_session, consumer, provider)
+
+    response = await client.get(
+        f"/api/v1/bookings/{booking.id}",
+        headers=auth_headers(str(stranger.id), "consumer"),
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_get_booking_as_provider(client, auth_headers, db_session):
+    """Assigned provider on the booking can fetch it."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    _, _, booking = await _create_booking_with_deps(db_session, consumer, provider)
+
+    response = await client.get(
+        f"/api/v1/bookings/{booking.id}",
+        headers=auth_headers(str(provider.id), "provider"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(booking.id)
+
+
+@pytest.mark.asyncio
+async def test_get_booking_not_found(client, auth_headers, db_session):
+    """Non-existent booking returns 404."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+
+    response = await client.get(
+        f"/api/v1/bookings/{uuid4()}",
+        headers=auth_headers(str(consumer.id), "consumer"),
+    )
+
+    assert response.status_code == 404
