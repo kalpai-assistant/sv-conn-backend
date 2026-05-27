@@ -20,6 +20,7 @@ class BookingFactory:
         platform_commission: float = 20.0,
         provider_payout: float = 80.0,
         doorstep_otp: str = "1234",
+        payment_method: PaymentMethod = PaymentMethod.ONLINE,
         razorpay_order_id: str | None = None,
     ) -> Booking:
         booking = Booking(
@@ -34,7 +35,7 @@ class BookingFactory:
             service_amount=service_amount,
             platform_commission=platform_commission,
             provider_payout=provider_payout,
-            payment_method=PaymentMethod.ONLINE,
+            payment_method=payment_method,
             razorpay_order_id=razorpay_order_id,
         )
         db.add(booking)
