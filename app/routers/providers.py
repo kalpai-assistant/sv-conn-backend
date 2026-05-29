@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,6 +9,7 @@ from app.models.user import User, UserRole
 from app.schemas.provider import (
     ProviderProfileUpdate, ProviderStatusUpdate,
     ProviderResponse, NearbyProviderResponse,
+    ProviderServiceSubscribeRequest, ProviderServiceSubscriptionResponse,
 )
 from app.services.provider_service import ProviderService
 
@@ -59,3 +62,30 @@ async def find_nearby_providers(
 ):
     rows = await ProviderService(db).find_nearby(lat=lat, lng=lng, radius_km=radius_km)
     return [NearbyProviderResponse(**row) for row in rows]
+
+
+@router.post(
+    "/me/services",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ProviderServiceSubscriptionResponse,
+)
+async def subscribe_to_service(
+    request: ProviderServiceSubscribeRequest,
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ProviderService(db).subscribe_to_service(
+        current_user.id, request.service_id
+    )
+
+
+@router.delete(
+    "/me/services/{service_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def unsubscribe_from_service(
+    service_id: UUID,
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    await ProviderService(db).unsubscribe_from_service(current_user.id, service_id)

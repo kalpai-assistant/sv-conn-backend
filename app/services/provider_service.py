@@ -7,6 +7,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.provider_profile import ProviderProfile, KYCStatus
+from app.models.provider_service import ProviderService as ProviderServiceModel
+from app.models.service import Service
+from app.exceptions import (
+    ServiceNotFound,
+    UnauthorizedAction,
+    DuplicateSubscription,
+    SubscriptionNotFound,
+)
 from app.utils.geo import build_point_wkt, st_dwithin_filter, distance_expression
 from app.utils.encryption import encrypt
 
@@ -104,6 +112,58 @@ class ProviderService:
             {**row.ProviderProfile.__dict__, "distance_km": row.distance_km}
             for row in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Service Subscriptions
+    # ------------------------------------------------------------------
+
+    async def subscribe_to_service(
+        self, provider_user_id: uuid.UUID, service_id: uuid.UUID
+    ) -> ProviderServiceModel:
+        profile = await self.get_profile(provider_user_id)
+        if profile is None:
+            raise UnauthorizedAction("Provider profile not found")
+        if profile.kyc_status != KYCStatus.VERIFIED:
+            raise UnauthorizedAction(
+                "Only verified providers can subscribe to services"
+            )
+
+        service = await self.db.get(Service, service_id)
+        if service is None or not service.is_active:
+            raise ServiceNotFound(service_id)
+
+        existing = await self.db.execute(
+            select(ProviderServiceModel).where(
+                ProviderServiceModel.provider_id == provider_user_id,
+                ProviderServiceModel.service_id == service_id,
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            raise DuplicateSubscription(service_id)
+
+        subscription = ProviderServiceModel(
+            provider_id=provider_user_id,
+            service_id=service_id,
+        )
+        self.db.add(subscription)
+        await self.db.flush()
+        return subscription
+
+    async def unsubscribe_from_service(
+        self, provider_user_id: uuid.UUID, service_id: uuid.UUID
+    ) -> None:
+        result = await self.db.execute(
+            select(ProviderServiceModel).where(
+                ProviderServiceModel.provider_id == provider_user_id,
+                ProviderServiceModel.service_id == service_id,
+            )
+        )
+        sub = result.scalar_one_or_none()
+        if sub is None:
+            raise SubscriptionNotFound(service_id)
+
+        await self.db.delete(sub)
+        await self.db.flush()
 
     # ------------------------------------------------------------------
     # Rating update (called by review_service after new review)
