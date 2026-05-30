@@ -148,6 +148,69 @@ async def test_start_booking_wrong_otp(client, auth_headers, db_session):
 
 
 # ------------------------------------------------------------------
+# SVC-29: En-Route Transition
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_en_route_transition(client, auth_headers, db_session):
+    """Provider can transition an ACCEPTED booking to EN_ROUTE."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    _, _, booking = await _create_booking_with_deps(
+        db_session, consumer, provider, status=BookingStatus.ACCEPTED,
+    )
+
+    response = await client.patch(
+        f"/api/v1/bookings/{booking.id}/en-route",
+        headers=auth_headers(str(provider.id), "provider"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "en_route"
+    assert data["id"] == str(booking.id)
+
+
+# ------------------------------------------------------------------
+# SVC-30: Cash Payment Task Triggered on Completion
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_complete_cash_booking_triggers_payment_task(client, auth_headers, db_session):
+    """Completing a cash booking must trigger process_cash_payment Celery task."""
+    from app.models.provider_profile import ProviderProfile
+    from app.models.booking import PaymentMethod
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+
+    profile = ProviderProfile(user_id=provider.id)
+    db_session.add(profile)
+    await db_session.flush()
+
+    _, _, booking = await _create_booking_with_deps(
+        db_session, consumer, provider,
+        status=BookingStatus.IN_PROGRESS,
+        payment_method=PaymentMethod.CASH,
+    )
+
+    with patch("app.routers.bookings.send_booking_notification") as mock_notif, \
+         patch("app.routers.bookings.process_cash_payment") as mock_payment:
+        mock_notif.delay = lambda **kwargs: None
+
+        response = await client.patch(
+            f"/api/v1/bookings/{booking.id}/complete",
+            headers=auth_headers(str(provider.id), "provider"),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    mock_payment.delay.assert_called_once_with(booking_id=str(booking.id))
+
+
+# ------------------------------------------------------------------
 # SVC-21: GET /bookings/{booking_id}
 # ------------------------------------------------------------------
 
