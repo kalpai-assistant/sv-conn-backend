@@ -43,3 +43,15 @@ class NearbyProviderResponse(BaseModel):
     distance_km: float | None = None  # populated by geo query
 
     model_config = {"from_attributes": True}
+
+
+class ProviderServiceSubscribeRequest(BaseModel):
+    service_id: UUID
+
+
+class ProviderServiceSubscriptionResponse(BaseModel):
+    id: UUID
+    provider_id: UUID
+    service_id: UUID
+
+    model_config = {"from_attributes": True}

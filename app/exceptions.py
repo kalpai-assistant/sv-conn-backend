@@ -76,6 +76,22 @@ class DuplicateReview(AppException):
         )
 
 
+class DuplicateSubscription(AppException):
+    def __init__(self, service_id: UUID):
+        super().__init__(
+            f"Provider is already subscribed to service {service_id}",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
+
+class SubscriptionNotFound(AppException):
+    def __init__(self, service_id: UUID):
+        super().__init__(
+            f"Subscription to service {service_id} not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Handler registration
 # ---------------------------------------------------------------------------
