@@ -13,6 +13,7 @@ from tests.factories.user_factory import UserFactory
 from tests.factories.booking_factory import BookingFactory
 from app.models.booking import BookingStatus, PaymentStatus
 from app.models.payment import Payment
+from app.services.payment_service import PaymentService
 from app.config import get_settings
 
 settings = get_settings()
@@ -57,6 +58,42 @@ def _make_valid_signature(order_id: str, payment_id: str) -> str:
         msg=f"{order_id}|{payment_id}".encode(),
         digestmod=hashlib.sha256,
     ).hexdigest()
+
+
+# ------------------------------------------------------------------
+# PAY-1 / SVC-130: create_order works without a provider Route account
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_order_without_provider_linked_account(db_session):
+    """
+    A booking whose provider has no Razorpay linked account must still be able to
+    create a payment order. Payment lands in the platform account — no Route
+    transfers — so create_order no longer requires a provider payout account.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    # No ProviderProfile / razorpay_linked_account_id is created for the provider.
+    booking = await _create_booking_with_deps(
+        db_session, consumer, provider,
+        status=BookingStatus.COMPLETED,
+    )
+
+    service = PaymentService(db_session)
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        mock_rzp.order.create.return_value = {"id": "order_pay1_test"}
+        result = await service.create_order(booking.id)
+
+    # Order created successfully and persisted on the booking.
+    assert result["razorpay_order_id"] == "order_pay1_test"
+    await db_session.refresh(booking)
+    assert booking.razorpay_order_id == "order_pay1_test"
+
+    # The order must NOT carry a Route transfers array.
+    _, call_kwargs = mock_rzp.order.create.call_args
+    assert "transfers" not in call_kwargs["data"]
 
 
 @pytest.mark.asyncio
