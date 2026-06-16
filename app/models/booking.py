@@ -26,6 +26,19 @@ class PaymentStatus(str, enum.Enum):
     PENDING = "pending"
     PAID = "paid"
     REFUNDED = "refunded"
+    # Reserved for the three-axis design (PAY-3 / v1.1) — not used at runtime yet.
+    EXPIRED = "expired"
+    REFUND_PROCESSING = "refund_processing"
+    REFUND_FAILED = "refund_failed"
+
+
+class SettlementStatus(str, enum.Enum):
+    """Provider-payout lifecycle. Reserved for PAY-3 / v1.1 — not used at runtime yet."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 # Valid state transitions — enforced in booking_service.py
@@ -85,6 +98,10 @@ class Booking(Base):
     payment_method: Mapped[PaymentMethod | None] = mapped_column(Enum(PaymentMethod))
     payment_status: Mapped[PaymentStatus] = mapped_column(
         Enum(PaymentStatus), default=PaymentStatus.PENDING
+    )
+    # Provider-payout lifecycle. Reserved for PAY-3 / v1.1 — not read at runtime yet.
+    settlement_status: Mapped[SettlementStatus] = mapped_column(
+        Enum(SettlementStatus), default=SettlementStatus.PENDING, server_default="PENDING"
     )
     razorpay_order_id: Mapped[str | None] = mapped_column(String(255))
     cancellation_reason: Mapped[str | None] = mapped_column(String(500))
