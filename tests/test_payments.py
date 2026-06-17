@@ -61,7 +61,7 @@ def _make_valid_signature(order_id: str, payment_id: str) -> str:
 
 
 # ------------------------------------------------------------------
-# PAY-1 / SVC-130: create_order works without a provider Route account
+# create_order works without a provider Route account
 # ------------------------------------------------------------------
 
 
@@ -83,13 +83,13 @@ async def test_create_order_without_provider_linked_account(db_session):
     service = PaymentService(db_session)
 
     with patch("app.services.payment_service.razorpay_client") as mock_rzp:
-        mock_rzp.order.create.return_value = {"id": "order_pay1_test"}
+        mock_rzp.order.create.return_value = {"id": "order_no_route_test"}
         result = await service.create_order(booking.id)
 
     # Order created successfully and persisted on the booking.
-    assert result["razorpay_order_id"] == "order_pay1_test"
+    assert result["razorpay_order_id"] == "order_no_route_test"
     await db_session.refresh(booking)
-    assert booking.razorpay_order_id == "order_pay1_test"
+    assert booking.razorpay_order_id == "order_no_route_test"
 
     # The order must NOT carry a Route transfers array.
     _, call_kwargs = mock_rzp.order.create.call_args

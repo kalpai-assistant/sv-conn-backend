@@ -1,4 +1,4 @@
-"""pay2 three axis status schema
+"""three axis status schema
 
 Revision ID: bf4fa2e92254
 Revises: 44a9651a7ef8
@@ -20,7 +20,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # PAY-2 (SVC-131): three-axis status schema. Additive only — no behavior change.
+    # Three-axis status schema. Additive only — no behavior change.
 
     # 1. Extend the existing paymentstatus enum (Postgres 16 allows ADD VALUE in a txn).
     op.execute("ALTER TYPE paymentstatus ADD VALUE IF NOT EXISTS 'EXPIRED'")

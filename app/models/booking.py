@@ -26,14 +26,14 @@ class PaymentStatus(str, enum.Enum):
     PENDING = "pending"
     PAID = "paid"
     REFUNDED = "refunded"
-    # Reserved for the three-axis design (PAY-3 / v1.1) — not used at runtime yet.
+    # Reserved for the three-axis design — not used at runtime yet.
     EXPIRED = "expired"
     REFUND_PROCESSING = "refund_processing"
     REFUND_FAILED = "refund_failed"
 
 
 class SettlementStatus(str, enum.Enum):
-    """Provider-payout lifecycle. Reserved for PAY-3 / v1.1 — not used at runtime yet."""
+    """Provider-payout lifecycle. Reserved for future use — not read at runtime yet."""
 
     PENDING = "pending"
     PROCESSING = "processing"
@@ -99,7 +99,7 @@ class Booking(Base):
     payment_status: Mapped[PaymentStatus] = mapped_column(
         Enum(PaymentStatus), default=PaymentStatus.PENDING
     )
-    # Provider-payout lifecycle. Reserved for PAY-3 / v1.1 — not read at runtime yet.
+    # Provider-payout lifecycle. Reserved for future use — not read at runtime yet.
     settlement_status: Mapped[SettlementStatus] = mapped_column(
         Enum(SettlementStatus), default=SettlementStatus.PENDING, server_default="PENDING"
     )

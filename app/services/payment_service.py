@@ -32,9 +32,9 @@ class PaymentService:
         Create a Razorpay order for the booking amount.
 
         For beta the payment lands fully in the platform settlement account — no
-        Route ``transfers`` split, so a provider does not need a linked account
-        (PAY-1 / SVC-130). Provider payouts are handled separately via RazorpayX
-        (PAY-3). Returns order details for frontend checkout.
+        Route ``transfers`` split, so a provider does not need a linked account.
+        Provider payouts are handled separately via RazorpayX. Returns order
+        details for frontend checkout.
         """
         booking = await self.db.get(Booking, booking_id)
         if not booking:
