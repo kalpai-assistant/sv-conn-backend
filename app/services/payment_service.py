@@ -29,30 +29,23 @@ class PaymentService:
 
     async def create_order(self, booking_id: UUID) -> dict:
         """
-        Create a Razorpay order with Route transfer for the 80/20 split.
-        Returns order details for frontend checkout.
+        Create a Razorpay order for the booking amount.
+
+        For beta the payment lands fully in the platform settlement account — no
+        Route ``transfers`` split, so a provider does not need a linked account.
+        Provider payouts are handled separately via RazorpayX. Returns order
+        details for frontend checkout.
         """
         booking = await self.db.get(Booking, booking_id)
         if not booking:
             raise BookingNotFound(booking_id)
 
-        provider_profile = await self._get_provider_profile(booking.provider_id)
-
         amount_paise = int(booking.service_amount * 100)
-        provider_paise = int(booking.provider_payout * 100)
 
         order_data = {
             "amount": amount_paise,
             "currency": "INR",
             "receipt": str(booking.id),
-            "transfers": [
-                {
-                    "account": provider_profile.razorpay_linked_account_id,
-                    "amount": provider_paise,
-                    "currency": "INR",
-                    "on_hold": False,
-                }
-            ],
         }
 
         order = razorpay_client.order.create(data=order_data)
