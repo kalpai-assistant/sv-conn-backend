@@ -12,6 +12,7 @@ from app.schemas.payment import (
     VerifyPaymentRequest, RazorpayWebhookPayload,
 )
 from app.services.payment_service import PaymentService
+from app.services.payout_service import PayoutService
 from app.tasks.notification_tasks import send_booking_notification
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -72,6 +73,10 @@ async def razorpay_webhook(
         raise HTTPException(status_code=400, detail="Malformed webhook payload")
 
     await PaymentService(db).handle_webhook(
+        event=payload_data.event,
+        payload=payload_data.payload,
+    )
+    await PayoutService(db).handle_payout_webhook(
         event=payload_data.event,
         payload=payload_data.payload,
     )

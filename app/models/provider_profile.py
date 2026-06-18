@@ -33,6 +33,11 @@ class ProviderProfile(Base):
     pan_encrypted: Mapped[str | None] = mapped_column(String(512))
     upi_id_encrypted: Mapped[str | None] = mapped_column(String(512))
     bank_account_encrypted: Mapped[str | None] = mapped_column(String(1024))
+    # Payout destination (separate from KYC UPI/bank above). Used to pay providers
+    # via RazorpayX; AES-256 encrypted like other PII.
+    payout_vpa_encrypted: Mapped[str | None] = mapped_column(String(512))
+    payout_account_number_encrypted: Mapped[str | None] = mapped_column(String(1024))
+    payout_ifsc_encrypted: Mapped[str | None] = mapped_column(String(512))
     profile_photo_url: Mapped[str | None] = mapped_column(String(512))
 
     # PostGIS geography column for location-based queries
