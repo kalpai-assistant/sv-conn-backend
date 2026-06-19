@@ -165,6 +165,17 @@ class ProviderService:
         await self.db.delete(sub)
         await self.db.flush()
 
+    async def list_subscriptions(
+        self, provider_user_id: uuid.UUID
+    ) -> list[ProviderServiceModel]:
+        """Return the provider's current service subscriptions."""
+        result = await self.db.execute(
+            select(ProviderServiceModel).where(
+                ProviderServiceModel.provider_id == provider_user_id
+            )
+        )
+        return list(result.scalars().all())
+
     # ------------------------------------------------------------------
     # Rating update (called by review_service after new review)
     # ------------------------------------------------------------------

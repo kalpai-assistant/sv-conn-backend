@@ -64,6 +64,18 @@ async def find_nearby_providers(
     return [NearbyProviderResponse(**row) for row in rows]
 
 
+@router.get(
+    "/me/services",
+    response_model=list[ProviderServiceSubscriptionResponse],
+)
+async def list_my_services(
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """List the services the current provider is subscribed to."""
+    return await ProviderService(db).list_subscriptions(current_user.id)
+
+
 @router.post(
     "/me/services",
     status_code=status.HTTP_201_CREATED,
