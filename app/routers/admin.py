@@ -103,9 +103,17 @@ async def list_all_bookings(
 # Provider payouts
 # ---------------------------------------------------------------------------
 
-@router.post("/providers/{user_id}/payout", status_code=status.HTTP_200_OK, dependencies=[_admin_dep])
-async def pay_out_provider(user_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Settle a provider's completed-but-unsettled bookings via a RazorpayX payout."""
-    result = await PayoutService(db).create_provider_payout(user_id)
-    await db.commit()
-    return result
+@router.post("/providers/{user_id}/payout", status_code=status.HTTP_200_OK)
+async def pay_out_provider(
+    user_id: UUID,
+    admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Settle a provider's completed-but-unsettled bookings via a RazorpayX payout.
+
+    The triggering admin is injected (not just role-checked) so the payout can be
+    written to the audit trail. The transaction is committed by ``get_db`` on a
+    clean response, so the payout's booking writes and the commit are owned in one
+    place rather than committed here.
+    """
+    return await PayoutService(db).create_provider_payout(user_id, admin.id)
