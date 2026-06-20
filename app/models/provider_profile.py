@@ -1,17 +1,18 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import String, Boolean, Integer, Float, ForeignKey, Enum, Index
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import String, Boolean, Integer, Float, ForeignKey, Enum, Index, DateTime
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from geoalchemy2 import Geography
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 
 class KYCStatus(str, enum.Enum):
-    PENDING = "pending"
-    VERIFIED = "verified"
-    REJECTED = "rejected"
+    PENDING = "pending"      # No docs uploaded yet
+    SUBMITTED = "submitted"  # Docs uploaded, awaiting admin review
+    VERIFIED = "verified"    # Admin approved — provider can subscribe + earn
+    REJECTED = "rejected"    # Admin rejected — see kyc_rejection_reason
 
 
 class ProviderProfile(Base):
@@ -47,6 +48,14 @@ class ProviderProfile(Base):
     kyc_status: Mapped[KYCStatus] = mapped_column(
         Enum(KYCStatus), default=KYCStatus.PENDING
     )
+    # KYC document storage. JSONB lets us add fields (e.g. video selfie, address proof)
+    # without a new migration. Only S3 keys are stored — never raw bytes, never public
+    # URLs. Read access goes through a presigned URL endpoint admin-only.
+    kyc_docs: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    kyc_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    kyc_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    kyc_rejection_reason: Mapped[str | None] = mapped_column(String(500))
+
     is_online: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Relationships

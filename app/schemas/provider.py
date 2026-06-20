@@ -1,3 +1,4 @@
+from datetime import datetime
 from pydantic import BaseModel, Field
 from uuid import UUID
 from app.models.provider_profile import KYCStatus
@@ -53,5 +54,29 @@ class ProviderServiceSubscriptionResponse(BaseModel):
     id: UUID
     provider_id: UUID
     service_id: UUID
+
+    model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# KYC
+# ---------------------------------------------------------------------------
+
+
+class KYCSubmissionResponse(BaseModel):
+    kyc_status: KYCStatus
+    kyc_submitted_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class KYCRejectionRequest(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
+class KYCReviewResponse(BaseModel):
+    kyc_status: KYCStatus
+    kyc_reviewed_at: datetime | None
+    kyc_rejection_reason: str | None
 
     model_config = {"from_attributes": True}
