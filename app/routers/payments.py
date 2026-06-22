@@ -12,6 +12,7 @@ from app.schemas.payment import (
     VerifyPaymentRequest, RazorpayWebhookPayload,
 )
 from app.services.payment_service import PaymentService
+from app.services.payout_service import PayoutService
 from app.tasks.notification_tasks import send_booking_notification
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -41,21 +42,20 @@ async def verify_payment(
     return {"message": "Payment verified", "payment_id": str(payment.id)}
 
 
-@router.post("/webhook", status_code=status.HTTP_200_OK)
-async def razorpay_webhook(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
+async def _verify_and_parse(request: Request, secret: str) -> RazorpayWebhookPayload:
     """
-    Fix #7: Verify Razorpay webhook HMAC-SHA256 signature before processing.
-    Razorpay sends X-Razorpay-Signature header = HMAC(raw_body, webhook_secret).
+    Verify a Razorpay webhook's HMAC-SHA256 signature and parse its body.
+
+    Razorpay sends X-Razorpay-Signature = HMAC(raw_body, webhook_secret). The
+    payments and payouts (RazorpayX) products each have their own secret, so the
+    caller passes the secret for the product that owns the endpoint.
     """
     raw_body = await request.body()
     sig_header = request.headers.get("X-Razorpay-Signature", "")
 
-    if settings.RAZORPAY_WEBHOOK_SECRET:
+    if secret:
         expected = hmac.new(
-            key=settings.RAZORPAY_WEBHOOK_SECRET.encode(),
+            key=secret.encode(),
             msg=raw_body,
             digestmod=hashlib.sha256,
         ).hexdigest()
@@ -67,11 +67,39 @@ async def razorpay_webhook(
 
     try:
         import json
-        payload_data = RazorpayWebhookPayload.model_validate(json.loads(raw_body))
+        return RazorpayWebhookPayload.model_validate(json.loads(raw_body))
     except Exception:
         raise HTTPException(status_code=400, detail="Malformed webhook payload")
 
+
+@router.post("/webhook", status_code=status.HTTP_200_OK)
+async def razorpay_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Razorpay Payments webhook — verified against RAZORPAY_WEBHOOK_SECRET."""
+    payload_data = await _verify_and_parse(request, settings.RAZORPAY_WEBHOOK_SECRET)
     await PaymentService(db).handle_webhook(
+        event=payload_data.event,
+        payload=payload_data.payload,
+    )
+    return {"status": "ok"}
+
+
+@router.post("/payout-webhook", status_code=status.HTTP_200_OK)
+async def razorpayx_payout_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    RazorpayX (payouts) webhook — verified against RAZORPAYX_WEBHOOK_SECRET.
+
+    RazorpayX is a separate Razorpay product with its own webhook secret, so its
+    payout.processed / payout.failed events must arrive on a dedicated endpoint
+    rather than the Payments webhook (which validates a different secret).
+    """
+    payload_data = await _verify_and_parse(request, settings.RAZORPAYX_WEBHOOK_SECRET)
+    await PayoutService(db).handle_payout_webhook(
         event=payload_data.event,
         payload=payload_data.payload,
     )

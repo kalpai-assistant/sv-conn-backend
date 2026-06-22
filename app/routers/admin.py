@@ -14,6 +14,7 @@ from app.models.booking import Booking, BookingStatus
 from app.models.provider_profile import ProviderProfile, KYCStatus
 from app.schemas.user import UserResponse
 from app.schemas.booking import BookingResponse, BookingListResponse
+from app.services.payout_service import PayoutService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -96,3 +97,23 @@ async def list_all_bookings(
         page=page,
         per_page=per_page,
     )
+
+
+# ---------------------------------------------------------------------------
+# Provider payouts
+# ---------------------------------------------------------------------------
+
+@router.post("/providers/{user_id}/payout", status_code=status.HTTP_200_OK)
+async def pay_out_provider(
+    user_id: UUID,
+    admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Settle a provider's completed-but-unsettled bookings via a RazorpayX payout.
+
+    The triggering admin is injected (not just role-checked) so the payout can be
+    written to the audit trail. The transaction is committed by ``get_db`` on a
+    clean response, so the payout's booking writes and the commit are owned in one
+    place rather than committed here.
+    """
+    return await PayoutService(db).create_provider_payout(user_id, admin.id)

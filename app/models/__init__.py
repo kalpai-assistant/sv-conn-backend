@@ -19,3 +19,4 @@ from app.models.booking import (  # noqa: F401
 from app.models.booking_status_log import BookingStatusLog  # noqa: F401
 from app.models.review import Review  # noqa: F401
 from app.models.payment import Payment  # noqa: F401
+from app.models.payout_audit import PayoutAudit  # noqa: F401

@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_SECRET: str = ""
     RAZORPAY_WEBHOOK_SECRET: str = ""  # Set in Razorpay dashboard → Webhooks
     PLATFORM_COMMISSION_PERCENT: float = 20.0
+    # RazorpayX virtual account that funds provider payouts. Blank until RazorpayX
+    # is activated; payout creation requires it.
+    RAZORPAYX_ACCOUNT_NUMBER: str = ""
+    # RazorpayX (payouts) is a separate product with its own webhook secret,
+    # configured in the RazorpayX dashboard independently of the Payments webhook.
+    RAZORPAYX_WEBHOOK_SECRET: str = ""
 
     # Firebase
     FCM_CREDENTIALS_PATH: str = ""
