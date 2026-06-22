@@ -213,3 +213,33 @@ async def test_list_my_services_empty(client, auth_headers, db_session):
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+@pytest.mark.asyncio
+async def test_list_my_services_isolated_per_provider(client, auth_headers, db_session):
+    """Provider B must NOT see provider A's subscriptions.
+
+    Guards the privacy invariant of the endpoint: dropping the
+    `WHERE provider_id =` filter in list_subscriptions would leak every
+    provider's subscriptions to everyone, and this test would catch it.
+    """
+    provider_a, _ = await _seed_provider(db_session, kyc_status=KYCStatus.VERIFIED)
+    provider_b, _ = await _seed_provider(db_session, kyc_status=KYCStatus.VERIFIED)
+
+    a_service = await _seed_service(db_session)
+    b_service = await _seed_service(db_session)
+    db_session.add_all([
+        ProviderServiceModel(provider_id=provider_a.id, service_id=a_service.id),
+        ProviderServiceModel(provider_id=provider_b.id, service_id=b_service.id),
+    ])
+    await db_session.flush()
+
+    response = await client.get(
+        "/api/v1/providers/me/services",
+        headers=auth_headers(str(provider_b.id), "provider"),
+    )
+
+    assert response.status_code == 200
+    returned = {row["service_id"] for row in response.json()}
+    assert returned == {str(b_service.id)}
+    assert str(a_service.id) not in returned
