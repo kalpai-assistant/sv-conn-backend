@@ -2,7 +2,7 @@ import uuid
 import enum
 from datetime import datetime
 from sqlalchemy import String, Boolean, Integer, Float, ForeignKey, Enum, Index, DateTime
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from geoalchemy2 import Geography
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -35,6 +35,11 @@ class ProviderProfile(Base):
     upi_id_encrypted: Mapped[str | None] = mapped_column(String(512))
     bank_account_encrypted: Mapped[str | None] = mapped_column(String(1024))
     profile_photo_url: Mapped[str | None] = mapped_column(String(512))
+    # Languages the provider speaks (e.g. ["Hindi", "English"]). text[] so we can
+    # filter discovery by language (`'Hindi' = ANY(languages)`); defaults to empty.
+    languages: Mapped[list[str]] = mapped_column(
+        ARRAY(String), nullable=False, default=list, server_default="{}"
+    )
 
     # PostGIS geography column for location-based queries
     service_area_center = mapped_column(

@@ -1,0 +1,3362 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ServiceConnect",
+    "description": "On-demand home services marketplace API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/auth/send-otp": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Send Otp",
+        "operationId": "send_otp_api_v1_auth_send_otp_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendOTPRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/verify-otp": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Verify Otp",
+        "operationId": "verify_otp_api_v1_auth_verify_otp_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyOTPRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/refresh": {
+      "post": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Refresh Token",
+        "operationId": "refresh_token_api_v1_auth_refresh_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/users/me": {
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Get Me",
+        "operationId": "get_me_api_v1_users_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Update Me",
+        "operationId": "update_me_api_v1_users_me_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/me/fcm-token": {
+      "patch": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Update Fcm Token",
+        "operationId": "update_fcm_token_api_v1_users_me_fcm_token_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateFCMTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/me/addresses": {
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "List Addresses",
+        "operationId": "list_addresses_api_v1_users_me_addresses_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AddressResponse"
+                  },
+                  "type": "array",
+                  "title": "Response List Addresses Api V1 Users Me Addresses Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Add Address",
+        "operationId": "add_address_api_v1_users_me_addresses_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAddressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddressResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/me/addresses/{address_id}": {
+      "delete": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Delete Address",
+        "operationId": "delete_address_api_v1_users_me_addresses__address_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "address_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Address Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/providers/me": {
+      "get": {
+        "tags": [
+          "Providers"
+        ],
+        "summary": "Get Provider Profile",
+        "operationId": "get_provider_profile_api_v1_providers_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Providers"
+        ],
+        "summary": "Update Provider Profile",
+        "operationId": "update_provider_profile_api_v1_providers_me_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderProfileUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/me/photo": {
+      "post": {
+        "tags": [
+          "Providers"
+        ],
+        "summary": "Upload Profile Photo",
+        "description": "Upload/replace the provider's profile photo. Returns the updated profile.",
+        "operationId": "upload_profile_photo_api_v1_providers_me_photo_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_profile_photo_api_v1_providers_me_photo_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/me/status": {
+      "patch": {
+        "tags": [
+          "Providers"
+        ],
+        "summary": "Set Online Status",
+        "operationId": "set_online_status_api_v1_providers_me_status_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderStatusUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/nearby": {
+      "get": {
+        "tags": [
+          "Providers"
+        ],
+        "summary": "Find Nearby Providers",
+        "operationId": "find_nearby_providers_api_v1_providers_nearby_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "lat",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "description": "Consumer latitude",
+              "title": "Lat"
+            },
+            "description": "Consumer latitude"
+          },
+          {
+            "name": "lng",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "description": "Consumer longitude",
+              "title": "Lng"
+            },
+            "description": "Consumer longitude"
+          },
+          {
+            "name": "radius_km",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "maximum": 50.0,
+              "minimum": 1.0,
+              "default": 10.0,
+              "title": "Radius Km"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NearbyProviderResponse"
+                  },
+                  "title": "Response Find Nearby Providers Api V1 Providers Nearby Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/providers/me/services": {
+      "get": {
+        "tags": [
+          "Providers"
+        ],
+        "summary": "List My Services",
+        "description": "List the services the current provider is subscribed to.",
+        "operationId": "list_my_services_api_v1_providers_me_services_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderServiceSubscriptionResponse"
+                  },
+                  "type": "array",
+                  "title": "Response List My Services Api V1 Providers Me Services Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Providers"
+        ],
+        "summary": "Subscribe To Service",
+        "operationId": "subscribe_to_service_api_v1_providers_me_services_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderServiceSubscribeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderServiceSubscriptionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/me/services/{service_id}": {
+      "delete": {
+        "tags": [
+          "Providers"
+        ],
+        "summary": "Unsubscribe From Service",
+        "operationId": "unsubscribe_from_service_api_v1_providers_me_services__service_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/providers/me/kyc": {
+      "post": {
+        "tags": [
+          "Providers"
+        ],
+        "summary": "Submit Kyc",
+        "description": "Upload KYC documents. Sets the profile's kyc_status to SUBMITTED.",
+        "operationId": "submit_kyc_api_v1_providers_me_kyc_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_submit_kyc_api_v1_providers_me_kyc_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KYCSubmissionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/categories": {
+      "get": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "List Categories",
+        "operationId": "list_categories_api_v1_categories_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CategoryResponse"
+                  },
+                  "type": "array",
+                  "title": "Response List Categories Api V1 Categories Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/services": {
+      "get": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "List Services",
+        "description": "List global catalog services, optionally filtered by category.",
+        "operationId": "list_services_api_v1_services_get",
+        "parameters": [
+          {
+            "name": "category_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ServiceResponse"
+                  },
+                  "title": "Response List Services Api V1 Services Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Create Service",
+        "description": "Admin-only: add a service to the global catalog.",
+        "operationId": "create_service_api_v1_services_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateServiceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/services/{service_id}": {
+      "patch": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Update Service",
+        "description": "Admin-only: update a catalog service.",
+        "operationId": "update_service_api_v1_services__service_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateServiceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Delete Service",
+        "description": "Admin-only: soft-delete a catalog service.",
+        "operationId": "delete_service_api_v1_services__service_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/bookings/": {
+      "post": {
+        "tags": [
+          "Bookings"
+        ],
+        "summary": "Create Booking",
+        "operationId": "create_booking_api_v1_bookings__post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBookingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Bookings"
+        ],
+        "summary": "List Bookings",
+        "operationId": "list_bookings_api_v1_bookings__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 50,
+              "minimum": 1,
+              "default": 20,
+              "title": "Per Page"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/bookings/{booking_id}/accept": {
+      "patch": {
+        "tags": [
+          "Bookings"
+        ],
+        "summary": "Accept Booking",
+        "operationId": "accept_booking_api_v1_bookings__booking_id__accept_patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "booking_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Booking Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/bookings/{booking_id}/en-route": {
+      "patch": {
+        "tags": [
+          "Bookings"
+        ],
+        "summary": "Mark En Route",
+        "operationId": "mark_en_route_api_v1_bookings__booking_id__en_route_patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "booking_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Booking Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/bookings/{booking_id}/start": {
+      "patch": {
+        "tags": [
+          "Bookings"
+        ],
+        "summary": "Start Booking",
+        "description": "Provider verifies doorstep OTP to start the service.",
+        "operationId": "start_booking_api_v1_bookings__booking_id__start_patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "booking_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Booking Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartBookingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/bookings/{booking_id}/complete": {
+      "patch": {
+        "tags": [
+          "Bookings"
+        ],
+        "summary": "Complete Booking",
+        "operationId": "complete_booking_api_v1_bookings__booking_id__complete_patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "booking_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Booking Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/bookings/{booking_id}/cancel": {
+      "patch": {
+        "tags": [
+          "Bookings"
+        ],
+        "summary": "Cancel Booking",
+        "operationId": "cancel_booking_api_v1_bookings__booking_id__cancel_patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "booking_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Booking Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelBookingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/bookings/{booking_id}": {
+      "get": {
+        "tags": [
+          "Bookings"
+        ],
+        "summary": "Get Booking",
+        "description": "Fetch a single booking by ID. Only consumer or assigned provider may access.",
+        "operationId": "get_booking_api_v1_bookings__booking_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "booking_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Booking Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/payments/orders": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Create Payment Order",
+        "operationId": "create_payment_order_api_v1_payments_orders_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePaymentOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentOrderResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/payments/verify": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Verify Payment",
+        "operationId": "verify_payment_api_v1_payments_verify_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyPaymentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/payments/webhook": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Razorpay Webhook",
+        "description": "Fix #7: Verify Razorpay webhook HMAC-SHA256 signature before processing.\nRazorpay sends X-Razorpay-Signature header = HMAC(raw_body, webhook_secret).",
+        "operationId": "razorpay_webhook_api_v1_payments_webhook_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/reviews/": {
+      "post": {
+        "tags": [
+          "Reviews"
+        ],
+        "summary": "Create Review",
+        "operationId": "create_review_api_v1_reviews__post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/reviews/provider/{provider_id}": {
+      "get": {
+        "tags": [
+          "Reviews"
+        ],
+        "summary": "List Provider Reviews",
+        "operationId": "list_provider_reviews_api_v1_reviews_provider__provider_id__get",
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Provider Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 50,
+              "minimum": 1,
+              "default": 20,
+              "title": "Per Page"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/users": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List Users",
+        "operationId": "list_users_api_v1_admin_users_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Per Page"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserResponse"
+                  },
+                  "title": "Response List Users Api V1 Admin Users Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/users/{user_id}/deactivate": {
+      "patch": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Deactivate User",
+        "operationId": "deactivate_user_api_v1_admin_users__user_id__deactivate_patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/providers/kyc/pending": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List Pending Kyc",
+        "description": "List providers whose KYC is awaiting admin review.",
+        "operationId": "list_pending_kyc_api_v1_admin_providers_kyc_pending_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Per Page"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserResponse"
+                  },
+                  "title": "Response List Pending Kyc Api V1 Admin Providers Kyc Pending Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/providers/{user_id}/kyc/verify": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Verify Provider Kyc",
+        "operationId": "verify_provider_kyc_api_v1_admin_providers__user_id__kyc_verify_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KYCReviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/providers/{user_id}/kyc/reject": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Reject Provider Kyc",
+        "operationId": "reject_provider_kyc_api_v1_admin_providers__user_id__kyc_reject_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KYCRejectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KYCReviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/bookings": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List All Bookings",
+        "operationId": "list_all_bookings_api_v1_admin_bookings_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Per Page"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AddressResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "full_address": {
+            "type": "string",
+            "title": "Full Address"
+          },
+          "is_default": {
+            "type": "boolean",
+            "title": "Is Default"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "full_address",
+          "is_default"
+        ],
+        "title": "AddressResponse"
+      },
+      "Body_submit_kyc_api_v1_providers_me_kyc_post": {
+        "properties": {
+          "aadhaar": {
+            "type": "string",
+            "format": "binary",
+            "title": "Aadhaar",
+            "description": "Aadhaar document image"
+          },
+          "selfie": {
+            "type": "string",
+            "format": "binary",
+            "title": "Selfie",
+            "description": "Live selfie"
+          }
+        },
+        "type": "object",
+        "required": [
+          "aadhaar",
+          "selfie"
+        ],
+        "title": "Body_submit_kyc_api_v1_providers_me_kyc_post"
+      },
+      "Body_upload_profile_photo_api_v1_providers_me_photo_post": {
+        "properties": {
+          "photo": {
+            "type": "string",
+            "format": "binary",
+            "title": "Photo",
+            "description": "Provider profile photo"
+          }
+        },
+        "type": "object",
+        "required": [
+          "photo"
+        ],
+        "title": "Body_upload_profile_photo_api_v1_providers_me_photo_post"
+      },
+      "BookingListResponse": {
+        "properties": {
+          "bookings": {
+            "items": {
+              "$ref": "#/components/schemas/BookingResponse"
+            },
+            "type": "array",
+            "title": "Bookings"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bookings",
+          "total",
+          "page",
+          "per_page"
+        ],
+        "title": "BookingListResponse"
+      },
+      "BookingResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "consumer_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Consumer Id"
+          },
+          "provider_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Id"
+          },
+          "service_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Service Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "service_amount": {
+            "type": "number",
+            "title": "Service Amount"
+          },
+          "platform_commission": {
+            "type": "number",
+            "title": "Platform Commission"
+          },
+          "provider_payout": {
+            "type": "number",
+            "title": "Provider Payout"
+          },
+          "payment_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payment Method"
+          },
+          "payment_status": {
+            "type": "string",
+            "title": "Payment Status"
+          },
+          "doorstep_otp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doorstep Otp"
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduled At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "consumer_id",
+          "provider_id",
+          "service_id",
+          "status",
+          "service_amount",
+          "platform_commission",
+          "provider_payout",
+          "payment_method",
+          "payment_status",
+          "scheduled_at",
+          "created_at"
+        ],
+        "title": "BookingResponse"
+      },
+      "CancelBookingRequest": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 5,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "CancelBookingRequest"
+      },
+      "CategoryResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "icon_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon Url"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "sort_order": {
+            "type": "integer",
+            "title": "Sort Order"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "icon_url",
+          "description",
+          "sort_order"
+        ],
+        "title": "CategoryResponse"
+      },
+      "CreateAddressRequest": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "pattern": "^(home|work|other)$",
+            "title": "Label",
+            "default": "home"
+          },
+          "full_address": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 5,
+            "title": "Full Address"
+          },
+          "lat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lat"
+          },
+          "lng": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lng"
+          },
+          "is_default": {
+            "type": "boolean",
+            "title": "Is Default",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "full_address"
+        ],
+        "title": "CreateAddressRequest"
+      },
+      "CreateBookingRequest": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Service Id"
+          },
+          "address_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Address Id"
+          },
+          "scheduled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduled At"
+          },
+          "payment_method": {
+            "type": "string",
+            "pattern": "^(cash|online)$",
+            "title": "Payment Method",
+            "default": "online"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service_id",
+          "address_id"
+        ],
+        "title": "CreateBookingRequest"
+      },
+      "CreatePaymentOrderRequest": {
+        "properties": {
+          "booking_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Booking Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "booking_id"
+        ],
+        "title": "CreatePaymentOrderRequest"
+      },
+      "CreateReviewRequest": {
+        "properties": {
+          "booking_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Booking Id"
+          },
+          "rating": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Rating"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          }
+        },
+        "type": "object",
+        "required": [
+          "booking_id",
+          "rating"
+        ],
+        "title": "CreateReviewRequest"
+      },
+      "CreateServiceRequest": {
+        "properties": {
+          "category_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Category Id"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 3,
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "base_price": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Base Price"
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "maximum": 480.0,
+            "minimum": 15.0,
+            "title": "Duration Minutes",
+            "default": 60
+          }
+        },
+        "type": "object",
+        "required": [
+          "category_id",
+          "name",
+          "base_price"
+        ],
+        "title": "CreateServiceRequest"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "KYCRejectionRequest": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "KYCRejectionRequest"
+      },
+      "KYCReviewResponse": {
+        "properties": {
+          "kyc_status": {
+            "$ref": "#/components/schemas/KYCStatus"
+          },
+          "kyc_reviewed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kyc Reviewed At"
+          },
+          "kyc_rejection_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kyc Rejection Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kyc_status",
+          "kyc_reviewed_at",
+          "kyc_rejection_reason"
+        ],
+        "title": "KYCReviewResponse"
+      },
+      "KYCStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "submitted",
+          "verified",
+          "rejected"
+        ],
+        "title": "KYCStatus"
+      },
+      "KYCSubmissionResponse": {
+        "properties": {
+          "kyc_status": {
+            "$ref": "#/components/schemas/KYCStatus"
+          },
+          "kyc_submitted_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kyc Submitted At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kyc_status",
+          "kyc_submitted_at"
+        ],
+        "title": "KYCSubmissionResponse"
+      },
+      "NearbyProviderResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "User Id"
+          },
+          "avg_rating": {
+            "type": "number",
+            "title": "Avg Rating"
+          },
+          "total_completed_jobs": {
+            "type": "integer",
+            "title": "Total Completed Jobs"
+          },
+          "is_online": {
+            "type": "boolean",
+            "title": "Is Online"
+          },
+          "distance_km": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Distance Km"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "avg_rating",
+          "total_completed_jobs",
+          "is_online"
+        ],
+        "title": "NearbyProviderResponse",
+        "description": "Slim response for the 'nearby providers' discovery endpoint."
+      },
+      "PaymentOrderResponse": {
+        "properties": {
+          "razorpay_order_id": {
+            "type": "string",
+            "title": "Razorpay Order Id"
+          },
+          "amount": {
+            "type": "integer",
+            "title": "Amount"
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "default": "INR"
+          },
+          "razorpay_key_id": {
+            "type": "string",
+            "title": "Razorpay Key Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "razorpay_order_id",
+          "amount",
+          "razorpay_key_id"
+        ],
+        "title": "PaymentOrderResponse"
+      },
+      "ProviderProfileUpdate": {
+        "properties": {
+          "aadhaar": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 12,
+                "minLength": 12
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aadhaar"
+          },
+          "pan": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 10,
+                "minLength": 10
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pan"
+          },
+          "upi_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upi Id"
+          },
+          "bank_account": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bank Account"
+          },
+          "service_area_lat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Area Lat"
+          },
+          "service_area_lng": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Area Lng"
+          },
+          "service_area_radius_km": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 100.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Area Radius Km"
+          },
+          "languages": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 20
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Languages"
+          }
+        },
+        "type": "object",
+        "title": "ProviderProfileUpdate",
+        "description": "Fields a provider can update on their own profile."
+      },
+      "ProviderResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "User Id"
+          },
+          "profile_photo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Photo Url"
+          },
+          "languages": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Languages",
+            "default": []
+          },
+          "avg_rating": {
+            "type": "number",
+            "title": "Avg Rating"
+          },
+          "total_completed_jobs": {
+            "type": "integer",
+            "title": "Total Completed Jobs"
+          },
+          "kyc_status": {
+            "$ref": "#/components/schemas/KYCStatus"
+          },
+          "is_online": {
+            "type": "boolean",
+            "title": "Is Online"
+          },
+          "service_area_radius_km": {
+            "type": "integer",
+            "title": "Service Area Radius Km"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "profile_photo_url",
+          "avg_rating",
+          "total_completed_jobs",
+          "kyc_status",
+          "is_online",
+          "service_area_radius_km"
+        ],
+        "title": "ProviderResponse"
+      },
+      "ProviderServiceSubscribeRequest": {
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Service Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service_id"
+        ],
+        "title": "ProviderServiceSubscribeRequest"
+      },
+      "ProviderServiceSubscriptionResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "provider_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Provider Id"
+          },
+          "service_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Service Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "provider_id",
+          "service_id"
+        ],
+        "title": "ProviderServiceSubscriptionResponse"
+      },
+      "ProviderStatusUpdate": {
+        "properties": {
+          "is_online": {
+            "type": "boolean",
+            "title": "Is Online"
+          }
+        },
+        "type": "object",
+        "required": [
+          "is_online"
+        ],
+        "title": "ProviderStatusUpdate"
+      },
+      "RefreshTokenRequest": {
+        "properties": {
+          "refresh_token": {
+            "type": "string",
+            "title": "Refresh Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "refresh_token"
+        ],
+        "title": "RefreshTokenRequest"
+      },
+      "ReviewListResponse": {
+        "properties": {
+          "reviews": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewResponse"
+            },
+            "type": "array",
+            "title": "Reviews"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "per_page": {
+            "type": "integer",
+            "title": "Per Page"
+          },
+          "avg_rating": {
+            "type": "number",
+            "title": "Avg Rating"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reviews",
+          "total",
+          "page",
+          "per_page",
+          "avg_rating"
+        ],
+        "title": "ReviewListResponse"
+      },
+      "ReviewResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "booking_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Booking Id"
+          },
+          "reviewer_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Reviewer Id"
+          },
+          "reviewee_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Reviewee Id"
+          },
+          "rating": {
+            "type": "integer",
+            "title": "Rating"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "booking_id",
+          "reviewer_id",
+          "reviewee_id",
+          "rating",
+          "comment",
+          "created_at"
+        ],
+        "title": "ReviewResponse"
+      },
+      "SendOTPRequest": {
+        "properties": {
+          "phone": {
+            "type": "string",
+            "pattern": "^\\+91[6-9]\\d{9}$",
+            "title": "Phone",
+            "description": "Indian phone number with +91 prefix"
+          }
+        },
+        "type": "object",
+        "required": [
+          "phone"
+        ],
+        "title": "SendOTPRequest"
+      },
+      "ServiceResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "category_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Category Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "base_price": {
+            "type": "number",
+            "title": "Base Price"
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "title": "Duration Minutes"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "category_id",
+          "name",
+          "description",
+          "base_price",
+          "duration_minutes",
+          "is_active",
+          "created_at"
+        ],
+        "title": "ServiceResponse"
+      },
+      "StartBookingRequest": {
+        "properties": {
+          "otp": {
+            "type": "string",
+            "maxLength": 4,
+            "minLength": 4,
+            "title": "Otp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "otp"
+        ],
+        "title": "StartBookingRequest"
+      },
+      "TokenResponse": {
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "title": "Access Token"
+          },
+          "refresh_token": {
+            "type": "string",
+            "title": "Refresh Token"
+          },
+          "token_type": {
+            "type": "string",
+            "title": "Token Type",
+            "default": "bearer"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "role": {
+            "type": "string",
+            "title": "Role"
+          },
+          "is_new_user": {
+            "type": "boolean",
+            "title": "Is New User"
+          }
+        },
+        "type": "object",
+        "required": [
+          "access_token",
+          "refresh_token",
+          "user_id",
+          "role",
+          "is_new_user"
+        ],
+        "title": "TokenResponse"
+      },
+      "UpdateFCMTokenRequest": {
+        "properties": {
+          "fcm_token": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Fcm Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "fcm_token"
+        ],
+        "title": "UpdateFCMTokenRequest"
+      },
+      "UpdateProfileRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          }
+        },
+        "type": "object",
+        "title": "UpdateProfileRequest"
+      },
+      "UpdateServiceRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 3
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "base_price": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Price"
+          },
+          "duration_minutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 480.0,
+                "minimum": 15.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Minutes"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active"
+          }
+        },
+        "type": "object",
+        "title": "UpdateServiceRequest"
+      },
+      "UserResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "phone": {
+            "type": "string",
+            "title": "Phone"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "role": {
+            "$ref": "#/components/schemas/UserRole"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "phone",
+          "name",
+          "email",
+          "role",
+          "is_active",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "UserResponse"
+      },
+      "UserRole": {
+        "type": "string",
+        "enum": [
+          "consumer",
+          "provider",
+          "admin"
+        ],
+        "title": "UserRole"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "VerifyOTPRequest": {
+        "properties": {
+          "phone": {
+            "type": "string",
+            "pattern": "^\\+91[6-9]\\d{9}$",
+            "title": "Phone"
+          },
+          "otp": {
+            "type": "string",
+            "maxLength": 6,
+            "minLength": 6,
+            "title": "Otp"
+          },
+          "role": {
+            "type": "string",
+            "pattern": "^(consumer|provider)$",
+            "title": "Role",
+            "default": "consumer"
+          }
+        },
+        "type": "object",
+        "required": [
+          "phone",
+          "otp"
+        ],
+        "title": "VerifyOTPRequest"
+      },
+      "VerifyPaymentRequest": {
+        "properties": {
+          "razorpay_order_id": {
+            "type": "string",
+            "title": "Razorpay Order Id"
+          },
+          "razorpay_payment_id": {
+            "type": "string",
+            "title": "Razorpay Payment Id"
+          },
+          "razorpay_signature": {
+            "type": "string",
+            "title": "Razorpay Signature"
+          }
+        },
+        "type": "object",
+        "required": [
+          "razorpay_order_id",
+          "razorpay_payment_id",
+          "razorpay_signature"
+        ],
+        "title": "VerifyPaymentRequest"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}
