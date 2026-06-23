@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -10,10 +10,44 @@ from app.schemas.provider import (
     ProviderProfileUpdate, ProviderStatusUpdate,
     ProviderResponse, NearbyProviderResponse,
     ProviderServiceSubscribeRequest, ProviderServiceSubscriptionResponse,
+    KYCSubmissionResponse,
 )
 from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/providers", tags=["Providers"])
+
+# Limits for KYC document uploads. Aadhaar/selfie JPEGs are typically <2MB;
+# 5MB leaves room for unoptimised camera output. content-type whitelist is the
+# real safety net — without it the bucket fills with PDFs and HEIC files we
+# can't render in the admin UI.
+_KYC_MAX_BYTES = 5 * 1024 * 1024
+_KYC_ALLOWED_CONTENT_TYPES = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/heic": "heic",
+    "image/webp": "webp",
+}
+
+
+async def _read_kyc_upload(upload: UploadFile, field_name: str) -> tuple[bytes, str, str]:
+    """Validate + read a KYC upload. Returns (bytes, content_type, ext)."""
+    if upload.content_type not in _KYC_ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"{field_name}: unsupported file type {upload.content_type!r}",
+        )
+    data = await upload.read()
+    if len(data) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name}: empty file",
+        )
+    if len(data) > _KYC_MAX_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"{field_name}: file exceeds {_KYC_MAX_BYTES // (1024 * 1024)} MB limit",
+        )
+    return data, upload.content_type, _KYC_ALLOWED_CONTENT_TYPES[upload.content_type]
 
 
 @router.get("/me", response_model=ProviderResponse)
@@ -101,3 +135,35 @@ async def unsubscribe_from_service(
     db: AsyncSession = Depends(get_db),
 ):
     await ProviderService(db).unsubscribe_from_service(current_user.id, service_id)
+
+
+# ---------------------------------------------------------------------------
+# KYC submission (SC-31)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/me/kyc",
+    status_code=status.HTTP_201_CREATED,
+    response_model=KYCSubmissionResponse,
+)
+async def submit_kyc(
+    aadhaar: UploadFile = File(..., description="Aadhaar document image"),
+    selfie: UploadFile = File(..., description="Live selfie"),
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload KYC documents. Sets the profile's kyc_status to SUBMITTED."""
+    aadhaar_bytes, aadhaar_ct, aadhaar_ext = await _read_kyc_upload(aadhaar, "aadhaar")
+    selfie_bytes, selfie_ct, selfie_ext = await _read_kyc_upload(selfie, "selfie")
+
+    profile = await ProviderService(db).submit_kyc(
+        user_id=current_user.id,
+        aadhaar_bytes=aadhaar_bytes,
+        aadhaar_content_type=aadhaar_ct,
+        aadhaar_ext=aadhaar_ext,
+        selfie_bytes=selfie_bytes,
+        selfie_content_type=selfie_ct,
+        selfie_ext=selfie_ext,
+    )
+    return profile

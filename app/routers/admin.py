@@ -14,6 +14,8 @@ from app.models.booking import Booking, BookingStatus
 from app.models.provider_profile import ProviderProfile, KYCStatus
 from app.schemas.user import UserResponse
 from app.schemas.booking import BookingResponse, BookingListResponse
+from app.schemas.provider import KYCRejectionRequest, KYCReviewResponse
+from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -44,23 +46,53 @@ async def deactivate_user(user_id: UUID, db: AsyncSession = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
-# Provider KYC
+# Provider KYC (SC-31)
 # ---------------------------------------------------------------------------
 
-@router.patch("/providers/{user_id}/kyc", status_code=status.HTTP_200_OK, dependencies=[_admin_dep])
-async def update_kyc_status(
-    user_id: UUID,
-    kyc_status: KYCStatus,
+
+@router.get("/providers/kyc/pending", response_model=list[UserResponse], dependencies=[_admin_dep])
+async def list_pending_kyc(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(ProviderProfile).where(ProviderProfile.user_id == user_id)
+    """List providers whose KYC is awaiting admin review."""
+    stmt = (
+        select(User)
+        .join(ProviderProfile, ProviderProfile.user_id == User.id)
+        .where(ProviderProfile.kyc_status == KYCStatus.SUBMITTED)
+        .order_by(ProviderProfile.kyc_submitted_at.asc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
     )
-    profile = result.scalar_one_or_none()
-    if profile:
-        profile.kyc_status = kyc_status
-        await db.commit()
-    return {"kyc_status": kyc_status}
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+@router.post(
+    "/providers/{user_id}/kyc/verify",
+    response_model=KYCReviewResponse,
+    dependencies=[_admin_dep],
+)
+async def verify_provider_kyc(user_id: UUID, db: AsyncSession = Depends(get_db)):
+    profile = await ProviderService(db).verify_kyc(user_id)
+    await db.commit()
+    return profile
+
+
+@router.post(
+    "/providers/{user_id}/kyc/reject",
+    response_model=KYCReviewResponse,
+    dependencies=[_admin_dep],
+)
+async def reject_provider_kyc(
+    user_id: UUID,
+    body: KYCRejectionRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    profile = await ProviderService(db).reject_kyc(user_id, reason=body.reason)
+    await db.commit()
+    return profile
 
 
 # ---------------------------------------------------------------------------

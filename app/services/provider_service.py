@@ -2,7 +2,10 @@
 Provider service: profile management, KYC field encryption, online-status
 toggling, and geospatial discovery.
 """
+import asyncio
+import io
 import uuid
+from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,9 +17,12 @@ from app.exceptions import (
     UnauthorizedAction,
     DuplicateSubscription,
     SubscriptionNotFound,
+    UserNotFound,
+    AppException,
 )
 from app.utils.geo import build_point_wkt, st_dwithin_filter, distance_expression
 from app.utils.encryption import encrypt
+from app.utils import storage
 
 
 class ProviderService:
@@ -195,3 +201,107 @@ class ProviderService:
                 (profile.avg_rating * n + new_rating) / (n + 1), 2
             )
         await self.db.flush()
+
+    # ------------------------------------------------------------------
+    # KYC submission + admin review (SC-31)
+    # ------------------------------------------------------------------
+
+    async def submit_kyc(
+        self,
+        user_id: uuid.UUID,
+        aadhaar_bytes: bytes,
+        aadhaar_content_type: str,
+        aadhaar_ext: str,
+        selfie_bytes: bytes,
+        selfie_content_type: str,
+        selfie_ext: str,
+    ) -> ProviderProfile:
+        """
+        Upload KYC documents to S3 and mark the profile as SUBMITTED.
+
+        Re-submission is allowed while status is PENDING / REJECTED; the
+        previous S3 keys are overwritten (UUIDs differ so old files remain in
+        the bucket — a lifecycle policy should expire them, see backend/INFRA.md).
+
+        SUBMITTED and VERIFIED states refuse re-upload — admin must reject
+        first if the docs need to change.
+        """
+        profile, _ = await self.get_or_create_profile(user_id)
+
+        if profile.kyc_status in (KYCStatus.SUBMITTED, KYCStatus.VERIFIED):
+            raise UnauthorizedAction(
+                "Cannot re-submit KYC while it is pending review or verified. "
+                "Contact support to reset."
+            )
+
+        # Unguessable S3 keys; we never expose the bucket publicly anyway, but
+        # this prevents enumeration if a presigned URL leaks.
+        aadhaar_key = f"kyc/{user_id}/aadhaar-{uuid.uuid4().hex}.{aadhaar_ext}"
+        selfie_key = f"kyc/{user_id}/selfie-{uuid.uuid4().hex}.{selfie_ext}"
+
+        # boto3 is sync — offload to a thread so the event loop stays responsive.
+        try:
+            await asyncio.to_thread(
+                storage.upload_file,
+                io.BytesIO(aadhaar_bytes),
+                aadhaar_key,
+                content_type=aadhaar_content_type,
+            )
+            await asyncio.to_thread(
+                storage.upload_file,
+                io.BytesIO(selfie_bytes),
+                selfie_key,
+                content_type=selfie_content_type,
+            )
+        except Exception as exc:
+            raise AppException(
+                f"KYC document upload failed: {exc}",
+                status_code=502,
+            ) from exc
+
+        profile.kyc_docs = {
+            "aadhaar_key": aadhaar_key,
+            "selfie_key": selfie_key,
+            "aadhaar_content_type": aadhaar_content_type,
+            "selfie_content_type": selfie_content_type,
+        }
+        profile.kyc_status = KYCStatus.SUBMITTED
+        profile.kyc_submitted_at = datetime.now(timezone.utc)
+        # Clear any prior rejection notes so the admin UI doesn't surface stale ones.
+        profile.kyc_reviewed_at = None
+        profile.kyc_rejection_reason = None
+
+        await self.db.flush()
+        return profile
+
+    async def verify_kyc(self, user_id: uuid.UUID) -> ProviderProfile:
+        """Admin-only: approve a provider's submitted KYC."""
+        profile = await self.get_profile(user_id)
+        if profile is None:
+            raise UserNotFound(user_id)
+        if profile.kyc_status != KYCStatus.SUBMITTED:
+            raise UnauthorizedAction(
+                f"Can only verify SUBMITTED KYC (current: {profile.kyc_status.value})"
+            )
+
+        profile.kyc_status = KYCStatus.VERIFIED
+        profile.kyc_reviewed_at = datetime.now(timezone.utc)
+        profile.kyc_rejection_reason = None
+        await self.db.flush()
+        return profile
+
+    async def reject_kyc(self, user_id: uuid.UUID, reason: str) -> ProviderProfile:
+        """Admin-only: reject a provider's submitted KYC with a reason."""
+        profile = await self.get_profile(user_id)
+        if profile is None:
+            raise UserNotFound(user_id)
+        if profile.kyc_status != KYCStatus.SUBMITTED:
+            raise UnauthorizedAction(
+                f"Can only reject SUBMITTED KYC (current: {profile.kyc_status.value})"
+            )
+
+        profile.kyc_status = KYCStatus.REJECTED
+        profile.kyc_reviewed_at = datetime.now(timezone.utc)
+        profile.kyc_rejection_reason = reason
+        await self.db.flush()
+        return profile
