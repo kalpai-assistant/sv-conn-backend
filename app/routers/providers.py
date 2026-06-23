@@ -16,12 +16,12 @@ from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/providers", tags=["Providers"])
 
-# Limits for KYC document uploads. Aadhaar/selfie JPEGs are typically <2MB;
-# 5MB leaves room for unoptimised camera output. content-type whitelist is the
-# real safety net — without it the bucket fills with PDFs and HEIC files we
-# can't render in the admin UI.
-_KYC_MAX_BYTES = 5 * 1024 * 1024
-_KYC_ALLOWED_CONTENT_TYPES = {
+# Limits for image uploads (KYC docs + provider profile photo). Phone-camera
+# JPEGs are typically <2MB; 5MB leaves room for unoptimised output. The
+# content-type whitelist is the real safety net — without it the bucket fills
+# with PDFs and formats we can't render in the admin/app UI.
+_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+_IMAGE_ALLOWED_CONTENT_TYPES = {
     "image/jpeg": "jpg",
     "image/png": "png",
     "image/heic": "heic",
@@ -29,9 +29,9 @@ _KYC_ALLOWED_CONTENT_TYPES = {
 }
 
 
-async def _read_kyc_upload(upload: UploadFile, field_name: str) -> tuple[bytes, str, str]:
-    """Validate + read a KYC upload. Returns (bytes, content_type, ext)."""
-    if upload.content_type not in _KYC_ALLOWED_CONTENT_TYPES:
+async def _read_image_upload(upload: UploadFile, field_name: str) -> tuple[bytes, str, str]:
+    """Validate + read an image upload. Returns (bytes, content_type, ext)."""
+    if upload.content_type not in _IMAGE_ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=f"{field_name}: unsupported file type {upload.content_type!r}",
@@ -42,12 +42,12 @@ async def _read_kyc_upload(upload: UploadFile, field_name: str) -> tuple[bytes, 
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"{field_name}: empty file",
         )
-    if len(data) > _KYC_MAX_BYTES:
+    if len(data) > _IMAGE_MAX_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"{field_name}: file exceeds {_KYC_MAX_BYTES // (1024 * 1024)} MB limit",
+            detail=f"{field_name}: file exceeds {_IMAGE_MAX_BYTES // (1024 * 1024)} MB limit",
         )
-    return data, upload.content_type, _KYC_ALLOWED_CONTENT_TYPES[upload.content_type]
+    return data, upload.content_type, _IMAGE_ALLOWED_CONTENT_TYPES[upload.content_type]
 
 
 @router.get("/me", response_model=ProviderResponse)
@@ -74,6 +74,23 @@ async def update_provider_profile(
         service_area_lat=request.service_area_lat,
         service_area_lng=request.service_area_lng,
         service_area_radius_km=request.service_area_radius_km,
+        languages=request.languages,
+    )
+
+
+@router.post("/me/photo", response_model=ProviderResponse)
+async def upload_profile_photo(
+    photo: UploadFile = File(..., description="Provider profile photo"),
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload/replace the provider's profile photo. Returns the updated profile."""
+    photo_bytes, content_type, ext = await _read_image_upload(photo, "photo")
+    return await ProviderService(db).update_photo(
+        user_id=current_user.id,
+        photo_bytes=photo_bytes,
+        content_type=content_type,
+        ext=ext,
     )
 
 
@@ -154,8 +171,8 @@ async def submit_kyc(
     db: AsyncSession = Depends(get_db),
 ):
     """Upload KYC documents. Sets the profile's kyc_status to SUBMITTED."""
-    aadhaar_bytes, aadhaar_ct, aadhaar_ext = await _read_kyc_upload(aadhaar, "aadhaar")
-    selfie_bytes, selfie_ct, selfie_ext = await _read_kyc_upload(selfie, "selfie")
+    aadhaar_bytes, aadhaar_ct, aadhaar_ext = await _read_image_upload(aadhaar, "aadhaar")
+    selfie_bytes, selfie_ct, selfie_ext = await _read_image_upload(selfie, "selfie")
 
     profile = await ProviderService(db).submit_kyc(
         user_id=current_user.id,

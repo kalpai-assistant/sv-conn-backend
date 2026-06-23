@@ -67,5 +67,10 @@ secrets/
 *.key
 *.cert
 
-# Note: alembic/versions/ is intentionally NOT ignored. 
+# Generated OpenAPI contract — produced on demand via scripts/export_openapi.py.
+# Not committed here; the live spec is served at /openapi.json and the contract
+# is consumed by the frontend repo.
+svc_connect.json
+
+# Note: alembic/versions/ is intentionally NOT ignored.
 # You SHOULD commit your database migration scripts!

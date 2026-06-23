@@ -60,6 +60,7 @@ class ProviderService:
         service_area_lat: float | None,
         service_area_lng: float | None,
         service_area_radius_km: int | None,
+        languages: list[str] | None = None,
     ) -> ProviderProfile:
         profile, _ = await self.get_or_create_profile(user_id)
 
@@ -78,6 +79,46 @@ class ProviderService:
         if service_area_radius_km is not None:
             profile.service_area_radius_km = service_area_radius_km
 
+        # Already validated + de-duplicated by the schema; an empty list clears it.
+        if languages is not None:
+            profile.languages = languages
+
+        await self.db.flush()
+        return profile
+
+    async def update_photo(
+        self,
+        user_id: uuid.UUID,
+        photo_bytes: bytes,
+        content_type: str,
+        ext: str,
+    ) -> ProviderProfile:
+        """
+        Store/replace the provider's profile photo in S3 and persist its URL.
+
+        Re-uploading writes a fresh UUID key, so the old object is orphaned and
+        left to the bucket lifecycle policy — consistent with KYC (see submit_kyc).
+        """
+        profile, _ = await self.get_or_create_profile(user_id)
+
+        # Unguessable key; bucket is never public but this blocks enumeration.
+        key = f"provider-photos/{user_id}/{uuid.uuid4().hex}.{ext}"
+
+        # boto3 is sync — offload to a thread so the event loop stays responsive.
+        try:
+            url = await asyncio.to_thread(
+                storage.upload_file,
+                io.BytesIO(photo_bytes),
+                key,
+                content_type=content_type,
+            )
+        except Exception as exc:
+            raise AppException(
+                f"Profile photo upload failed: {exc}",
+                status_code=502,
+            ) from exc
+
+        profile.profile_photo_url = url
         await self.db.flush()
         return profile
 

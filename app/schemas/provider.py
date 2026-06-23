@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from uuid import UUID
 from app.models.provider_profile import KYCStatus
 
@@ -14,6 +14,28 @@ class ProviderProfileUpdate(BaseModel):
     service_area_lat: float | None = None
     service_area_lng: float | None = None
     service_area_radius_km: int | None = Field(None, ge=1, le=100)
+    # List of languages the provider speaks. Strings are trimmed and
+    # de-duplicated (case-insensitive); an empty list clears the field.
+    languages: list[str] | None = Field(None, max_length=20)
+
+    @field_validator("languages")
+    @classmethod
+    def _clean_languages(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in value:
+            lang = raw.strip()
+            if not lang:
+                continue
+            if len(lang) > 50:
+                raise ValueError("each language must be at most 50 characters")
+            key = lang.casefold()
+            if key not in seen:
+                seen.add(key)
+                cleaned.append(lang)
+        return cleaned
 
 
 class ProviderStatusUpdate(BaseModel):
@@ -24,6 +46,7 @@ class ProviderResponse(BaseModel):
     id: UUID
     user_id: UUID
     profile_photo_url: str | None
+    languages: list[str] = []
     avg_rating: float
     total_completed_jobs: int
     kyc_status: KYCStatus
