@@ -5,6 +5,7 @@ Run AFTER seed_categories.py:
     python scripts/seed_services.py
 """
 import asyncio
+import json
 import sys
 import os
 
@@ -15,25 +16,12 @@ from app.database import AsyncSessionLocal
 from app.models.category import Category
 from app.models.service import Service
 
-# Keyed by category slug (must match seed_categories.py).
-INITIAL_SERVICES = {
-    "home-cleaning": [
-        {"name": "Full Home Deep Cleaning", "description": "Top-to-bottom deep clean", "base_price": 1499, "duration_minutes": 180},
-        {"name": "Bathroom Cleaning", "description": "Sanitised bathroom cleaning", "base_price": 499, "duration_minutes": 60},
-    ],
-    "plumbing": [
-        {"name": "Tap & Pipe Repair", "description": "Leak and fitting repair", "base_price": 299, "duration_minutes": 45},
-    ],
-    "electrical": [
-        {"name": "Switch & Socket Repair", "description": "Wiring and socket fixes", "base_price": 249, "duration_minutes": 30},
-    ],
-    "ac-repair": [
-        {"name": "AC Service", "description": "Standard split/window AC service", "base_price": 599, "duration_minutes": 60},
-    ],
-    "salon-beauty": [
-        {"name": "Salon at Home", "description": "Haircut, grooming & styling", "base_price": 799, "duration_minutes": 90},
-    ],
-}
+# Catalog data lives in JSON (keyed by category slug, must match
+# seed_categories.py) so it can be edited without touching the seeding logic.
+_DATA_FILE = os.path.join(os.path.dirname(__file__), "data", "initial_services.json")
+
+with open(_DATA_FILE, encoding="utf-8") as f:
+    INITIAL_SERVICES = json.load(f)
 
 
 async def seed():
