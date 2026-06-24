@@ -5,10 +5,13 @@ toggling, and geospatial discovery.
 import asyncio
 import io
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.booking import Booking, BookingStatus, PaymentStatus
+from app.models.booking_status_log import BookingStatusLog
 from app.models.provider_profile import ProviderProfile, KYCStatus
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.service import Service
@@ -23,6 +26,29 @@ from app.exceptions import (
 from app.utils.geo import build_point_wkt, st_dwithin_filter, distance_expression
 from app.utils.encryption import encrypt
 from app.utils import storage
+
+
+# Indian Standard Time — earnings windows are user-facing ("today", "this
+# week", "this month") so they must respect the user's local calendar boundary,
+# not UTC. Single-region for now; revisit when we have providers outside India.
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+EarningsRange = Literal["today", "week", "month"]
+
+
+def _earnings_window_start_utc(range_: EarningsRange) -> datetime:
+    """Convert a named range into the inclusive UTC start instant."""
+    now_ist = datetime.now(_IST)
+    if range_ == "today":
+        start_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif range_ == "week":
+        # ISO week starts Monday — matches typical IN payroll conventions.
+        start_ist = (now_ist - timedelta(days=now_ist.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+    else:  # month
+        start_ist = now_ist.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return start_ist.astimezone(timezone.utc)
 
 
 class ProviderService:
@@ -346,3 +372,68 @@ class ProviderService:
         profile.kyc_rejection_reason = reason
         await self.db.flush()
         return profile
+
+    # ------------------------------------------------------------------
+    # Earnings (SC-33)
+    # ------------------------------------------------------------------
+
+    async def get_earnings(
+        self,
+        provider_user_id: uuid.UUID,
+        range_: EarningsRange,
+    ) -> dict:
+        """
+        Sum the provider's payouts from COMPLETED bookings inside the named
+        IST calendar window, plus the per-booking breakdown.
+
+        Completion timestamp comes from `booking_status_logs` (the precise
+        moment the booking transitioned to COMPLETED), not `bookings.updated_at`
+        — that gets bumped by subsequent payment/webhook updates and would
+        bucket a booking into the wrong day.
+
+        Refunded payments are excluded — that's no longer money the provider
+        earns. Cancelled bookings naturally fall out via the COMPLETED filter.
+
+        Caching: spec asks for ~30s per provider; intentionally NOT done here
+        yet. See backlog item — adds a Redis fixture story to every test and
+        the call rate at beta scale is negligible. Easy follow-up.
+        """
+        start_utc = _earnings_window_start_utc(range_)
+
+        stmt = (
+            select(
+                Booking.id,
+                Booking.provider_payout,
+                Service.name.label("service_name"),
+                BookingStatusLog.created_at.label("completed_at"),
+            )
+            .join(
+                BookingStatusLog,
+                (BookingStatusLog.booking_id == Booking.id)
+                & (BookingStatusLog.to_status == BookingStatus.COMPLETED.value),
+            )
+            .join(Service, Service.id == Booking.service_id)
+            .where(Booking.provider_id == provider_user_id)
+            .where(Booking.status == BookingStatus.COMPLETED)
+            .where(Booking.payment_status != PaymentStatus.REFUNDED)
+            .where(BookingStatusLog.created_at >= start_utc)
+            .order_by(BookingStatusLog.created_at.desc())
+        )
+
+        rows = (await self.db.execute(stmt)).all()
+
+        bookings = [
+            {
+                "booking_id": row.id,
+                "service_name": row.service_name,
+                "completed_at": row.completed_at,
+                "payout_amount": row.provider_payout,
+            }
+            for row in rows
+        ]
+        return {
+            "range": range_,
+            "total_payout": round(sum(row.provider_payout for row in rows), 2),
+            "completed_count": len(rows),
+            "bookings": bookings,
+        }

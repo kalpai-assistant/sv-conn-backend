@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
@@ -11,6 +12,7 @@ from app.schemas.provider import (
     ProviderResponse, NearbyProviderResponse,
     ProviderServiceSubscribeRequest, ProviderServiceSubscriptionResponse,
     KYCSubmissionResponse,
+    EarningsResponse,
 )
 from app.services.provider_service import ProviderService
 
@@ -125,6 +127,22 @@ async def list_my_services(
 ):
     """List the services the current provider is subscribed to."""
     return await ProviderService(db).list_subscriptions(current_user.id)
+
+
+@router.get("/me/earnings", response_model=EarningsResponse)
+async def get_my_earnings(
+    range: Literal["today", "week", "month"] = Query("week"),
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Provider earnings summary + per-booking breakdown for the chosen window.
+
+    Window is the IST calendar boundary (today = since 00:00 IST, week = since
+    Monday 00:00 IST, month = since the 1st 00:00 IST). Refunded payments are
+    excluded. Used by the provider Earnings dashboard (SC-27).
+    """
+    return await ProviderService(db).get_earnings(current_user.id, range)
 
 
 @router.post(

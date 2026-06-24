@@ -103,3 +103,24 @@ class KYCReviewResponse(BaseModel):
     kyc_rejection_reason: str | None
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Earnings (SC-33)
+# ---------------------------------------------------------------------------
+
+
+class EarningsBookingItem(BaseModel):
+    booking_id: UUID
+    service_name: str
+    completed_at: datetime
+    payout_amount: float
+
+    model_config = {"from_attributes": True}
+
+
+class EarningsResponse(BaseModel):
+    range: str  # "today" | "week" | "month"
+    total_payout: float
+    completed_count: int
+    bookings: list[EarningsBookingItem]
