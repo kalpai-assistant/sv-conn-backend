@@ -165,20 +165,25 @@ async def unsubscribe_from_service(
     response_model=KYCSubmissionResponse,
 )
 async def submit_kyc(
-    aadhaar: UploadFile = File(..., description="Aadhaar document image"),
+    aadhaar_front: UploadFile = File(..., description="Aadhaar front image"),
+    aadhaar_back: UploadFile = File(..., description="Aadhaar back image"),
     selfie: UploadFile = File(..., description="Live selfie"),
     current_user: User = Depends(require_role("provider")),
     db: AsyncSession = Depends(get_db),
 ):
     """Upload KYC documents. Sets the profile's kyc_status to SUBMITTED."""
-    aadhaar_bytes, aadhaar_ct, aadhaar_ext = await _read_image_upload(aadhaar, "aadhaar")
+    front_bytes, front_ct, front_ext = await _read_image_upload(aadhaar_front, "aadhaar_front")
+    back_bytes, back_ct, back_ext = await _read_image_upload(aadhaar_back, "aadhaar_back")
     selfie_bytes, selfie_ct, selfie_ext = await _read_image_upload(selfie, "selfie")
 
     profile = await ProviderService(db).submit_kyc(
         user_id=current_user.id,
-        aadhaar_bytes=aadhaar_bytes,
-        aadhaar_content_type=aadhaar_ct,
-        aadhaar_ext=aadhaar_ext,
+        aadhaar_front_bytes=front_bytes,
+        aadhaar_front_content_type=front_ct,
+        aadhaar_front_ext=front_ext,
+        aadhaar_back_bytes=back_bytes,
+        aadhaar_back_content_type=back_ct,
+        aadhaar_back_ext=back_ext,
         selfie_bytes=selfie_bytes,
         selfie_content_type=selfie_ct,
         selfie_ext=selfie_ext,
