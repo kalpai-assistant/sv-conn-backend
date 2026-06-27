@@ -44,3 +44,19 @@ def upload_file(file_obj, key: str, content_type: str = "application/octet-strea
 def delete_file(key: str) -> None:
     """Remove an object from the bucket."""
     _get_client().delete_object(Bucket=settings.S3_BUCKET_NAME, Key=key)
+
+
+def get_presigned_url(key: str, expires_in: int = 3600) -> str:
+    """
+    Generate a presigned GET URL for a private S3 object.
+
+    Used to expose KYC documents to admin reviewers without making the bucket
+    public. Default TTL is 1 hour — long enough for an admin to open the page,
+    view docs, and decide, short enough that a leaked URL has limited blast
+    radius.
+    """
+    return _get_client().generate_presigned_url(
+        ClientMethod="get_object",
+        Params={"Bucket": settings.S3_BUCKET_NAME, "Key": key},
+        ExpiresIn=expires_in,
+    )

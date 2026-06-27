@@ -373,6 +373,57 @@ class ProviderService:
         await self.db.flush()
         return profile
 
+    async def get_kyc_review_payload(self, user_id: uuid.UUID) -> dict:
+        """
+        Admin-only: full KYC review payload — profile metadata + presigned URLs
+        for the uploaded docs.
+
+        URLs are minted on demand (1h TTL) so the admin UI can render the
+        Aadhaar / selfie inline without ever making the bucket public. Joined
+        with the User row so the admin sees who they're reviewing without a
+        second round-trip.
+        """
+        from app.models.user import User  # local import — avoids circular at module load
+        from sqlalchemy.orm import joinedload
+
+        result = await self.db.execute(
+            select(ProviderProfile)
+            .where(ProviderProfile.user_id == user_id)
+            .options(joinedload(ProviderProfile.user))
+        )
+        profile = result.scalar_one_or_none()
+        if profile is None:
+            raise UserNotFound(user_id)
+
+        docs = profile.kyc_docs or {}
+        aadhaar_key = docs.get("aadhaar_key")
+        selfie_key = docs.get("selfie_key")
+
+        # boto3 presign is sync — to_thread to keep the loop responsive even
+        # though presigning itself is local (no network call).
+        aadhaar_url = (
+            await asyncio.to_thread(storage.get_presigned_url, aadhaar_key)
+            if aadhaar_key
+            else None
+        )
+        selfie_url = (
+            await asyncio.to_thread(storage.get_presigned_url, selfie_key)
+            if selfie_key
+            else None
+        )
+
+        return {
+            "user_id": profile.user_id,
+            "name": profile.user.name,
+            "phone": profile.user.phone,
+            "kyc_status": profile.kyc_status,
+            "kyc_submitted_at": profile.kyc_submitted_at,
+            "kyc_reviewed_at": profile.kyc_reviewed_at,
+            "kyc_rejection_reason": profile.kyc_rejection_reason,
+            "aadhaar_url": aadhaar_url,
+            "selfie_url": selfie_url,
+        }
+
     # ------------------------------------------------------------------
     # Earnings (SC-33)
     # ------------------------------------------------------------------

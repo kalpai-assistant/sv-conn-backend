@@ -105,6 +105,21 @@ class KYCReviewResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class KYCDocsResponse(BaseModel):
+    """Admin-only: full KYC payload including presigned doc URLs for review."""
+
+    user_id: UUID
+    name: str | None
+    phone: str
+    kyc_status: KYCStatus
+    kyc_submitted_at: datetime | None
+    kyc_reviewed_at: datetime | None
+    kyc_rejection_reason: str | None
+    # Presigned S3 URLs; nil if the provider hasn't uploaded yet.
+    aadhaar_url: str | None
+    selfie_url: str | None
+
+
 # ---------------------------------------------------------------------------
 # Earnings (SC-33)
 # ---------------------------------------------------------------------------

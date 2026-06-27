@@ -10,6 +10,7 @@ Covers:
 - Verify on non-SUBMITTED profile → 403
 """
 import io
+import uuid
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -234,3 +235,109 @@ async def test_admin_list_pending_kyc(client, auth_headers, db_session):
     assert str(submitted_user.id) in ids
     assert str(verified_user.id) not in ids
     assert str(pending_user.id) not in ids
+
+
+# ---------------------------------------------------------------------------
+# Admin KYC docs review (SVC-87): GET /admin/providers/{user_id}/kyc
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_admin_get_kyc_review_with_presigned_urls(client, auth_headers, db_session):
+    """SUBMITTED profile with docs → response includes presigned aadhaar+selfie URLs."""
+    provider_user, profile = await _seed_provider(
+        db_session, kyc_status=KYCStatus.SUBMITTED
+    )
+    # Mimic what submit_kyc would write — the keys are what matters for presign.
+    profile.kyc_docs = {
+        "aadhaar_key": f"kyc/{provider_user.id}/aadhaar-abc.png",
+        "selfie_key": f"kyc/{provider_user.id}/selfie-def.png",
+        "aadhaar_content_type": "image/png",
+        "selfie_content_type": "image/png",
+    }
+    await db_session.flush()
+    admin_user = await UserFactory.create(db_session, role="admin")
+
+    with patch(
+        "app.services.provider_service.storage.get_presigned_url"
+    ) as mock_presign:
+        # Return distinct URLs so we can verify each key was minted independently.
+        mock_presign.side_effect = lambda key: f"https://signed.example/{key}"
+        response = await client.get(
+            f"/api/v1/admin/providers/{provider_user.id}/kyc",
+            headers=auth_headers(str(admin_user.id), "admin"),
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["user_id"] == str(provider_user.id)
+    assert body["kyc_status"] == "submitted"
+    assert body["aadhaar_url"] == f"https://signed.example/kyc/{provider_user.id}/aadhaar-abc.png"
+    assert body["selfie_url"] == f"https://signed.example/kyc/{provider_user.id}/selfie-def.png"
+    assert mock_presign.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_admin_get_kyc_review_no_docs_uploaded(client, auth_headers, db_session):
+    """PENDING profile (never uploaded) → 200 with null URLs, no presign calls."""
+    provider_user, _ = await _seed_provider(db_session, kyc_status=KYCStatus.PENDING)
+    admin_user = await UserFactory.create(db_session, role="admin")
+
+    with patch(
+        "app.services.provider_service.storage.get_presigned_url"
+    ) as mock_presign:
+        response = await client.get(
+            f"/api/v1/admin/providers/{provider_user.id}/kyc",
+            headers=auth_headers(str(admin_user.id), "admin"),
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["aadhaar_url"] is None
+    assert body["selfie_url"] is None
+    mock_presign.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_admin_get_kyc_review_unknown_user(client, auth_headers, db_session):
+    """No profile for user_id → 404."""
+    admin_user = await UserFactory.create(db_session, role="admin")
+    nonexistent = uuid.uuid4()
+
+    response = await client.get(
+        f"/api/v1/admin/providers/{nonexistent}/kyc",
+        headers=auth_headers(str(admin_user.id), "admin"),
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_admin_get_kyc_review_non_admin_forbidden(client, auth_headers, db_session):
+    """Provider can't read their own (or anyone's) review payload via the admin endpoint."""
+    provider_user, _ = await _seed_provider(db_session, kyc_status=KYCStatus.SUBMITTED)
+
+    response = await client.get(
+        f"/api/v1/admin/providers/{provider_user.id}/kyc",
+        headers=auth_headers(str(provider_user.id), "provider"),
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_admin_get_kyc_review_includes_user_metadata(client, auth_headers, db_session):
+    """Response carries name + phone so admin doesn't need a separate user lookup."""
+    provider_user, _ = await _seed_provider(db_session, kyc_status=KYCStatus.SUBMITTED)
+    admin_user = await UserFactory.create(db_session, role="admin")
+
+    response = await client.get(
+        f"/api/v1/admin/providers/{provider_user.id}/kyc",
+        headers=auth_headers(str(admin_user.id), "admin"),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # UserFactory sets a default phone; name may be None pre-onboarding.
+    assert body["phone"] == provider_user.phone
+    assert "name" in body  # may be None — important that the field exists
