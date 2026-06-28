@@ -14,7 +14,7 @@ from app.models.booking import Booking, BookingStatus
 from app.models.provider_profile import ProviderProfile, KYCStatus
 from app.schemas.user import UserResponse
 from app.schemas.booking import BookingResponse, BookingListResponse
-from app.schemas.provider import KYCRejectionRequest, KYCReviewResponse
+from app.schemas.provider import KYCRejectionRequest, KYCReviewResponse, KYCDocsResponse
 from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -67,6 +67,19 @@ async def list_pending_kyc(
     )
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+@router.get(
+    "/providers/{user_id}/kyc",
+    response_model=KYCDocsResponse,
+    dependencies=[_admin_dep],
+)
+async def get_provider_kyc_review(user_id: UUID, db: AsyncSession = Depends(get_db)):
+    """
+    Full KYC review payload for an admin: profile metadata + presigned URLs for
+    the uploaded docs (1h TTL). Powers the admin KYC review page (SVC-90).
+    """
+    return await ProviderService(db).get_kyc_review_payload(user_id)
 
 
 @router.post(
