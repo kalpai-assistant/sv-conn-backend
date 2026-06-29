@@ -276,9 +276,12 @@ class ProviderService:
     async def submit_kyc(
         self,
         user_id: uuid.UUID,
-        aadhaar_bytes: bytes,
-        aadhaar_content_type: str,
-        aadhaar_ext: str,
+        aadhaar_front_bytes: bytes,
+        aadhaar_front_content_type: str,
+        aadhaar_front_ext: str,
+        aadhaar_back_bytes: bytes,
+        aadhaar_back_content_type: str,
+        aadhaar_back_ext: str,
         selfie_bytes: bytes,
         selfie_content_type: str,
         selfie_ext: str,
@@ -303,16 +306,23 @@ class ProviderService:
 
         # Unguessable S3 keys; we never expose the bucket publicly anyway, but
         # this prevents enumeration if a presigned URL leaks.
-        aadhaar_key = f"kyc/{user_id}/aadhaar-{uuid.uuid4().hex}.{aadhaar_ext}"
+        aadhaar_front_key = f"kyc/{user_id}/aadhaar-front-{uuid.uuid4().hex}.{aadhaar_front_ext}"
+        aadhaar_back_key = f"kyc/{user_id}/aadhaar-back-{uuid.uuid4().hex}.{aadhaar_back_ext}"
         selfie_key = f"kyc/{user_id}/selfie-{uuid.uuid4().hex}.{selfie_ext}"
 
         # boto3 is sync — offload to a thread so the event loop stays responsive.
         try:
             await asyncio.to_thread(
                 storage.upload_file,
-                io.BytesIO(aadhaar_bytes),
-                aadhaar_key,
-                content_type=aadhaar_content_type,
+                io.BytesIO(aadhaar_front_bytes),
+                aadhaar_front_key,
+                content_type=aadhaar_front_content_type,
+            )
+            await asyncio.to_thread(
+                storage.upload_file,
+                io.BytesIO(aadhaar_back_bytes),
+                aadhaar_back_key,
+                content_type=aadhaar_back_content_type,
             )
             await asyncio.to_thread(
                 storage.upload_file,
@@ -327,9 +337,11 @@ class ProviderService:
             ) from exc
 
         profile.kyc_docs = {
-            "aadhaar_key": aadhaar_key,
+            "aadhaar_front_key": aadhaar_front_key,
+            "aadhaar_back_key": aadhaar_back_key,
             "selfie_key": selfie_key,
-            "aadhaar_content_type": aadhaar_content_type,
+            "aadhaar_front_content_type": aadhaar_front_content_type,
+            "aadhaar_back_content_type": aadhaar_back_content_type,
             "selfie_content_type": selfie_content_type,
         }
         profile.kyc_status = KYCStatus.SUBMITTED

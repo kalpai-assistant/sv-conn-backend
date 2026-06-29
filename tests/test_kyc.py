@@ -26,6 +26,17 @@ def _png_bytes(size: int = 1024) -> bytes:
     return header + b"\x00" * max(0, size - len(header))
 
 
+def _kyc_files(**overrides):
+    """Build the three-file multipart payload, overriding individual fields."""
+    files = {
+        "aadhaar_front": ("aadhaar-front.png", _png_bytes(2048), "image/png"),
+        "aadhaar_back": ("aadhaar-back.png", _png_bytes(2048), "image/png"),
+        "selfie": ("selfie.png", _png_bytes(1024), "image/png"),
+    }
+    files.update(overrides)
+    return files
+
+
 async def _seed_provider(db, kyc_status: KYCStatus = KYCStatus.PENDING):
     user = await UserFactory.create(db, role="provider")
     profile = ProviderProfile(user_id=user.id, kyc_status=kyc_status)
@@ -36,46 +47,63 @@ async def _seed_provider(db, kyc_status: KYCStatus = KYCStatus.PENDING):
 
 @pytest.mark.asyncio
 async def test_submit_kyc_happy_path(client, auth_headers, db_session):
-    """Two valid PNG uploads → 201, status SUBMITTED, S3 upload called twice."""
+    """Three valid PNG uploads → 201, status SUBMITTED, S3 upload called thrice."""
     user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.PENDING)
 
     with patch("app.services.provider_service.storage.upload_file") as mock_upload:
         mock_upload.return_value = "https://bucket.s3.amazonaws.com/dummy"
         response = await client.post(
             "/api/v1/providers/me/kyc",
-            files={
-                "aadhaar": ("aadhaar.png", _png_bytes(2048), "image/png"),
-                "selfie": ("selfie.png", _png_bytes(1024), "image/png"),
-            },
+            files=_kyc_files(),
             headers=auth_headers(str(user.id), "provider"),
         )
 
     assert response.status_code == 201, response.text
     assert response.json()["kyc_status"] == "submitted"
     assert response.json()["kyc_submitted_at"] is not None
-    assert mock_upload.call_count == 2
+    assert mock_upload.call_count == 3
 
     # Profile state was persisted with the doc keys.
     await db_session.refresh(profile)
     assert profile.kyc_status == KYCStatus.SUBMITTED
     assert profile.kyc_docs is not None
-    assert "aadhaar_key" in profile.kyc_docs
+    assert "aadhaar_front_key" in profile.kyc_docs
+    assert "aadhaar_back_key" in profile.kyc_docs
     assert "selfie_key" in profile.kyc_docs
 
 
 @pytest.mark.asyncio
-async def test_submit_kyc_oversized_file(client, auth_headers, db_session):
-    """File over 5 MB → 413, nothing uploaded."""
+@pytest.mark.parametrize("missing", ["aadhaar_front", "aadhaar_back", "selfie"])
+async def test_submit_kyc_missing_file(client, auth_headers, db_session, missing):
+    """Omitting any one of the three files → 422, nothing uploaded."""
     user, _profile = await _seed_provider(db_session)
 
-    too_big = _png_bytes(5 * 1024 * 1024 + 1)
+    files = _kyc_files()
+    del files[missing]
+
     with patch("app.services.provider_service.storage.upload_file") as mock_upload:
         response = await client.post(
             "/api/v1/providers/me/kyc",
-            files={
-                "aadhaar": ("aadhaar.png", too_big, "image/png"),
-                "selfie": ("selfie.png", _png_bytes(1024), "image/png"),
-            },
+            files=files,
+            headers=auth_headers(str(user.id), "provider"),
+        )
+
+    assert response.status_code == 422, response.text
+    mock_upload.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["aadhaar_front", "aadhaar_back", "selfie"])
+async def test_submit_kyc_oversized_file(client, auth_headers, db_session, field):
+    """Any field over 5 MB → 413, nothing uploaded."""
+    user, _profile = await _seed_provider(db_session)
+
+    too_big = _png_bytes(5 * 1024 * 1024 + 1)
+    files = _kyc_files(**{field: (f"{field}.png", too_big, "image/png")})
+    with patch("app.services.provider_service.storage.upload_file") as mock_upload:
+        response = await client.post(
+            "/api/v1/providers/me/kyc",
+            files=files,
             headers=auth_headers(str(user.id), "provider"),
         )
 
@@ -84,17 +112,16 @@ async def test_submit_kyc_oversized_file(client, auth_headers, db_session):
 
 
 @pytest.mark.asyncio
-async def test_submit_kyc_unsupported_mime(client, auth_headers, db_session):
-    """application/pdf upload → 415, nothing uploaded."""
+@pytest.mark.parametrize("field", ["aadhaar_front", "aadhaar_back", "selfie"])
+async def test_submit_kyc_unsupported_mime(client, auth_headers, db_session, field):
+    """application/pdf in any field → 415, nothing uploaded."""
     user, _profile = await _seed_provider(db_session)
 
+    files = _kyc_files(**{field: (f"{field}.pdf", b"%PDF-1.4\n%...", "application/pdf")})
     with patch("app.services.provider_service.storage.upload_file") as mock_upload:
         response = await client.post(
             "/api/v1/providers/me/kyc",
-            files={
-                "aadhaar": ("aadhaar.pdf", b"%PDF-1.4\n%...", "application/pdf"),
-                "selfie": ("selfie.png", _png_bytes(1024), "image/png"),
-            },
+            files=files,
             headers=auth_headers(str(user.id), "provider"),
         )
 
@@ -110,10 +137,7 @@ async def test_submit_kyc_double_submit_rejected(client, auth_headers, db_sessio
     with patch("app.services.provider_service.storage.upload_file") as mock_upload:
         response = await client.post(
             "/api/v1/providers/me/kyc",
-            files={
-                "aadhaar": ("aadhaar.png", _png_bytes(1024), "image/png"),
-                "selfie": ("selfie.png", _png_bytes(1024), "image/png"),
-            },
+            files=_kyc_files(),
             headers=auth_headers(str(user.id), "provider"),
         )
 
