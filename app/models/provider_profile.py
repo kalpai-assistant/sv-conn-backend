@@ -56,3 +56,15 @@ class ProviderProfile(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="provider_profile")
+
+    @property
+    def payout_set(self) -> bool:
+        """True when a usable payout destination is stored (VPA, or account + IFSC).
+
+        Derived so the API can expose 'already added / skip' state to the
+        frontend without ever returning the encrypted PII itself.
+        """
+        return bool(
+            self.payout_vpa_encrypted
+            or (self.payout_account_number_encrypted and self.payout_ifsc_encrypted)
+        )
