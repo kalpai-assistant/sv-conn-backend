@@ -145,3 +145,19 @@ async def test_payout_set_false_when_unset(client, auth_headers, db_session):
 
     assert response.status_code == 200, response.text
     assert response.json()["payout_set"] is False
+
+
+@pytest.mark.asyncio
+async def test_non_digit_account_rejected(client, auth_headers, db_session):
+    """Account number with non-digit characters -> 422, nothing stored."""
+    user, profile = await _seed_provider(db_session)
+
+    response = await client.patch(
+        "/api/v1/providers/me",
+        json={"payout_account_number": "12AB567890", "payout_ifsc": "HDFC0001234"},
+        headers=auth_headers(str(user.id), "provider"),
+    )
+
+    assert response.status_code == 422
+    await db_session.refresh(profile)
+    assert profile.payout_account_number_encrypted is None

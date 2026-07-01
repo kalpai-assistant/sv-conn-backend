@@ -7,6 +7,8 @@ from app.models.provider_profile import KYCStatus
 # VPA: local-part@handle, e.g. "name@okhdfcbank". IFSC: 4 letters + 0 + 6 alnum.
 _UPI_VPA_RE = re.compile(r"^[\w.\-]{2,}@[A-Za-z]{2,}$")
 _IFSC_RE = re.compile(r"^[A-Z]{4}0[A-Z0-9]{6}$")
+# Indian bank account numbers are numeric (roughly 9-18 digits across banks).
+_ACCOUNT_RE = re.compile(r"^\d{5,34}$")
 
 
 class ProviderProfileUpdate(BaseModel):
@@ -43,6 +45,16 @@ class ProviderProfileUpdate(BaseModel):
         value = value.strip().upper()
         if not _IFSC_RE.match(value):
             raise ValueError("payout_ifsc must match the IFSC format, e.g. HDFC0001234")
+        return value
+
+    @field_validator("payout_account_number")
+    @classmethod
+    def _validate_account_number(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not _ACCOUNT_RE.match(value):
+            raise ValueError("payout_account_number must be 5-34 digits")
         return value
 
     @model_validator(mode="after")
