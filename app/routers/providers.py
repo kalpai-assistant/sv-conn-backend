@@ -40,6 +40,9 @@ async def update_provider_profile(
         service_area_lat=request.service_area_lat,
         service_area_lng=request.service_area_lng,
         service_area_radius_km=request.service_area_radius_km,
+        payout_vpa=request.payout_vpa,
+        payout_account_number=request.payout_account_number,
+        payout_ifsc=request.payout_ifsc,
     )
 
 

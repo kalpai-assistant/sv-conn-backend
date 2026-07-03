@@ -69,3 +69,6 @@ secrets/
 
 # Note: alembic/versions/ is intentionally NOT ignored. 
 # You SHOULD commit your database migration scripts!
+
+# Generated OpenAPI contract for the frontend
+svc_connect.json

@@ -54,6 +54,9 @@ class ProviderService:
         service_area_lat: float | None,
         service_area_lng: float | None,
         service_area_radius_km: int | None,
+        payout_vpa: str | None = None,
+        payout_account_number: str | None = None,
+        payout_ifsc: str | None = None,
     ) -> ProviderProfile:
         profile, _ = await self.get_or_create_profile(user_id)
 
@@ -66,6 +69,14 @@ class ProviderService:
             profile.upi_id_encrypted = encrypt(upi_id)
         if bank_account is not None:
             profile.bank_account_encrypted = encrypt(bank_account)
+
+        # Payout destination — encrypted at rest, never returned decrypted.
+        if payout_vpa is not None:
+            profile.payout_vpa_encrypted = encrypt(payout_vpa)
+        if payout_account_number is not None:
+            profile.payout_account_number_encrypted = encrypt(payout_account_number)
+        if payout_ifsc is not None:
+            profile.payout_ifsc_encrypted = encrypt(payout_ifsc)
 
         if service_area_lat is not None and service_area_lng is not None:
             profile.service_area_center = build_point_wkt(service_area_lat, service_area_lng)
