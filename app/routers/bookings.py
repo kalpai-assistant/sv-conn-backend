@@ -14,11 +14,20 @@ from app.services.booking_service import BookingService
 from app.tasks.notification_tasks import send_booking_notification
 from app.tasks.payment_tasks import process_cash_payment
 from app.models.booking import PaymentMethod
+from app.utils.rate_limiter import rate_limit
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
 
 
-@router.post("/", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    response_model=BookingResponse,
+    status_code=status.HTTP_201_CREATED,
+    # SC-35: 10 booking creations per consumer per hour. A determined attacker
+    # bypasses this with multiple accounts, but each account they burn costs
+    # them SMS OTPs — layered defence with the OTP throttle.
+    dependencies=[Depends(rate_limit("booking_create", max_requests=10))],
+)
 async def create_booking(
     request: CreateBookingRequest,
     current_user: User = Depends(get_current_user),

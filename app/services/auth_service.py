@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from app.models.user import User, UserRole
-from app.utils.otp import generate_otp, store_otp, verify_otp, is_rate_limited
+from app.utils.otp import generate_otp, store_otp, verify_otp, is_rate_limited, otp_retry_after_seconds
 from app.utils.security import create_access_token, create_refresh_token, decode_jwt
 from app.utils.sms_client import get_sms_client
 from app.exceptions import InvalidOTP, RateLimitExceeded
@@ -36,7 +36,8 @@ class AuthService:
     async def send_otp(self, phone: str) -> None:
         """Generate OTP, enforce rate limit, persist in Redis, send via SMS."""
         if await is_rate_limited(self.redis, phone):
-            raise RateLimitExceeded()
+            retry = await otp_retry_after_seconds(self.redis, phone)
+            raise RateLimitExceeded(retry_after=retry)
 
         otp = generate_otp(settings.OTP_LENGTH)
         logger.info(f"\n{'='*40}\n🔑 [MOCK OTP] Use {otp} to login for {phone}\n{'='*40}\n")
