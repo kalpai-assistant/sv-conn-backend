@@ -3,6 +3,8 @@ Payment service: Razorpay order creation, signature verification, and webhook ha
 """
 import hmac
 import hashlib
+import logging
+from datetime import datetime, timezone
 from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +17,7 @@ from app.exceptions import BookingNotFound, PaymentError
 from app.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 class PaymentService:
@@ -108,8 +111,12 @@ class PaymentService:
     async def handle_webhook(self, event: str, payload: dict) -> None:
         """
         Handle Razorpay webhook events (idempotent).
-        Primary events: payment.captured, payment.failed, transfer.processed.
+        Primary events: payment.captured, payment.failed, payment.dispute.*.
         """
+        if event.startswith("payment.dispute."):
+            await self._handle_dispute(event, payload)
+            return
+
         if event == "payment.captured":
             payment_entity = payload.get("payment", {}).get("entity", {})
             order_id = payment_entity.get("order_id")
@@ -142,6 +149,69 @@ class PaymentService:
                     pass  # Booking may not exist; log silently
 
     # ------------------------------------------------------------------
+    # Disputes / chargebacks
+    # ------------------------------------------------------------------
+
+    async def _handle_dispute(self, event: str, payload: dict) -> None:
+        """
+        Record a Razorpay chargeback against its Payment.
+
+        ``payment.dispute.created`` fires when a customer disputes a payment with
+        their card issuer; ``.won`` / ``.lost`` follow when it resolves. For beta we
+        only stamp ``disputed_at`` and alert — the refund and settlement reversal are
+        decided by an admin out of band, so no payment or settlement status is moved
+        here (SVC-134).
+
+        Idempotent: Razorpay retries webhooks, and ``disputed_at`` is stamped once so
+        a redelivery keeps the original dispute time.
+        """
+        # Dispute payloads are keyed by payment, not order: the id lives at
+        # payload.dispute.entity.payment_id (payload.payment.entity.id carries the
+        # same value). The captured/failed branches above match on order_id instead.
+        dispute_entity = payload.get("dispute", {}).get("entity", {})
+        payment_id = dispute_entity.get("payment_id")
+        if not payment_id:
+            # Can't map the dispute to anything — surface it rather than 200-ing.
+            logger.error("Razorpay %s webhook missing dispute.entity.payment_id", event)
+            raise PaymentError("Dispute webhook missing payment id")
+
+        payment = await self._find_payment_by_razorpay_id(payment_id)
+        if not payment:
+            # A dispute for a payment we have no ledger row for is an anomaly worth
+            # investigating, but a retry can't fix it — log loudly and acknowledge.
+            logger.error(
+                "Razorpay %s for unknown payment %s (dispute=%s)",
+                event, payment_id, dispute_entity.get("id"),
+            )
+            return
+
+        if event == "payment.dispute.created":
+            if payment.disputed_at is None:
+                payment.disputed_at = datetime.now(timezone.utc)
+                await self.db.flush()
+            logger.warning(
+                "payment.dispute.created payment=%s booking=%s dispute=%s "
+                "amount=%s reason=%s respond_by=%s",
+                payment_id, payment.booking_id, dispute_entity.get("id"),
+                dispute_entity.get("amount"), dispute_entity.get("reason_code"),
+                dispute_entity.get("respond_by"),
+            )
+            # TODO(SVC-134): Sentry alert + Slack notification. Neither is wired up in
+            # the backend yet (the HLD schedules Sentry for Phase 2), so the warning
+            # above is the interim signal until that infra lands.
+
+        elif event in ("payment.dispute.won", "payment.dispute.lost"):
+            # Deliberately no state change: beta AC leaves refund/settlement to admin.
+            logger.warning(
+                "%s payment=%s booking=%s dispute=%s (no automated state change)",
+                event, payment_id, payment.booking_id, dispute_entity.get("id"),
+            )
+
+        else:
+            # e.g. payment.dispute.under_review / .action_required / .closed
+            logger.info("Ignoring unhandled dispute event: %s", event)
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -153,6 +223,16 @@ class PaymentService:
         if not profile or not profile.razorpay_linked_account_id:
             raise PaymentError("Provider is not set up for payouts")
         return profile
+
+    async def _find_payment_by_razorpay_id(self, payment_id: str) -> Payment | None:
+        """Look up a ledger row by Razorpay payment id (disputes key on this)."""
+        result = await self.db.execute(
+            select(Payment)
+            .where(Payment.razorpay_payment_id == payment_id)
+            .order_by(Payment.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def _find_booking_by_order(self, order_id: str) -> Booking:
         result = await self.db.execute(
