@@ -13,12 +13,23 @@ from app.schemas.payment import (
 )
 from app.services.payment_service import PaymentService
 from app.tasks.notification_tasks import send_booking_notification
+from app.utils.rate_limiter import rate_limit
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 settings = get_settings()
 
+# SC-35: 20 payment ops per user per hour. Shared namespace across order-
+# creation and verify so a single limit covers the whole payment surface —
+# stops abuse regardless of whether the attacker is spamming order creation
+# or signature verification. Webhook is NOT rate-limited (Razorpay-initiated).
+_PAYMENT_RATE_LIMIT = Depends(rate_limit("payment_ops", max_requests=20))
 
-@router.post("/orders", response_model=PaymentOrderResponse)
+
+@router.post(
+    "/orders",
+    response_model=PaymentOrderResponse,
+    dependencies=[_PAYMENT_RATE_LIMIT],
+)
 async def create_payment_order(
     request: CreatePaymentOrderRequest,
     current_user: User = Depends(get_current_user),
@@ -27,7 +38,11 @@ async def create_payment_order(
     return await PaymentService(db).create_order(request.booking_id)
 
 
-@router.post("/verify", status_code=status.HTTP_200_OK)
+@router.post(
+    "/verify",
+    status_code=status.HTTP_200_OK,
+    dependencies=[_PAYMENT_RATE_LIMIT],
+)
 async def verify_payment(
     request: VerifyPaymentRequest,
     current_user: User = Depends(get_current_user),

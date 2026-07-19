@@ -61,11 +61,21 @@ class PaymentError(AppException):
 
 
 class RateLimitExceeded(AppException):
-    def __init__(self):
+    """
+    Raised when a request exceeds a per-key rate limit.
+
+    `retry_after` is exposed to callers via the standard `Retry-After` HTTP
+    header (see the handler in `register_exception_handlers`). A value of `None`
+    means we couldn't compute a meaningful wait — the handler defaults to the
+    full policy window.
+    """
+
+    def __init__(self, retry_after: int | None = None, message: str = "Too many requests"):
         super().__init__(
-            "Too many requests",
+            message,
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         )
+        self.retry_after = retry_after
 
 
 class DuplicateReview(AppException):
@@ -99,6 +109,11 @@ class SubscriptionNotFound(AppException):
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppException)
     async def app_exception_handler(request: Request, exc: AppException):
+        headers: dict[str, str] = {}
+        # Rate-limit responses always carry Retry-After per RFC 6585 §4 so
+        # clients can back off intelligently instead of hammering.
+        if isinstance(exc, RateLimitExceeded):
+            headers["Retry-After"] = str(exc.retry_after or 60)
         return JSONResponse(
             status_code=exc.status_code,
             content={
@@ -106,6 +121,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "message": exc.message,
                 "status_code": exc.status_code,
             },
+            headers=headers or None,
         )
 
     @app.exception_handler(Exception)
