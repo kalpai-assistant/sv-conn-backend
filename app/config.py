@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     RAZORPAY_WEBHOOK_SECRET: str = ""  # Set in Razorpay dashboard → Webhooks
     PLATFORM_COMMISSION_PERCENT: float = 20.0
 
+    # Admin IP allowlist (SVC-75) — comma-separated CIDRs. Empty = no restriction
+    # (dev-safe default). Production MUST populate. See backend/ADMIN.md.
+    ADMIN_ALLOWED_IPS: str = ""
+    # Trust X-Forwarded-For / X-Real-IP for client IP resolution. Only enable
+    # behind a load balancer / CDN that strips inbound XFF headers — otherwise
+    # any client can spoof their IP.
+    ADMIN_TRUST_FORWARDED_FOR: bool = False
+
     # Firebase
     FCM_CREDENTIALS_PATH: str = ""
 
