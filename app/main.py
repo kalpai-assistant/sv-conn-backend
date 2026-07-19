@@ -25,6 +25,7 @@ from app.routers import (
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.request_id import RequestIDMiddleware
 from app.middleware.auth import JWTAttachMiddleware
+from app.middleware.admin_ip_allowlist import AdminIPAllowlistMiddleware
 from app.exceptions import register_exception_handlers
 
 # Configure structured application-wide logging
@@ -84,6 +85,17 @@ def create_app() -> FastAPI:
     # NOTE: for a production setup, share the app.state.redis pool here.
     rate_redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
     app.add_middleware(RateLimitMiddleware, redis=rate_redis, requests_per_minute=600)
+
+    # SVC-75: gate /admin/* on an IP allowlist as a second layer over the role
+    # check. No-op when ADMIN_ALLOWED_IPS is empty (dev). Wired here so it runs
+    # BEFORE the router — a stolen admin JWT from an unlisted network never
+    # reaches route code.
+    app.add_middleware(
+        AdminIPAllowlistMiddleware,
+        allowed_ips=settings.ADMIN_ALLOWED_IPS,
+        trust_forwarded_for=settings.ADMIN_TRUST_FORWARDED_FOR,
+        api_prefix=settings.API_V1_PREFIX,
+    )
 
     # -----------------------------------------------------------------------
     # Routers
