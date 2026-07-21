@@ -19,9 +19,16 @@ from app.models.provider_profile import ProviderProfile
 from app.models.payout_audit import PayoutAudit
 from app.exceptions import PaymentError, UserNotFound
 from app.utils.encryption import decrypt
-from app.utils.razorpayx_client import create_payout
+from app.utils.razorpayx_client import create_payout, list_payouts
 
 logger = logging.getLogger(__name__)
+
+# RazorpayX terminal payout statuses → our settlement state, for reconciliation.
+_RECONCILE_MAP = {
+    "processed": SettlementStatus.COMPLETED,
+    "failed": SettlementStatus.FAILED,
+    "reversed": SettlementStatus.REVERSED,
+}
 
 
 class PayoutService:
@@ -188,6 +195,50 @@ class PayoutService:
                 payout_id, len(settled),
             )
 
+    async def reconcile_payouts(self, *, since_ts: int, until_ts: int) -> dict:
+        """
+        Reconcile our settlement state against RazorpayX's record of payouts.
+
+        Detects and repairs drift left when a webhook is missed or when the create
+        path crashed after RazorpayX moved the money but before we recorded it:
+
+        - **Case A** — bookings linked to the payout (``settlement_payout_id``) but
+          not yet in the terminal state (a missed/dropped webhook) → transition them.
+        - **Case B** — no booking references the payout (the dual-write orphan) →
+          find the batch via the ``reference_id`` breadcrumb and re-link it.
+
+        Anything that can't be resolved is counted and alerted for a human. Returns a
+        summary dict; the caller commits.
+        """
+        payouts = await list_payouts(from_ts=since_ts, to_ts=until_ts)
+        report = {"checked": 0, "case_a": 0, "case_b": 0, "unresolved": 0}
+
+        for payout in payouts:
+            target = _RECONCILE_MAP.get(payout.get("status"))
+            if target is None:
+                continue  # non-terminal (queued/processing) — nothing to reconcile
+            report["checked"] += 1
+
+            repaired = await self._reconcile_linked(payout, target)
+            if repaired is not None:
+                report["case_a"] += repaired
+                continue
+
+            relinked = await self._reconcile_orphan(payout, target)
+            if relinked > 0:
+                report["case_b"] += relinked
+            else:
+                report["unresolved"] += 1
+                logger.error(
+                    "ALERT payout reconciliation unresolved payout_id=%s "
+                    "reference_id=%s status=%s",
+                    payout.get("id"), payout.get("reference_id"), payout.get("status"),
+                )
+
+        await self.db.flush()
+        logger.info("payout.reconcile %s", report)
+        return report
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -274,6 +325,92 @@ class PayoutService:
         """Stable key for a payout batch — a hash of its sorted booking ids."""
         ids = ",".join(sorted(str(b.id) for b in bookings))
         return "payout_" + hashlib.sha256(ids.encode()).hexdigest()[:32]
+
+    async def _reconcile_linked(
+        self, payout: dict, target: SettlementStatus
+    ) -> int | None:
+        """Case A: repair bookings already linked to this payout id.
+
+        Transitions linked bookings not yet in ``target`` and returns how many were
+        repaired (0 if already consistent). Returns ``None`` when no booking
+        references this payout id — i.e. it's an orphan for Case B to handle.
+        """
+        payout_id = payout.get("id")
+        linked = (
+            await self.db.execute(
+                select(Booking).where(Booking.settlement_payout_id == payout_id)
+            )
+        ).scalars().all()
+        if not linked:
+            return None
+
+        repaired = [b for b in linked if b.settlement_status != target]
+        for booking in repaired:
+            booking.settlement_status = target
+        if repaired:
+            self._add_reconciliation_audit(
+                provider_id=repaired[0].provider_id, payout=payout,
+                target=target, count=len(repaired),
+            )
+        return len(repaired)
+
+    async def _reconcile_orphan(self, payout: dict, target: SettlementStatus) -> int:
+        """Case B: re-link a payout that no booking references.
+
+        Maps the payout back to its batch via ``reference_id`` (the batch key) and
+        the ``attempting`` audit breadcrumb, cross-checks the amount, and confirms
+        the provider's still-PENDING settlements are exactly that batch before
+        re-linking. Returns rows re-linked, or 0 if it can't be resolved.
+        """
+        reference_id = payout.get("reference_id")
+        if not reference_id:
+            return 0
+
+        audit = (
+            await self.db.execute(
+                select(PayoutAudit).where(PayoutAudit.reference_id == reference_id)
+            )
+        ).scalars().first()
+        if audit is None:
+            return 0
+
+        # Amount cross-check: never re-link a payout whose amount doesn't match what
+        # we intended to pay for this batch.
+        if payout.get("amount") is not None and payout["amount"] != audit.amount_paise:
+            return 0
+
+        # The batch must still be exactly the provider's PENDING settlements.
+        pending = await self._pending_settlements(audit.provider_id)
+        if not pending or self._batch_idempotency_key(pending) != reference_id:
+            return 0
+
+        payout_id = payout.get("id")
+        for booking in pending:
+            booking.settlement_status = target
+            booking.settlement_payout_id = payout_id
+        # Resolve the breadcrumb so a later run doesn't reprocess it.
+        audit.outcome = target.value
+        audit.payout_id = payout_id
+        self._add_reconciliation_audit(
+            provider_id=audit.provider_id, payout=payout,
+            target=target, count=len(pending),
+        )
+        return len(pending)
+
+    def _add_reconciliation_audit(
+        self, *, provider_id: UUID, payout: dict, target: SettlementStatus, count: int
+    ) -> None:
+        """Record an automated (non-admin) reconciliation repair in payout_audits."""
+        self.db.add(PayoutAudit(
+            admin_user_id=None,
+            provider_id=provider_id,
+            source="reconciliation",
+            amount_paise=payout.get("amount") or 0,
+            booking_count=count,
+            payout_id=payout.get("id"),
+            reference_id=payout.get("reference_id"),
+            outcome=target.value,
+        ))
 
     async def _get_provider_profile(self, provider_id: UUID) -> ProviderProfile:
         result = await self.db.execute(

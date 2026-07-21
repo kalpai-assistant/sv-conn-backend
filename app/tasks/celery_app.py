@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from app.config import get_settings
 
 settings = get_settings()
@@ -24,6 +25,10 @@ celery_app.conf.update(
         "expire-stale-bookings": {
             "task": "app.tasks.cleanup_tasks.expire_stale_bookings",
             "schedule": 30.0,  # Every 30 seconds
+        },
+        "reconcile-payouts": {
+            "task": "app.tasks.payment_tasks.reconcile_payouts",
+            "schedule": crontab(hour=2, minute=0),  # Nightly at 02:00 (hits RazorpayX API)
         },
     },
 )
