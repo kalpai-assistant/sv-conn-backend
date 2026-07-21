@@ -65,7 +65,14 @@ async def create_payout(
                 "ifsc": ifsc,
             },
         }
-        mode = "IMPS"
+        # IMPS is instant but capped (~₹5L per txn), so above the cap use the
+        # configured high-value mode (NEFT by default, or RTGS). Both the threshold
+        # and the above-cap mode are configurable in case the IMPS limit changes.
+        mode = (
+            "IMPS"
+            if amount_paise <= settings.IMPS_MAX_PAYOUT_PAISE
+            else settings.BANK_PAYOUT_ABOVE_CAP_MODE
+        )
     else:
         raise ValueError("Payout requires a VPA or an account_number + IFSC")
 

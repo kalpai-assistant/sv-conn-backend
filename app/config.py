@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -51,6 +52,15 @@ class Settings(BaseSettings):
     # Look-back window (seconds) for the nightly payout reconciliation. Overlaps
     # previous runs so nothing slips between them. Default 48h.
     PAYOUT_RECONCILE_WINDOW_SECONDS: int = 172_800
+    # Bank-payout mode threshold (in paise). IMPS is instant but capped at ~₹5L per
+    # transaction; bank payouts at/under this go IMPS, above it use the high-value
+    # mode below. Configurable so the cap can be tuned without a code change if the
+    # limit moves.
+    IMPS_MAX_PAYOUT_PAISE: int = 50_000_000  # ₹5,00,000
+    # Mode for bank payouts above the IMPS cap: "NEFT" (default) or "RTGS" (real-time,
+    # for high value). RTGS clears faster but is a distinct rail — switch here without
+    # a code change.
+    BANK_PAYOUT_ABOVE_CAP_MODE: str = "NEFT"  # "NEFT" | "RTGS"
 
     # Firebase
     FCM_CREDENTIALS_PATH: str = ""
@@ -70,6 +80,16 @@ class Settings(BaseSettings):
 
     # Encryption (AES-256) for PII at rest
     ENCRYPTION_KEY: str = ""
+
+    @field_validator("BANK_PAYOUT_ABOVE_CAP_MODE")
+    @classmethod
+    def _validate_above_cap_mode(cls, v: str) -> str:
+        allowed = {"NEFT", "RTGS"}
+        if v not in allowed:
+            raise ValueError(
+                f"BANK_PAYOUT_ABOVE_CAP_MODE must be one of {sorted(allowed)}, got {v!r}"
+            )
+        return v
 
     class Config:
         env_file = ".env"
