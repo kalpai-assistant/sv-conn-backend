@@ -39,6 +39,9 @@ class SettlementStatus(str, enum.Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+    # Completed payout later clawed back by the bank / RazorpayX. Distinct from
+    # FAILED (never paid): REVERSED means money went out and came back.
+    REVERSED = "reversed"
 
 
 # Valid state transitions — enforced in booking_service.py
