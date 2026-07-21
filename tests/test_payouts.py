@@ -10,6 +10,7 @@ import inspect
 import json
 import hmac
 import hashlib
+import logging
 import uuid
 import httpx
 import pytest
@@ -38,6 +39,25 @@ from app.utils.encryption import encrypt
 from app.config import get_settings
 
 settings = get_settings()
+
+
+@pytest.fixture(autouse=True)
+def stub_payout_audit_io():
+    """Stub the audit-write helpers.
+
+    They commit via ``AsyncSessionLocal`` (the app DB, ``serviceconnect``) rather
+    than the test session (``sc_test``), so they can't run against test data. Every
+    test that triggers a payout uses this; the audit-specific tests assert on the
+    returned mocks. ``_record_attempting_audit`` returns a stable fake audit id.
+    """
+    fake_audit_id = uuid.uuid4()
+    with patch.object(
+        PayoutService, "_record_attempting_audit",
+        new_callable=AsyncMock, return_value=fake_audit_id,
+    ) as rec, patch.object(
+        PayoutService, "_resolve_audit", new_callable=AsyncMock,
+    ) as res:
+        yield rec, res, fake_audit_id
 
 
 async def _booking_for(db_session, consumer, provider, **kwargs):
@@ -117,9 +137,11 @@ async def test_payout_happy_path(db_session):
         await db_session.refresh(b)
         assert b.settlement_status == SettlementStatus.PROCESSING
 
-    # The idempotency key is derived from the batch's booking ids (stable + unique).
+    # The idempotency key is derived from the batch's booking ids (stable + unique),
+    # and the same key is sent as reference_id so reconciliation can map it back.
     expected_key = PayoutService._batch_idempotency_key([b1, b2])
     assert kwargs["idempotency_key"] == expected_key
+    assert kwargs["reference_id"] == expected_key
     # Order-independent and distinct from a different batch.
     assert PayoutService._batch_idempotency_key([b2, b1]) == expected_key
     assert PayoutService._batch_idempotency_key([b1]) != expected_key
@@ -439,39 +461,47 @@ async def test_concurrent_payouts_do_not_double_pay():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_payout_writes_success_audit(db_session):
-    """A successful payout writes a payout_audits row: who, whom, amount, outcome."""
+async def test_payout_writes_success_audit(db_session, stub_payout_audit_io):
+    """A successful payout writes an 'attempting' breadcrumb, then resolves it.
+
+    The audit helpers commit via AsyncSessionLocal (the app DB), so they're stubbed;
+    this asserts the breadcrumb is written before the call with the right facts +
+    batch-key reference_id, and resolved to the RazorpayX status + payout id.
+    """
+    rec, res, _ = stub_payout_audit_io
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     admin = await UserFactory.create(db_session, role="admin")
     await _provider_with_payout_vpa(db_session, provider)
-    await _booking_for(db_session, consumer, provider)
+    booking = await _booking_for(db_session, consumer, provider)
 
     with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
         mock_payout.return_value = {"id": "pout_audit", "status": "processing"}
         await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
 
-    audit = (
-        await db_session.execute(
-            select(PayoutAudit).where(PayoutAudit.provider_id == provider.id)
-        )
-    ).scalar_one()
-    assert audit.admin_user_id == admin.id
-    assert audit.payout_id == "pout_audit"
-    assert audit.outcome == "processing"
-    assert audit.amount_paise == 8000  # 80 * 100
-    assert audit.booking_count == 1
-    assert audit.error is None
+    # Breadcrumb written before the call: (admin, provider, amount, count, reference_id).
+    rec.assert_awaited_once()
+    a = rec.call_args.args
+    assert a[0] == admin.id and a[1] == provider.id
+    assert a[2] == 8000 and a[3] == 1  # amount_paise, booking_count
+    assert a[4] == PayoutService._batch_idempotency_key([booking])  # reference_id = batch key
+
+    # Then resolved to the RazorpayX outcome + payout id.
+    res.assert_awaited_once()
+    assert res.call_args.kwargs["outcome"] == "processing"
+    assert res.call_args.kwargs["payout_id"] == "pout_audit"
 
 
 @pytest.mark.asyncio
-async def test_payout_failure_records_audit_and_keeps_bookings_pending(db_session):
-    """A failed RazorpayX call records a failed audit, re-raises, and flips nothing.
+async def test_payout_failure_resolves_audit_failed_and_keeps_bookings_pending(
+    db_session, stub_payout_audit_io
+):
+    """A failed RazorpayX call resolves the breadcrumb to 'failed', re-raises, flips nothing.
 
-    ``_record_failed_audit`` is patched (it commits in its own session, which the
-    test's rolled-back fixture can't satisfy via FKs); this asserts the service
-    records the failure and leaves the bookings untouched for a safe retry.
+    The audit helpers commit in their own session (app DB), so they're stubbed; this
+    asserts the failure is recorded and the bookings are left untouched for a safe retry.
     """
+    rec, res, _ = stub_payout_audit_io
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     admin = await UserFactory.create(db_session, role="admin")
@@ -479,17 +509,16 @@ async def test_payout_failure_records_audit_and_keeps_bookings_pending(db_sessio
     booking = await _booking_for(db_session, consumer, provider)
 
     boom = RuntimeError("RazorpayX 503")
-    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout, \
-         patch.object(PayoutService, "_record_failed_audit", new_callable=AsyncMock) as mock_audit:
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
         mock_payout.side_effect = boom
         with pytest.raises(RuntimeError):
             await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
 
-    # Failure audit was recorded with the right facts.
-    mock_audit.assert_awaited_once()
-    args = mock_audit.call_args.args
-    assert args[0] == admin.id and args[1] == provider.id
-    assert args[2] == 8000 and args[3] == 1  # amount_paise, booking_count
+    # Breadcrumb was written, then resolved to failed with the error captured.
+    rec.assert_awaited_once()
+    res.assert_awaited_once()
+    assert res.call_args.kwargs["outcome"] == "failed"
+    assert "RazorpayX 503" in res.call_args.kwargs["error"]
 
     # Bookings remain PENDING — nothing was settled, so a retry is safe.
     await db_session.refresh(booking)
@@ -684,3 +713,45 @@ async def test_payout_audit_source_defaults_to_admin(db_session):
     await db_session.flush()
     await db_session.refresh(audit)
     assert audit.source == "admin"
+
+
+# ---------------------------------------------------------------------------
+# SVC-137 — webhook handles payout.reversed → REVERSED (+ alert)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_payout_reversed_webhook_claws_back_completed(db_session, caplog):
+    """payout.reversed moves a COMPLETED settlement to REVERSED and logs an alert."""
+    booking = await _booking_in_processing(db_session, "pout_rev")
+
+    # It first processes → COMPLETED.
+    await PayoutService(db_session).handle_payout_webhook(
+        event="payout.processed",
+        payload={"payout": {"entity": {"id": "pout_rev"}}},
+    )
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.COMPLETED
+
+    # Then it reverses → REVERSED, with an alert surfaced for a human.
+    with caplog.at_level(logging.ERROR):
+        await PayoutService(db_session).handle_payout_webhook(
+            event="payout.reversed",
+            payload={"payout": {"entity": {"id": "pout_rev"}}},
+        )
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.REVERSED
+    assert any("payout.reversed" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_payout_reversed_webhook_handles_still_processing(db_session):
+    """A reversal on a still-PROCESSING settlement also moves it to REVERSED."""
+    booking = await _booking_in_processing(db_session, "pout_rev2")
+    assert booking.settlement_status == SettlementStatus.PROCESSING
+
+    await PayoutService(db_session).handle_payout_webhook(
+        event="payout.reversed",
+        payload={"payout": {"entity": {"id": "pout_rev2"}}},
+    )
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.REVERSED
