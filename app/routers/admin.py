@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import require_role
 from app.models.user import User
-from app.models.booking import Booking, BookingStatus
+from app.models.booking import Booking, BookingStatus, SettlementStatus
 from app.models.payment import Payment
 from app.models.provider_profile import ProviderProfile, KYCStatus
 from app.schemas.user import UserResponse
@@ -156,4 +156,27 @@ async def requeue_failed_settlements(
     eligible for the next payout run. The triggering admin is recorded in the audit
     trail.
     """
-    return await PayoutService(db).requeue_failed_settlements(user_id, admin.id)
+    return await PayoutService(db).requeue_settlements(
+        user_id, admin.id, from_status=SettlementStatus.FAILED
+    )
+
+
+@router.post(
+    "/providers/{user_id}/payout/requeue-reversed", status_code=status.HTTP_200_OK
+)
+async def requeue_reversed_settlements(
+    user_id: UUID,
+    admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reset a provider's REVERSED settlements to PENDING so they can be paid again.
+
+    A reversal means the payout reached the provider and was then clawed back —
+    often a KYC/compliance signal, not a simple retry. Only use this once you've
+    confirmed the provider is genuinely still owed and the underlying cause is
+    fixed; otherwise the re-payment will likely bounce again. Admin-only and
+    recorded in the audit trail.
+    """
+    return await PayoutService(db).requeue_settlements(
+        user_id, admin.id, from_status=SettlementStatus.REVERSED
+    )

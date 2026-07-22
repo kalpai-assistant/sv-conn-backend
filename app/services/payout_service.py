@@ -135,53 +135,72 @@ class PayoutService:
             "booking_count": len(bookings),
         }
 
-    async def requeue_failed_settlements(
-        self, provider_id: UUID, admin_user_id: UUID
+    async def requeue_settlements(
+        self, provider_id: UUID, admin_user_id: UUID, *, from_status: SettlementStatus
     ) -> dict:
         """
-        Reset a provider's FAILED settlements to PENDING so they can be paid again.
+        Reset a provider's stranded settlements back to PENDING so they can be paid
+        again. ``from_status`` must be FAILED or REVERSED.
 
-        A failed payout leaves its bookings FAILED, and ``create_provider_payout``
-        only selects PENDING ones — so without this they're stranded. Per the agreed
-        policy re-payment is a manual admin action, taken *after* the root cause (bad
-        bank details, KYC hold, ...) is fixed; this is that action. The old payout id
-        is cleared so the next payout links cleanly. Records an admin audit row and
-        returns how many were re-queued.
+        Both states are excluded from ``create_provider_payout`` (which only selects
+        PENDING), so without this they're stranded. Re-payment is a deliberate manual
+        admin action, taken *after* the root cause is fixed:
+
+        - **FAILED** — the payout never reached the provider (bad bank details, KYC
+          hold, ...); once fixed, re-queue to try again.
+        - **REVERSED** — the payout reached the provider and was then clawed back.
+          This often signals a KYC/compliance problem, so **confirm the provider is
+          genuinely still owed before re-queuing** — re-paying a reversal you
+          shouldn't sends money that will likely bounce again.
+
+        The old payout id is cleared so the next payout links cleanly. Records an
+        admin audit row and returns how many were re-queued.
         """
+        if from_status not in (SettlementStatus.FAILED, SettlementStatus.REVERSED):
+            raise PaymentError(
+                f"Cannot re-queue settlements from {from_status.value}"
+            )
+
         result = await self.db.execute(
             select(Booking)
             .where(
                 Booking.provider_id == provider_id,
                 Booking.status == BookingStatus.COMPLETED,
-                Booking.settlement_status == SettlementStatus.FAILED,
+                Booking.settlement_status == from_status,
             )
             .with_for_update(skip_locked=True)
         )
-        failed = list(result.scalars().all())
-        if not failed:
-            raise PaymentError("No failed settlements to re-queue for this provider")
+        stuck = list(result.scalars().all())
+        if not stuck:
+            raise PaymentError(
+                f"No {from_status.value} settlements to re-queue for this provider"
+            )
 
-        for booking in failed:
+        for booking in stuck:
             booking.settlement_status = SettlementStatus.PENDING
             booking.settlement_payout_id = None
 
-        amount_paise = int(sum(b.provider_payout for b in failed) * 100)
+        amount_paise = int(sum(b.provider_payout for b in stuck) * 100)
         self.db.add(PayoutAudit(
             admin_user_id=admin_user_id,
             provider_id=provider_id,
             source="admin",
             amount_paise=amount_paise,
-            booking_count=len(failed),
+            booking_count=len(stuck),
             payout_id=None,
             outcome="requeued",
         ))
         await self.db.flush()
 
         logger.info(
-            "payout.requeue admin=%s provider=%s bookings=%s",
-            admin_user_id, provider_id, len(failed),
+            "payout.requeue admin=%s provider=%s from=%s bookings=%s",
+            admin_user_id, provider_id, from_status.value, len(stuck),
         )
-        return {"requeued": len(failed), "provider_id": str(provider_id)}
+        return {
+            "requeued": len(stuck),
+            "from_status": from_status.value,
+            "provider_id": str(provider_id),
+        }
 
     async def handle_payout_webhook(self, event: str, payload: dict) -> None:
         """

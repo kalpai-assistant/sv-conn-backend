@@ -803,7 +803,7 @@ def test_reconcile_payouts_task_runs_service_with_window():
 
 
 # ---------------------------------------------------------------------------
-# SVC-137 — admin re-queues FAILED settlements → PENDING (manual retry policy)
+# SVC-137 — admin re-queues stranded settlements (FAILED / REVERSED) → PENDING
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -819,7 +819,9 @@ async def test_requeue_failed_resets_to_pending(db_session):
         b.settlement_payout_id = "pout_failed"
     await db_session.flush()
 
-    result = await PayoutService(db_session).requeue_failed_settlements(provider.id, admin.id)
+    result = await PayoutService(db_session).requeue_settlements(
+        provider.id, admin.id, from_status=SettlementStatus.FAILED
+    )
 
     assert result["requeued"] == 2
     for b in (b1, b2):
@@ -840,7 +842,9 @@ async def test_requeue_only_touches_failed(db_session):
     processing.settlement_status = SettlementStatus.PROCESSING
     await db_session.flush()
 
-    result = await PayoutService(db_session).requeue_failed_settlements(provider.id, admin.id)
+    result = await PayoutService(db_session).requeue_settlements(
+        provider.id, admin.id, from_status=SettlementStatus.FAILED
+    )
 
     assert result["requeued"] == 1
     await db_session.refresh(processing)
@@ -853,7 +857,9 @@ async def test_requeue_no_failed_raises(db_session):
     provider = await UserFactory.create(db_session, role="provider")
     admin = await UserFactory.create(db_session, role="admin")
     with pytest.raises(PaymentError):
-        await PayoutService(db_session).requeue_failed_settlements(provider.id, admin.id)
+        await PayoutService(db_session).requeue_settlements(
+        provider.id, admin.id, from_status=SettlementStatus.FAILED
+    )
 
 
 @pytest.mark.asyncio
@@ -866,7 +872,9 @@ async def test_requeue_writes_admin_audit(db_session):
     booking.settlement_status = SettlementStatus.FAILED
     await db_session.flush()
 
-    await PayoutService(db_session).requeue_failed_settlements(provider.id, admin.id)
+    await PayoutService(db_session).requeue_settlements(
+        provider.id, admin.id, from_status=SettlementStatus.FAILED
+    )
 
     audit = (
         await db_session.execute(
@@ -877,6 +885,39 @@ async def test_requeue_writes_admin_audit(db_session):
     assert audit.admin_user_id == admin.id
     assert audit.provider_id == provider.id
     assert audit.booking_count == 1
+
+
+@pytest.mark.asyncio
+async def test_requeue_reversed_resets_to_pending(db_session):
+    """REVERSED settlements can also be re-queued once the provider is confirmed owed."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    booking = await _booking_for(db_session, consumer, provider)
+    booking.settlement_status = SettlementStatus.REVERSED
+    booking.settlement_payout_id = "pout_reversed"
+    await db_session.flush()
+
+    result = await PayoutService(db_session).requeue_settlements(
+        provider.id, admin.id, from_status=SettlementStatus.REVERSED
+    )
+
+    assert result["requeued"] == 1
+    assert result["from_status"] == "reversed"
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.PENDING
+    assert booking.settlement_payout_id is None
+
+
+@pytest.mark.asyncio
+async def test_requeue_rejects_non_requeueable_status(db_session):
+    """Re-queue only accepts FAILED/REVERSED — a COMPLETED source is rejected."""
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    with pytest.raises(PaymentError):
+        await PayoutService(db_session).requeue_settlements(
+            provider.id, admin.id, from_status=SettlementStatus.COMPLETED
+        )
 
 
 # ---------------------------------------------------------------------------
