@@ -139,3 +139,21 @@ async def pay_out_provider(
     place rather than committed here.
     """
     return await PayoutService(db).create_provider_payout(user_id, admin.id)
+
+
+@router.post(
+    "/providers/{user_id}/payout/requeue-failed", status_code=status.HTTP_200_OK
+)
+async def requeue_failed_settlements(
+    user_id: UUID,
+    admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reset a provider's FAILED settlements to PENDING so they can be paid again.
+
+    Manual recovery for payouts that failed (bad bank details, KYC hold, ...): once
+    the cause is fixed, an admin re-queues the failed settlements, which then become
+    eligible for the next payout run. The triggering admin is recorded in the audit
+    trail.
+    """
+    return await PayoutService(db).requeue_failed_settlements(user_id, admin.id)

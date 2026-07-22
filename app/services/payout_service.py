@@ -135,6 +135,54 @@ class PayoutService:
             "booking_count": len(bookings),
         }
 
+    async def requeue_failed_settlements(
+        self, provider_id: UUID, admin_user_id: UUID
+    ) -> dict:
+        """
+        Reset a provider's FAILED settlements to PENDING so they can be paid again.
+
+        A failed payout leaves its bookings FAILED, and ``create_provider_payout``
+        only selects PENDING ones — so without this they're stranded. Per the agreed
+        policy re-payment is a manual admin action, taken *after* the root cause (bad
+        bank details, KYC hold, ...) is fixed; this is that action. The old payout id
+        is cleared so the next payout links cleanly. Records an admin audit row and
+        returns how many were re-queued.
+        """
+        result = await self.db.execute(
+            select(Booking)
+            .where(
+                Booking.provider_id == provider_id,
+                Booking.status == BookingStatus.COMPLETED,
+                Booking.settlement_status == SettlementStatus.FAILED,
+            )
+            .with_for_update(skip_locked=True)
+        )
+        failed = list(result.scalars().all())
+        if not failed:
+            raise PaymentError("No failed settlements to re-queue for this provider")
+
+        for booking in failed:
+            booking.settlement_status = SettlementStatus.PENDING
+            booking.settlement_payout_id = None
+
+        amount_paise = int(sum(b.provider_payout for b in failed) * 100)
+        self.db.add(PayoutAudit(
+            admin_user_id=admin_user_id,
+            provider_id=provider_id,
+            source="admin",
+            amount_paise=amount_paise,
+            booking_count=len(failed),
+            payout_id=None,
+            outcome="requeued",
+        ))
+        await self.db.flush()
+
+        logger.info(
+            "payout.requeue admin=%s provider=%s bookings=%s",
+            admin_user_id, provider_id, len(failed),
+        )
+        return {"requeued": len(failed), "provider_id": str(provider_id)}
+
     async def handle_payout_webhook(self, event: str, payload: dict) -> None:
         """
         Move a payout's settlements based on its outcome.
