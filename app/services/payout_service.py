@@ -10,7 +10,7 @@ import hashlib
 import logging
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
@@ -47,8 +47,10 @@ class PayoutService:
         carries an idempotency key derived from the exact set of booking ids, so a
         retry after a partial failure returns the same payout instead of paying again.
 
-        ``admin_user_id`` is the admin triggering the payout; every attempt is written
-        to ``payout_audits`` (on success and on failure) for compliance.
+        ``admin_user_id`` is the admin triggering the payout; every attempt is
+        recorded in ``payout_audits`` — an ``attempting`` row is committed before the
+        RazorpayX call and resolved to the final outcome, so a crash mid-flight still
+        leaves a locatable record for reconciliation.
         """
         profile = await self._get_provider_profile(provider_id)
         vpa, account_number, ifsc = self._decrypt_payout_details(profile)
@@ -63,7 +65,9 @@ class PayoutService:
         # Key derived from the exact batch (sorted booking ids), so the same batch
         # always produces the same key. If create_payout succeeds but the DB write
         # below fails, retrying this batch reuses the key and RazorpayX returns the
-        # existing payout rather than creating a duplicate.
+        # existing payout rather than creating a duplicate. The same key is also sent
+        # as the RazorpayX reference_id so reconciliation can map a payout back to its
+        # exact batch.
         idempotency_key = self._batch_idempotency_key(bookings)
 
         logger.info(
@@ -71,26 +75,31 @@ class PayoutService:
             admin_user_id, provider_id, amount_paise, len(bookings),
         )
 
+        # Breadcrumb committed BEFORE the RazorpayX call, in its own transaction, so
+        # a crash after the money moves but before this request commits still leaves
+        # a locatable record (keyed by reference_id) for reconciliation to resolve.
+        audit_id = await self._record_attempting_audit(
+            admin_user_id, provider_id, amount_paise, len(bookings), idempotency_key
+        )
+
         try:
             payout = await create_payout(
                 amount_paise=amount_paise,
                 idempotency_key=idempotency_key,
-                reference_id=str(provider_id),
+                reference_id=idempotency_key,
                 vpa=vpa,
                 account_number=account_number,
                 ifsc=ifsc,
             )
         except Exception as exc:
-            # The payout call failed (after retries). Record the failed attempt in
-            # its own committed transaction so the audit survives the request
-            # rollback, then re-raise for the caller to surface to the admin.
+            # The payout call failed (after retries). Resolve the breadcrumb to
+            # ``failed`` in its own transaction so it survives the request rollback,
+            # then re-raise for the caller to surface to the admin.
             logger.error(
                 "payout.failed admin=%s provider=%s amount_paise=%s error=%s",
                 admin_user_id, provider_id, amount_paise, exc,
             )
-            await self._record_failed_audit(
-                admin_user_id, provider_id, amount_paise, len(bookings), str(exc)
-            )
+            await self._resolve_audit(audit_id, outcome="failed", error=str(exc))
             raise
 
         # The payout has been created at RazorpayX; record it on the bookings. If
@@ -101,16 +110,10 @@ class PayoutService:
             booking.settlement_status = SettlementStatus.PROCESSING
             booking.settlement_payout_id = payout_id
 
-        # Success audit shares this request's transaction, so it commits atomically
-        # with the booking flips (committed by get_db on a clean response).
-        self.db.add(PayoutAudit(
-            admin_user_id=admin_user_id,
-            provider_id=provider_id,
-            amount_paise=amount_paise,
-            booking_count=len(bookings),
-            payout_id=payout_id,
-            outcome=status or "initiated",
-        ))
+        # Resolve the breadcrumb to the real outcome + payout id.
+        await self._resolve_audit(
+            audit_id, outcome=status or "initiated", payout_id=payout_id
+        )
         await self.db.flush()
 
         logger.info(
@@ -129,36 +132,44 @@ class PayoutService:
         """
         Move a payout's settlements based on its outcome.
 
-        ``payout.processed`` → COMPLETED, ``payout.failed`` → FAILED. Bookings are
-        matched on the RazorpayX payout id (``settlement_payout_id``), so concurrent
-        payouts for the same provider settle independently. Idempotent: only bookings
-        still PROCESSING for that payout are touched.
+        ``payout.processed`` → COMPLETED, ``payout.failed`` → FAILED,
+        ``payout.reversed`` → REVERSED (completed money clawed back; also alerts).
+        Bookings are matched on the RazorpayX payout id (``settlement_payout_id``),
+        so concurrent payouts settle independently. Idempotent: only bookings in a
+        transitionable state for that payout are touched.
         """
-        # RazorpayX sends other event types to this endpoint too (payout.updated,
-        # payout.reversed, transaction.*). They're a legitimate no-op for us, but
-        # acknowledge them with a breadcrumb rather than swallowing them silently.
-        if event not in ("payout.processed", "payout.failed"):
+        # Terminal payout events we act on. Everything else (payout.updated,
+        # transaction.*) is a legitimate no-op — acknowledge with a breadcrumb.
+        terminal = {
+            "payout.processed": SettlementStatus.COMPLETED,
+            "payout.failed": SettlementStatus.FAILED,
+            "payout.reversed": SettlementStatus.REVERSED,
+        }
+        if event not in terminal:
             logger.info("Ignoring non-terminal RazorpayX webhook event: %s", event)
             return
 
         entity = payload.get("payout", {}).get("entity", {})
         payout_id = entity.get("id")
         if not payout_id:
-            # A payout.processed/failed event with no payout id is malformed — we
-            # can't map it to any settlement. Surface it instead of failing silently.
+            # A terminal event with no payout id is malformed — we can't map it to
+            # any settlement. Surface it instead of failing silently.
             logger.error("RazorpayX %s webhook missing payout.entity.id", event)
             raise PaymentError("Payout webhook missing payout id")
 
-        new_status = (
-            SettlementStatus.COMPLETED
-            if event == "payout.processed"
-            else SettlementStatus.FAILED
+        new_status = terminal[event]
+        # processed/failed transition a PROCESSING settlement; a reversal claws back a
+        # payout that had already COMPLETED (and defensively one still PROCESSING).
+        from_statuses = (
+            (SettlementStatus.PROCESSING, SettlementStatus.COMPLETED)
+            if event == "payout.reversed"
+            else (SettlementStatus.PROCESSING,)
         )
 
         result = await self.db.execute(
             select(Booking).where(
                 Booking.settlement_payout_id == payout_id,
-                Booking.settlement_status == SettlementStatus.PROCESSING,
+                Booking.settlement_status.in_(from_statuses),
             )
         )
         settled = result.scalars().all()
@@ -170,35 +181,93 @@ class PayoutService:
             "payout.webhook event=%s payout_id=%s settled=%s -> %s",
             event, payout_id, len(settled), new_status.value,
         )
+        if event == "payout.reversed":
+            # Completed money was clawed back — always surface for a human to review.
+            logger.error(
+                "ALERT payout.reversed payout_id=%s reversed_bookings=%s",
+                payout_id, len(settled),
+            )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _record_failed_audit(
+    async def _record_attempting_audit(
         admin_user_id: UUID,
         provider_id: UUID,
         amount_paise: int,
         booking_count: int,
-        error: str,
-    ) -> None:
-        """Persist a failed payout attempt in its own transaction.
+        reference_id: str,
+    ) -> UUID:
+        """Write an ``attempting`` audit row in its own committed transaction.
 
-        Uses a fresh session (not ``self.db``) so the audit row commits even though
-        the request's transaction is about to roll back on the re-raised error.
+        Idempotent on ``reference_id``: a retry of the same batch after a mid-flight
+        crash produces the same key, so we reuse the existing row instead of writing a
+        duplicate — the audit table stays a 1:1 ledger. Uses a fresh session (not
+        ``self.db``) so the row survives the request's rollback. ``reference_id`` (the
+        batch key) lets reconciliation map an orphaned payout back to this row.
+        Returns the row's id.
         """
         async with AsyncSessionLocal() as session:
-            session.add(PayoutAudit(
+            existing = (
+                await session.execute(
+                    select(PayoutAudit.id).where(
+                        PayoutAudit.reference_id == reference_id
+                    )
+                )
+            ).scalars().first()
+            if existing is not None:
+                return existing
+
+            audit = PayoutAudit(
                 admin_user_id=admin_user_id,
                 provider_id=provider_id,
+                source="admin",
                 amount_paise=amount_paise,
                 booking_count=booking_count,
+                reference_id=reference_id,
                 payout_id=None,
-                outcome="failed",
-                error=error[:500],
-            ))
+                outcome="attempting",
+            )
+            session.add(audit)
             await session.commit()
+            return audit.id
+
+    @staticmethod
+    async def _resolve_audit(
+        audit_id: UUID,
+        *,
+        outcome: str,
+        payout_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Resolve an ``attempting`` audit row to its final outcome.
+
+        Own transaction (like the write above) so the success/failure outcome is
+        recorded independently of the request's transaction. If no row matches
+        ``audit_id`` (e.g. it was deleted out-of-band), the update silently no-ops and
+        the breadcrumb would stay ``attempting`` forever — so we surface that as an
+        error rather than swallow it. This runs after the money has moved, so we log
+        (alert) rather than raise, which would fail the request post-payout.
+        """
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                update(PayoutAudit)
+                .where(PayoutAudit.id == audit_id)
+                .values(
+                    outcome=outcome,
+                    payout_id=payout_id,
+                    error=(error[:500] if error else None),
+                )
+            )
+            await session.commit()
+            if result.rowcount != 1:
+                logger.error(
+                    "ALERT payout audit resolve touched %s rows for audit_id=%s "
+                    "(expected 1) — breadcrumb not updated",
+                    result.rowcount, audit_id,
+                )
 
     @staticmethod
     def _batch_idempotency_key(bookings: list[Booking]) -> str:

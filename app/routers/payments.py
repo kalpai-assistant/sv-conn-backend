@@ -95,8 +95,8 @@ async def razorpayx_payout_webhook(
     RazorpayX (payouts) webhook — verified against RAZORPAYX_WEBHOOK_SECRET.
 
     RazorpayX is a separate Razorpay product with its own webhook secret, so its
-    payout.processed / payout.failed events must arrive on a dedicated endpoint
-    rather than the Payments webhook (which validates a different secret).
+    payout.processed / payout.failed / payout.reversed events must arrive on a
+    dedicated endpoint rather than the Payments webhook (different secret).
     """
     payload_data = await _verify_and_parse(request, settings.RAZORPAYX_WEBHOOK_SECRET)
     await PayoutService(db).handle_payout_webhook(
