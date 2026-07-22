@@ -202,12 +202,24 @@ class PayoutService:
     ) -> UUID:
         """Write an ``attempting`` audit row in its own committed transaction.
 
-        Uses a fresh session (not ``self.db``) so the row survives the request's
-        rollback and is present even if the process crashes right after the RazorpayX
-        call. ``reference_id`` (the batch key) lets reconciliation map an orphaned
-        payout back to this row. Returns the new row's id.
+        Idempotent on ``reference_id``: a retry of the same batch after a mid-flight
+        crash produces the same key, so we reuse the existing row instead of writing a
+        duplicate — the audit table stays a 1:1 ledger. Uses a fresh session (not
+        ``self.db``) so the row survives the request's rollback. ``reference_id`` (the
+        batch key) lets reconciliation map an orphaned payout back to this row.
+        Returns the row's id.
         """
         async with AsyncSessionLocal() as session:
+            existing = (
+                await session.execute(
+                    select(PayoutAudit.id).where(
+                        PayoutAudit.reference_id == reference_id
+                    )
+                )
+            ).scalars().first()
+            if existing is not None:
+                return existing
+
             audit = PayoutAudit(
                 admin_user_id=admin_user_id,
                 provider_id=provider_id,
@@ -233,10 +245,14 @@ class PayoutService:
         """Resolve an ``attempting`` audit row to its final outcome.
 
         Own transaction (like the write above) so the success/failure outcome is
-        recorded independently of the request's transaction.
+        recorded independently of the request's transaction. If no row matches
+        ``audit_id`` (e.g. it was deleted out-of-band), the update silently no-ops and
+        the breadcrumb would stay ``attempting`` forever — so we surface that as an
+        error rather than swallow it. This runs after the money has moved, so we log
+        (alert) rather than raise, which would fail the request post-payout.
         """
         async with AsyncSessionLocal() as session:
-            await session.execute(
+            result = await session.execute(
                 update(PayoutAudit)
                 .where(PayoutAudit.id == audit_id)
                 .values(
@@ -246,6 +262,12 @@ class PayoutService:
                 )
             )
             await session.commit()
+            if result.rowcount != 1:
+                logger.error(
+                    "ALERT payout audit resolve touched %s rows for audit_id=%s "
+                    "(expected 1) — breadcrumb not updated",
+                    result.rowcount, audit_id,
+                )
 
     @staticmethod
     def _batch_idempotency_key(bookings: list[Booking]) -> str:

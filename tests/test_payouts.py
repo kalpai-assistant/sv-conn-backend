@@ -40,6 +40,11 @@ from app.config import get_settings
 
 settings = get_settings()
 
+# Real (un-stubbed) audit helpers, captured before the autouse fixture patches them,
+# so the dedicated audit tests below can exercise the real implementations.
+_REAL_RECORD_ATTEMPTING = PayoutService._record_attempting_audit
+_REAL_RESOLVE_AUDIT = PayoutService._resolve_audit
+
 
 @pytest.fixture(autouse=True)
 def stub_payout_audit_io():
@@ -755,3 +760,73 @@ async def test_payout_reversed_webhook_handles_still_processing(db_session):
     )
     await db_session.refresh(booking)
     assert booking.settlement_status == SettlementStatus.REVERSED
+
+
+# ---------------------------------------------------------------------------
+# SVC-137 (review) — audit-write helpers: idempotent breadcrumb + resolve guard
+#
+# These exercise the REAL helpers (bypassing the autouse stub) against the test DB
+# by pointing AsyncSessionLocal at a committed session, since the helpers commit in
+# their own session rather than the request's.
+# ---------------------------------------------------------------------------
+
+async def _committed_provider_admin(factory):
+    async with factory() as s:
+        provider = await UserFactory.create(s, role="provider")
+        admin = await UserFactory.create(s, role="admin")
+        await s.commit()
+        return provider.id, admin.id
+
+
+@pytest.mark.asyncio
+async def test_record_attempting_audit_is_idempotent_on_reference_id():
+    """A retry of the same batch reuses the attempting row instead of duplicating it."""
+    import app.services.payout_service as payout_svc
+
+    engine = create_async_engine(TEST_DATABASE_URL)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    provider_id, admin_id = await _committed_provider_admin(factory)
+    ref = "payout_dup_ref"
+
+    try:
+        with patch.object(payout_svc, "AsyncSessionLocal", factory):
+            id1 = await _REAL_RECORD_ATTEMPTING(admin_id, provider_id, 8000, 1, ref)
+            id2 = await _REAL_RECORD_ATTEMPTING(admin_id, provider_id, 8000, 1, ref)
+            # Resolving the reused row updates it in place (no new row).
+            await _REAL_RESOLVE_AUDIT(id1, outcome="processing", payout_id="pout_x")
+
+        assert id1 == id2  # same row reused on retry
+
+        async with factory() as s:
+            rows = (
+                await s.execute(select(PayoutAudit).where(PayoutAudit.reference_id == ref))
+            ).scalars().all()
+        assert len(rows) == 1  # exactly one audit row, not a duplicate
+        assert rows[0].outcome == "processing" and rows[0].payout_id == "pout_x"
+    finally:
+        async with factory() as s:
+            await s.execute(delete(PayoutAudit).where(PayoutAudit.reference_id == ref))
+            await s.execute(delete(User).where(User.id.in_([provider_id, admin_id])))
+            await s.commit()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_audit_missing_row_is_alerted(caplog):
+    """Resolving a non-existent audit id is surfaced (logged), not silently no-op'd."""
+    import app.services.payout_service as payout_svc
+
+    engine = create_async_engine(TEST_DATABASE_URL)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    try:
+        with patch.object(payout_svc, "AsyncSessionLocal", factory):
+            with caplog.at_level(logging.ERROR):
+                await _REAL_RESOLVE_AUDIT(uuid.uuid4(), outcome="processing")
+        assert any("audit resolve" in r.getMessage() for r in caplog.records)
+    finally:
+        await engine.dispose()
