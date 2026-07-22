@@ -112,3 +112,73 @@ async def create_payout(
                 attempt, _MAX_ATTEMPTS, status_code, backoff,
             )
             await asyncio.sleep(backoff)
+
+
+async def list_payouts(
+    *,
+    from_ts: int | None = None,
+    to_ts: int | None = None,
+    count: int = 100,
+) -> list[dict]:
+    """
+    List RazorpayX payouts for the funding account, paginated.
+
+    ``from_ts`` / ``to_ts`` are Unix seconds filtering ``created_at``. Follows
+    pagination (``skip``) until a short page, and retries transient failures with
+    backoff — same policy as ``create_payout``. Returns the raw payout entities.
+    """
+    all_items: list[dict] = []
+    skip = 0
+    # Defensive cap so a misbehaving API (always-full pages) can't loop forever.
+    _MAX_PAGES = 1000
+    for _ in range(_MAX_PAGES):
+        params: dict = {
+            "account_number": settings.RAZORPAYX_ACCOUNT_NUMBER,
+            "count": count,
+            "skip": skip,
+        }
+        if from_ts is not None:
+            params["from"] = from_ts
+        if to_ts is not None:
+            params["to"] = to_ts
+
+        data: dict = {}
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(
+                        _PAYOUTS_URL,
+                        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET),
+                        params=params,
+                    )
+                response.raise_for_status()
+                data = response.json()
+                break
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                status_code = (
+                    exc.response.status_code
+                    if isinstance(exc, httpx.HTTPStatusError)
+                    else None
+                )
+                transient = status_code is None or status_code in _RETRYABLE_STATUS
+                if not transient or attempt == _MAX_ATTEMPTS:
+                    raise
+                backoff = _BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)
+                logger.warning(
+                    "RazorpayX list_payouts transient failure (attempt %s/%s, status=%s); "
+                    "retrying in %ss",
+                    attempt, _MAX_ATTEMPTS, status_code, backoff,
+                )
+                await asyncio.sleep(backoff)
+
+        items = data.get("items", [])
+        all_items.extend(items)
+        if len(items) < count:
+            break
+        skip += count
+    else:
+        logger.warning(
+            "RazorpayX list_payouts hit the %s-page cap (%s items); results truncated",
+            _MAX_PAGES, len(all_items),
+        )
+    return all_items

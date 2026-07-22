@@ -552,6 +552,11 @@ class _FakeAsyncClient:
         self.calls += 1
         return resp
 
+    async def get(self, *args, **kwargs):
+        resp = self._responses[self.calls]
+        self.calls += 1
+        return resp
+
 
 def _resp(status_code, json_data=None):
     return httpx.Response(
@@ -600,6 +605,201 @@ async def test_create_payout_exhausts_retries():
                 amount_paise=8000, idempotency_key="k", reference_id="r", vpa="x@upi",
             )
     assert fake.calls == 3
+
+
+# ---------------------------------------------------------------------------
+# SVC-137 — list_payouts (reconciliation reads RazorpayX's record of payouts)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_list_payouts_single_page():
+    """A single short page is returned as-is (no further pagination)."""
+    fake = _FakeAsyncClient([_resp(200, {"items": [{"id": "pout_1"}, {"id": "pout_2"}]})])
+    with patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake):
+        items = await razorpayx_client.list_payouts(count=100)
+    assert [p["id"] for p in items] == ["pout_1", "pout_2"]
+    assert fake.calls == 1  # short page → stop
+
+
+@pytest.mark.asyncio
+async def test_list_payouts_paginates_until_short_page():
+    """A full page triggers another fetch; a short page stops it."""
+    full = _resp(200, {"items": [{"id": "a"}, {"id": "b"}]})   # count==2 → keep going
+    short = _resp(200, {"items": [{"id": "c"}]})               # < count → stop
+    fake = _FakeAsyncClient([full, short])
+    with patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake):
+        items = await razorpayx_client.list_payouts(count=2)
+    assert [p["id"] for p in items] == ["a", "b", "c"]
+    assert fake.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_list_payouts_retries_transient():
+    """A transient 503 is retried, then the page is returned."""
+    fake = _FakeAsyncClient([_resp(503), _resp(200, {"items": [{"id": "pout_ok"}]})])
+    with patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake), \
+         patch("app.utils.razorpayx_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        items = await razorpayx_client.list_payouts(count=100)
+    assert [p["id"] for p in items] == ["pout_ok"]
+    mock_sleep.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# SVC-137 — reconcile_payouts: repair drift vs RazorpayX (Case A / Case B / alert)
+# ---------------------------------------------------------------------------
+
+def _patch_list_payouts(payouts):
+    return patch(
+        "app.services.payout_service.list_payouts",
+        new_callable=AsyncMock, return_value=payouts,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_case_a_missed_webhook(db_session):
+    """Booking linked to a payout but stuck PROCESSING (missed webhook) → COMPLETED."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _booking_for(db_session, consumer, provider)
+    booking.settlement_status = SettlementStatus.PROCESSING
+    booking.settlement_payout_id = "pout_a"
+    await db_session.flush()
+
+    payouts = [{"id": "pout_a", "status": "processed", "amount": 8000, "reference_id": "ref_a"}]
+    with _patch_list_payouts(payouts):
+        report = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
+
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.COMPLETED
+    assert report["case_a"] == 1 and report["case_b"] == 0 and report["unresolved"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_case_b_orphan_relink(db_session):
+    """Orphaned payout (booking PENDING, no payout id) is re-linked via reference_id."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _booking_for(db_session, consumer, provider)  # PENDING, no payout id
+    batch_key = PayoutService._batch_idempotency_key([booking])
+
+    # The 'attempting' breadcrumb the create path commits before calling RazorpayX.
+    db_session.add(PayoutAudit(
+        admin_user_id=None, provider_id=provider.id, source="admin",
+        amount_paise=8000, booking_count=1, reference_id=batch_key,
+        payout_id=None, outcome="attempting",
+    ))
+    await db_session.flush()
+
+    payouts = [{"id": "pout_orphan", "status": "processed", "amount": 8000, "reference_id": batch_key}]
+    with _patch_list_payouts(payouts):
+        report = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
+
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.COMPLETED
+    assert booking.settlement_payout_id == "pout_orphan"
+    assert report["case_b"] == 1 and report["case_a"] == 0
+
+    # An automated (source='reconciliation', no admin) audit row is written.
+    recon = (
+        await db_session.execute(
+            select(PayoutAudit).where(PayoutAudit.source == "reconciliation")
+        )
+    ).scalars().all()
+    assert len(recon) == 1
+    assert recon[0].admin_user_id is None and recon[0].payout_id == "pout_orphan"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_is_idempotent(db_session):
+    """A second run over an already-repaired orphan changes nothing."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _booking_for(db_session, consumer, provider)
+    batch_key = PayoutService._batch_idempotency_key([booking])
+    db_session.add(PayoutAudit(
+        admin_user_id=None, provider_id=provider.id, source="admin",
+        amount_paise=8000, booking_count=1, reference_id=batch_key,
+        payout_id=None, outcome="attempting",
+    ))
+    await db_session.flush()
+
+    payouts = [{"id": "pout_idem", "status": "processed", "amount": 8000, "reference_id": batch_key}]
+    with _patch_list_payouts(payouts):
+        first = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
+        second = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
+
+    assert first["case_b"] == 1
+    assert second == {"checked": 1, "case_a": 0, "case_b": 0, "unresolved": 0}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_unresolved_orphan_alerts(db_session, caplog):
+    """An orphan we can't map (no breadcrumb) is counted unresolved and alerted."""
+    payouts = [{"id": "pout_x", "status": "processed", "amount": 8000, "reference_id": "unknown_ref"}]
+    with _patch_list_payouts(payouts):
+        with caplog.at_level(logging.ERROR):
+            report = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
+
+    assert report["unresolved"] == 1
+    assert any("unresolved" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_amount_mismatch_not_relinked(db_session):
+    """An orphan whose RazorpayX amount != the batch's amount is refused (unresolved)."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _booking_for(db_session, consumer, provider)
+    batch_key = PayoutService._batch_idempotency_key([booking])
+    db_session.add(PayoutAudit(
+        admin_user_id=None, provider_id=provider.id, source="admin",
+        amount_paise=8000, booking_count=1, reference_id=batch_key,
+        payout_id=None, outcome="attempting",
+    ))
+    await db_session.flush()
+
+    # RazorpayX reports a different amount — must NOT re-link.
+    payouts = [{"id": "pout_bad", "status": "processed", "amount": 9999, "reference_id": batch_key}]
+    with _patch_list_payouts(payouts):
+        report = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
+
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.PENDING  # untouched
+    assert report["unresolved"] == 1 and report["case_b"] == 0
+
+
+# ---------------------------------------------------------------------------
+# SVC-137 — the reconcile Celery Beat task wires the service to its own session
+# ---------------------------------------------------------------------------
+
+def test_reconcile_payouts_task_runs_service_with_window():
+    """The Beat task runs reconcile in its own session with an overlapping window."""
+    import app.database as database_mod
+    from app.tasks import payment_tasks
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def commit(self):
+            pass
+
+    captured = {}
+
+    async def _fake_reconcile(self, *, since_ts, until_ts):
+        captured["window"] = (since_ts, until_ts)
+        return {"checked": 2, "case_a": 1, "case_b": 0, "unresolved": 0}
+
+    with patch.object(database_mod, "AsyncSessionLocal", lambda: _FakeSession()), \
+         patch.object(PayoutService, "reconcile_payouts", _fake_reconcile):
+        result = payment_tasks.reconcile_payouts()
+
+    assert "case_a" in result  # report is echoed in the task's return string
+    since, until = captured["window"]
+    assert until > since  # window looks back into the past
 
 
 # ---------------------------------------------------------------------------

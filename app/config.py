@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # RazorpayX (payouts) is a separate product with its own webhook secret,
     # configured in the RazorpayX dashboard independently of the Payments webhook.
     RAZORPAYX_WEBHOOK_SECRET: str = ""
+    # Look-back window (seconds) for the nightly payout reconciliation. Overlaps
+    # previous runs so nothing slips between them. Default 48h.
+    PAYOUT_RECONCILE_WINDOW_SECONDS: int = 172_800
 
     # Firebase
     FCM_CREDENTIALS_PATH: str = ""
