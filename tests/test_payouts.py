@@ -619,3 +619,68 @@ async def test_payout_webhook_rejects_invalid_signature(client, db_session):
 
     await db_session.refresh(booking)
     assert booking.settlement_status == SettlementStatus.PROCESSING
+
+
+# ---------------------------------------------------------------------------
+# SVC-137 — reconciliation schema groundwork:
+# REVERSED state, nullable admin, source, reference_id (nothing reads these yet)
+# ---------------------------------------------------------------------------
+
+def test_settlement_status_has_reversed():
+    """REVERSED is a distinct settlement state (completed money clawed back)."""
+    assert SettlementStatus.REVERSED.value == "reversed"
+
+
+@pytest.mark.asyncio
+async def test_booking_settlement_status_accepts_reversed(db_session):
+    """A booking's settlement_status persists as REVERSED (DB enum accepts it)."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _booking_for(db_session, consumer, provider)
+
+    booking.settlement_status = SettlementStatus.REVERSED
+    await db_session.flush()
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.REVERSED
+
+
+@pytest.mark.asyncio
+async def test_payout_audit_reconciliation_row_has_no_admin(db_session):
+    """A reconciliation audit row persists with a null admin + source='reconciliation'."""
+    provider = await UserFactory.create(db_session, role="provider")
+    audit = PayoutAudit(
+        admin_user_id=None,  # automated action — no human admin
+        provider_id=provider.id,
+        source="reconciliation",
+        amount_paise=8000,
+        booking_count=1,
+        reference_id="payout_batch_abc",
+        outcome="processing",
+    )
+    db_session.add(audit)
+    await db_session.flush()
+
+    fetched = (
+        await db_session.execute(select(PayoutAudit).where(PayoutAudit.id == audit.id))
+    ).scalar_one()
+    assert fetched.admin_user_id is None
+    assert fetched.source == "reconciliation"
+    assert fetched.reference_id == "payout_batch_abc"
+
+
+@pytest.mark.asyncio
+async def test_payout_audit_source_defaults_to_admin(db_session):
+    """An audit row created without an explicit source defaults to 'admin'."""
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    audit = PayoutAudit(
+        admin_user_id=admin.id,
+        provider_id=provider.id,
+        amount_paise=8000,
+        booking_count=1,
+        outcome="processing",
+    )
+    db_session.add(audit)
+    await db_session.flush()
+    await db_session.refresh(audit)
+    assert audit.source == "admin"
