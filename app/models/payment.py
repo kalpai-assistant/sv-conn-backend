@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import Float, String, ForeignKey, DateTime, func, Enum, UniqueConstraint
+from sqlalchemy import Float, String, ForeignKey, DateTime, func, Enum, UniqueConstraint, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -29,9 +29,17 @@ class Payment(Base):
 
     __tablename__ = "payments"
 
+    # No unique constraint on booking_id: multiple payment records per booking are
+    # allowed (to track failed attempts). The CAPTURED record is the authoritative
+    # one (check status field).
     __table_args__ = (
-        # Allow multiple payment records per booking (to track failed attempts)
-        # The CAPTURED record is the authoritative one (check status field)
+        # Backs the admin bookings list's "has a disputed payment" lookup. Partial,
+        # so it stays tiny — disputes are rare.
+        Index(
+            "idx_payments_disputed_booking",
+            "booking_id",
+            postgresql_where="disputed_at IS NOT NULL",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -49,6 +57,10 @@ class Payment(Base):
         Enum(PaymentRecordStatus), default=PaymentRecordStatus.CREATED
     )
     method: Mapped[PaymentRecordMethod | None] = mapped_column(Enum(PaymentRecordMethod))
+    # Set when Razorpay reports a chargeback (payment.dispute.created). Beta keeps
+    # this as a flag only: status/settlement are never moved automatically, an admin
+    # resolves the dispute out of band.
+    disputed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

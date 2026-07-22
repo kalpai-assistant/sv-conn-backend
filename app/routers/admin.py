@@ -11,6 +11,7 @@ from app.database import get_db
 from app.dependencies import require_role
 from app.models.user import User
 from app.models.booking import Booking, BookingStatus
+from app.models.payment import Payment
 from app.models.provider_profile import ProviderProfile, KYCStatus
 from app.schemas.user import UserResponse
 from app.schemas.booking import BookingResponse, BookingListResponse
@@ -71,11 +72,23 @@ async def update_kyc_status(
 @router.get("/bookings", response_model=BookingListResponse, dependencies=[_admin_dep])
 async def list_all_bookings(
     booking_status: str | None = Query(None, alias="status"),
+    disputed: bool | None = Query(
+        None, description="Filter to bookings with (or without) a charged-back payment"
+    ),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(Booking)
+    # A booking can have several payment rows (failed attempts + the captured one), so
+    # "is this booking disputed" is an EXISTS over its payments rather than a join —
+    # a join would duplicate booking rows once per payment (SVC-134).
+    disputed_exists = (
+        select(Payment.id)
+        .where(Payment.booking_id == Booking.id, Payment.disputed_at.is_not(None))
+        .exists()
+    )
+
+    stmt = select(Booking, disputed_exists.label("is_disputed"))
     count_stmt = select(func.count()).select_from(Booking)
 
     if booking_status:
@@ -86,13 +99,22 @@ async def list_all_bookings(
         except ValueError:
             pass
 
+    if disputed is not None:
+        clause = disputed_exists if disputed else ~disputed_exists
+        stmt = stmt.where(clause)
+        count_stmt = count_stmt.where(clause)
+
     total = (await db.execute(count_stmt)).scalar_one()
     stmt = stmt.offset((page - 1) * per_page).limit(per_page)
     result = await db.execute(stmt)
-    bookings = list(result.scalars().all())
 
     return BookingListResponse(
-        bookings=[BookingResponse.model_validate(b) for b in bookings],
+        bookings=[
+            BookingResponse.model_validate(booking).model_copy(
+                update={"is_disputed": is_disputed}
+            )
+            for booking, is_disputed in result.all()
+        ],
         total=total,
         page=page,
         per_page=per_page,
