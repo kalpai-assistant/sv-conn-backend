@@ -70,6 +70,19 @@ class Settings(BaseSettings):
     # Encryption (AES-256) for PII at rest
     ENCRYPTION_KEY: str = ""
 
+    # Observability (SVC-46)
+    # Environment tag propagated to Sentry + log records. staging | production | dev.
+    ENVIRONMENT: str = "dev"
+    # Sentry DSN. Empty = Sentry disabled (dev-safe default).
+    SENTRY_DSN: str = ""
+    # Fraction of transactions sampled for perf tracing. Kept low in prod
+    # (Sentry billing) — bump for a debugging session, don't leave at 1.0.
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.0
+    # JSON logs in staging/prod (parseable by CloudWatch / Loki / etc);
+    # human-readable console renderer in dev.
+    LOG_JSON: bool = False
+    LOG_LEVEL: str = "INFO"
+
     class Config:
         env_file = ".env"
 
