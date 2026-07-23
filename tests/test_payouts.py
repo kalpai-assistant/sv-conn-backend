@@ -36,7 +36,7 @@ from app.services.payout_service import PayoutService
 from app.utils import razorpayx_client
 from app.exceptions import PaymentError
 from app.utils.encryption import encrypt
-from app.config import get_settings
+from app.config import get_settings, Settings
 
 settings = get_settings()
 
@@ -540,6 +540,7 @@ class _FakeAsyncClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = 0
+        self.sent_payloads = []  # the JSON body of each POST, for assertions
 
     async def __aenter__(self):
         return self
@@ -548,6 +549,7 @@ class _FakeAsyncClient:
         return False
 
     async def post(self, *args, **kwargs):
+        self.sent_payloads.append(kwargs.get("json"))
         resp = self._responses[self.calls]
         self.calls += 1
         return resp
@@ -1148,3 +1150,79 @@ async def test_resolve_audit_missing_row_is_alerted(caplog):
         assert any("audit resolve" in r.getMessage() for r in caplog.records)
     finally:
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# SVC-137 — bank payout mode is chosen by amount: IMPS at/under the cap, NEFT above
+# ---------------------------------------------------------------------------
+
+async def _bank_payout_mode(amount_paise: int) -> str:
+    """Run create_payout for a bank account and return the RazorpayX mode it sent."""
+    fake = _FakeAsyncClient([_resp(200, {"id": "pout_mode", "status": "processing"})])
+    with patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake):
+        await razorpayx_client.create_payout(
+            amount_paise=amount_paise,
+            idempotency_key="k",
+            reference_id="r",
+            account_number="1234567890",
+            ifsc="HDFC0001234",
+        )
+    return fake.sent_payloads[0]["mode"]
+
+
+@pytest.mark.asyncio
+async def test_bank_payout_under_cap_uses_imps():
+    """A bank payout below the IMPS cap goes via IMPS."""
+    assert await _bank_payout_mode(settings.IMPS_MAX_PAYOUT_PAISE - 1) == "IMPS"
+
+
+@pytest.mark.asyncio
+async def test_bank_payout_at_cap_uses_imps():
+    """Exactly at the cap is still IMPS (the boundary is inclusive)."""
+    assert await _bank_payout_mode(settings.IMPS_MAX_PAYOUT_PAISE) == "IMPS"
+
+
+@pytest.mark.asyncio
+async def test_bank_payout_over_cap_uses_neft_by_default():
+    """Above the IMPS cap falls back to the default high-value mode (NEFT)."""
+    assert await _bank_payout_mode(settings.IMPS_MAX_PAYOUT_PAISE + 1) == "NEFT"
+
+
+@pytest.mark.asyncio
+async def test_bank_payout_over_cap_can_use_rtgs():
+    """Above the cap honours BANK_PAYOUT_ABOVE_CAP_MODE when set to RTGS."""
+    with patch.object(razorpayx_client.settings, "BANK_PAYOUT_ABOVE_CAP_MODE", "RTGS"):
+        assert await _bank_payout_mode(settings.IMPS_MAX_PAYOUT_PAISE + 1) == "RTGS"
+
+
+_REQUIRED_SETTINGS = {
+    "DATABASE_URL": "postgresql+asyncpg://u:p@localhost/db",
+    "REDIS_URL": "redis://localhost:6379/0",
+    "JWT_SECRET_KEY": "x",
+}
+
+
+def test_above_cap_mode_rejects_invalid_value():
+    """A bad above-cap mode fails fast at settings construction, not at payout time."""
+    with pytest.raises(ValueError):
+        Settings(**_REQUIRED_SETTINGS, BANK_PAYOUT_ABOVE_CAP_MODE="IMPS")
+
+
+def test_above_cap_mode_accepts_rtgs():
+    """RTGS is a valid above-cap mode."""
+    s = Settings(**_REQUIRED_SETTINGS, BANK_PAYOUT_ABOVE_CAP_MODE="RTGS")
+    assert s.BANK_PAYOUT_ABOVE_CAP_MODE == "RTGS"
+
+
+@pytest.mark.asyncio
+async def test_upi_payout_ignores_cap():
+    """UPI payouts are always UPI mode — the IMPS/NEFT cap doesn't apply."""
+    fake = _FakeAsyncClient([_resp(200, {"id": "pout_upi", "status": "processing"})])
+    with patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake):
+        await razorpayx_client.create_payout(
+            amount_paise=settings.IMPS_MAX_PAYOUT_PAISE + 1,  # over the cap
+            idempotency_key="k",
+            reference_id="r",
+            vpa="provider@upi",
+        )
+    assert fake.sent_payloads[0]["mode"] == "UPI"
