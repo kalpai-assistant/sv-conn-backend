@@ -21,6 +21,7 @@ from app.routers import (
     reviews,
     tracking,
     admin,
+    health,
 )
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.request_id import RequestIDMiddleware
@@ -112,11 +113,11 @@ def create_app() -> FastAPI:
     app.include_router(admin.router, prefix=prefix)
 
     # -----------------------------------------------------------------------
-    # Health check
+    # Health probes (SVC-48) — /health = liveness, /healthz = readiness.
+    # Deliberately unprefixed so orchestrator + LB config doesn't have to
+    # know the API version.
     # -----------------------------------------------------------------------
-    @app.get("/health", tags=["Health"])
-    async def health():
-        return {"status": "ok"}
+    app.include_router(health.router)
 
     # -----------------------------------------------------------------------
     # Exception handlers

@@ -5,7 +5,7 @@ from fastapi import Request, HTTPException, status
 from starlette.middleware.base import BaseHTTPMiddleware
 from redis.asyncio import Redis
 
-_SKIP_PATHS = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
+_SKIP_PATHS = frozenset({"/health", "/healthz", "/docs", "/openapi.json", "/redoc"})
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
