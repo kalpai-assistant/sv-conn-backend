@@ -109,6 +109,9 @@ class Booking(Base):
     # RazorpayX payout this booking was settled in; links the payout webhook back to
     # the exact batch so concurrent payouts settle independently.
     settlement_payout_id: Mapped[str | None] = mapped_column(String(255))
+    # Why the most recent payout attempt didn't succeed (e.g. RazorpayX rejection
+    # reason). Set on payout.rejected; cleared when the next attempt starts.
+    settlement_failure_reason: Mapped[str | None] = mapped_column(String(500))
     razorpay_order_id: Mapped[str | None] = mapped_column(String(255))
     cancellation_reason: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(

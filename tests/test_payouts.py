@@ -1083,6 +1083,83 @@ async def test_payout_reversed_webhook_handles_still_processing(db_session):
 
 
 # ---------------------------------------------------------------------------
+# SVC-141 — webhook handles payout.queued (no-op) and payout.rejected (→ PENDING)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_payout_queued_webhook_no_state_change(db_session):
+    """payout.queued leaves the booking PROCESSING and its payout id intact."""
+    booking = await _booking_in_processing(db_session, "pout_queued")
+
+    await PayoutService(db_session).handle_payout_webhook(
+        event="payout.queued",
+        payload={"payout": {"entity": {"id": "pout_queued"}}},
+    )
+
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.PROCESSING
+    assert booking.settlement_payout_id == "pout_queued"
+
+
+@pytest.mark.asyncio
+async def test_payout_rejected_returns_to_pending_with_reason(db_session):
+    """payout.rejected returns the booking to PENDING (auto-retry) and records why."""
+    booking = await _booking_in_processing(db_session, "pout_rej")
+
+    await PayoutService(db_session).handle_payout_webhook(
+        event="payout.rejected",
+        payload={"payout": {"entity": {
+            "id": "pout_rej",
+            "failure_reason": "beneficiary account invalid",  # real RazorpayX field
+        }}},
+    )
+
+    await db_session.refresh(booking)
+    # No money moved → safe to re-pick on the next payout run.
+    assert booking.settlement_status == SettlementStatus.PENDING
+    assert booking.settlement_payout_id is None
+    assert booking.settlement_failure_reason == "beneficiary account invalid"
+
+
+@pytest.mark.asyncio
+async def test_payout_failed_records_reason(db_session):
+    """payout.failed → FAILED and records the reason so an admin can see why."""
+    booking = await _booking_in_processing(db_session, "pout_failreason")
+
+    await PayoutService(db_session).handle_payout_webhook(
+        event="payout.failed",
+        payload={"payout": {"entity": {
+            "id": "pout_failreason",
+            "failure_reason": "Payout failed. Contact support for help",
+        }}},
+    )
+
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.FAILED
+    assert booking.settlement_failure_reason == "Payout failed. Contact support for help"
+
+
+@pytest.mark.asyncio
+async def test_new_payout_clears_failure_reason(db_session):
+    """A fresh payout attempt wipes a lingering rejection reason from a prior cycle."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+    booking = await _booking_for(db_session, consumer, provider)
+    booking.settlement_failure_reason = "beneficiary account invalid"  # from a prior rejection
+    await db_session.flush()
+
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
+        mock_payout.return_value = {"id": "pout_retry", "status": "processing"}
+        await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.PROCESSING
+    assert booking.settlement_failure_reason is None
+
+
+# ---------------------------------------------------------------------------
 # SVC-137 (review) — audit-write helpers: idempotent breadcrumb + resolve guard
 #
 # These exercise the REAL helpers (bypassing the autouse stub) against the test DB

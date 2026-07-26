@@ -116,6 +116,9 @@ class PayoutService:
         for booking in bookings:
             booking.settlement_status = SettlementStatus.PROCESSING
             booking.settlement_payout_id = payout_id
+            # Fresh attempt — wipe any prior rejection/failure reason so the field
+            # only ever reflects the current cycle.
+            booking.settlement_failure_reason = None
 
         # Resolve the breadcrumb to the real outcome + payout id.
         await self._resolve_audit(
@@ -206,32 +209,89 @@ class PayoutService:
         """
         Move a payout's settlements based on its outcome.
 
-        ``payout.processed`` → COMPLETED, ``payout.failed`` → FAILED,
-        ``payout.reversed`` → REVERSED (completed money clawed back; also alerts).
-        Bookings are matched on the RazorpayX payout id (``settlement_payout_id``),
-        so concurrent payouts settle independently. Idempotent: only bookings in a
+        - ``payout.processed`` → COMPLETED
+        - ``payout.failed``    → FAILED (money may have moved → manual re-queue)
+        - ``payout.reversed``  → REVERSED (completed money clawed back; also alerts)
+        - ``payout.rejected``  → back to PENDING (RazorpayX refused before sending, so
+          no money moved — safe to auto-retry; the reason is recorded)
+        - ``payout.queued``    → no state change (RazorpayX accepted, not yet sent)
+
+        Bookings are matched on the RazorpayX payout id (``settlement_payout_id``), so
+        concurrent payouts settle independently. Idempotent: only bookings in a
         transitionable state for that payout are touched.
         """
-        # Terminal payout events we act on. Everything else (payout.updated,
-        # transaction.*) is a legitimate no-op — acknowledge with a breadcrumb.
-        terminal = {
-            "payout.processed": SettlementStatus.COMPLETED,
-            "payout.failed": SettlementStatus.FAILED,
-            "payout.reversed": SettlementStatus.REVERSED,
+        handled = {
+            "payout.processed", "payout.failed", "payout.reversed",
+            "payout.rejected", "payout.queued",
         }
-        if event not in terminal:
-            logger.info("Ignoring non-terminal RazorpayX webhook event: %s", event)
+        if event not in handled:
+            # payout.updated, transaction.*, etc. are a legitimate no-op.
+            logger.info("Ignoring unhandled RazorpayX webhook event: %s", event)
             return
 
         entity = payload.get("payout", {}).get("entity", {})
         payout_id = entity.get("id")
         if not payout_id:
-            # A terminal event with no payout id is malformed — we can't map it to
-            # any settlement. Surface it instead of failing silently.
+            # A handled event with no payout id is malformed — we can't map it to any
+            # settlement. Surface it instead of failing silently.
             logger.error("RazorpayX %s webhook missing payout.entity.id", event)
             raise PaymentError("Payout webhook missing payout id")
 
+        # queued: RazorpayX accepted the payout but hasn't sent it yet — no state
+        # change. The create path already recorded settlement_payout_id in the normal
+        # case; the rare dual-write orphan (id not yet linked) is re-linked by
+        # reconcile_payouts — which cross-checks the amount before matching — rather
+        # than here, so all payout→booking re-linking lives in one guarded place.
+        if event == "payout.queued":
+            linked = (
+                await self.db.execute(
+                    select(Booking).where(Booking.settlement_payout_id == payout_id)
+                )
+            ).scalars().all()
+            logger.info(
+                "payout.webhook event=queued payout_id=%s linked=%s (no state change)",
+                payout_id, len(linked),
+            )
+            return
+
+        # rejected: RazorpayX refused before sending — no money left the account, so
+        # return the bookings to PENDING (the next payout run re-picks them), clear the
+        # payout id, and record the reason. Contrast with failed, which stays FAILED
+        # and requires a manual admin re-queue.
+        if event == "payout.rejected":
+            reason = self._failure_reason(entity)
+            rejected = (
+                await self.db.execute(
+                    select(Booking).where(
+                        Booking.settlement_payout_id == payout_id,
+                        Booking.settlement_status == SettlementStatus.PROCESSING,
+                    )
+                )
+            ).scalars().all()
+            for booking in rejected:
+                booking.settlement_status = SettlementStatus.PENDING
+                booking.settlement_payout_id = None
+                booking.settlement_failure_reason = reason
+            await self.db.flush()
+            logger.info(
+                "payout.webhook event=rejected payout_id=%s returned_to_pending=%s reason=%s",
+                payout_id, len(rejected), reason,
+            )
+            return
+
+        # processed / failed / reversed — terminal transitions.
+        terminal = {
+            "payout.processed": SettlementStatus.COMPLETED,
+            "payout.failed": SettlementStatus.FAILED,
+            "payout.reversed": SettlementStatus.REVERSED,
+        }
         new_status = terminal[event]
+        # A failed payout carries a reason (rejected/reversed do not, per RazorpayX);
+        # record it so an admin can see why before deciding to re-queue the FAILED
+        # settlement.
+        failure_reason = (
+            self._failure_reason(entity) if event == "payout.failed" else None
+        )
         # processed/failed transition a PROCESSING settlement; a reversal claws back a
         # payout that had already COMPLETED (and defensively one still PROCESSING).
         from_statuses = (
@@ -249,6 +309,8 @@ class PayoutService:
         settled = result.scalars().all()
         for booking in settled:
             booking.settlement_status = new_status
+            if event == "payout.failed":
+                booking.settlement_failure_reason = failure_reason
         await self.db.flush()
 
         logger.info(
@@ -261,6 +323,29 @@ class PayoutService:
                 "ALERT payout.reversed payout_id=%s reversed_bookings=%s",
                 payout_id, len(settled),
             )
+
+    @staticmethod
+    def _failure_reason(entity: dict) -> str | None:
+        """Best-effort failure/rejection reason from a RazorpayX payout entity.
+
+        The webhook payload carries ``failure_reason`` (string) and an ``error`` object
+        (``description``/``source``/``reason``). Razorpay is migrating this detail to a
+        newer ``status_details`` object (deprecating ``failure_reason``/``error``), so we
+        check that first for forward-compat, then fall back to the current fields.
+
+        Note: RazorpayX does not populate a reason for ``payout.rejected`` (it's null);
+        the meaningful string appears on ``payout.failed``.
+        """
+        details = entity.get("status_details") or {}
+        error = entity.get("error") or {}
+        reason = (
+            details.get("description")
+            or details.get("reason")
+            or entity.get("failure_reason")
+            or error.get("description")
+            or error.get("reason")
+        )
+        return reason[:500] if reason else None
 
     async def reconcile_payouts(self, *, since_ts: int, until_ts: int) -> dict:
         """
