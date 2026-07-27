@@ -36,6 +36,9 @@ class PayoutService:
 
     def __init__(self, db: AsyncSession):
         self.db = db
+        # Notifications buffered during reconciliation rather than enqueued inline —
+        # see ``reconcile_payouts`` for why. Drained by ``dispatch_notifications``.
+        self._pending_notifications: list[dict] = []
 
     async def create_provider_payout(
         self, provider_id: UUID, admin_user_id: UUID
@@ -126,6 +129,10 @@ class PayoutService:
         logger.info(
             "payout.initiated admin=%s provider=%s payout_id=%s status=%s bookings=%s",
             admin_user_id, provider_id, payout_id, status, len(bookings),
+        )
+        # Tell the provider their money is on the way. One push for the whole batch.
+        self._notify_payout(
+            provider_id, SettlementStatus.PROCESSING.value, amount_paise, payout_id
         )
 
         return {
@@ -255,6 +262,15 @@ class PayoutService:
             "payout.webhook event=%s payout_id=%s settled=%s -> %s",
             event, payout_id, len(settled), new_status.value,
         )
+        # Notify only when this webhook actually moved something: a redelivery of an
+        # already-applied event settles nothing, and must not re-push.
+        if settled:
+            self._notify_payout(
+                settled[0].provider_id,
+                new_status.value,
+                self._batch_amount_paise(entity, list(settled)),
+                payout_id,
+            )
         if event == "payout.reversed":
             # Completed money was clawed back — always surface for a human to review.
             logger.error(
@@ -276,9 +292,17 @@ class PayoutService:
 
         Anything that can't be resolved is counted and alerted for a human. Returns a
         summary dict; the caller commits.
+
+        Provider pushes for these repairs are **not** enqueued here — they're returned
+        under ``notifications`` for the caller to dispatch *after* it commits. One run
+        repairs many payouts in a single transaction, so a failure part-way through
+        rolls all of them back; a push already sent for an earlier repair could not be
+        taken back, and would tell a provider their money arrived when the repair never
+        landed. Pass the list to ``dispatch_notifications`` once the commit succeeds.
         """
         payouts = await list_payouts(from_ts=since_ts, to_ts=until_ts)
         report = {"checked": 0, "case_a": 0, "case_b": 0, "unresolved": 0}
+        self._pending_notifications = []
 
         for payout in payouts:
             target = _RECONCILE_MAP.get(payout.get("status"))
@@ -304,6 +328,7 @@ class PayoutService:
 
         await self.db.flush()
         logger.info("payout.reconcile %s", report)
+        report["notifications"] = self._pending_notifications
         return report
 
     # ------------------------------------------------------------------
@@ -388,6 +413,69 @@ class PayoutService:
                 )
 
     @staticmethod
+    def _notify_payout(
+        provider_id: UUID,
+        event: str,
+        amount_paise: int,
+        payout_id: str | None,
+    ) -> None:
+        """Enqueue a provider push for a payout state change.
+
+        One push per payout (not per booking) — the task is keyed on the provider and
+        carries the batch total. Enqueued rather than sent inline so a slow FCM call
+        never blocks a payout or webhook request.
+
+        A broker failure must never roll back a settlement transition — the money has
+        already moved, and losing that state to a missing push would be far worse than
+        a missing push. So the enqueue is best-effort: failures are logged, not raised.
+        """
+        from app.tasks.notification_tasks import send_payout_notification
+
+        try:
+            send_payout_notification.delay(
+                provider_id=str(provider_id),
+                event=event,
+                amount_paise=amount_paise,
+                payout_id=payout_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "payout.notify enqueue failed provider=%s event=%s payout_id=%s error=%s",
+                provider_id, event, payout_id, exc,
+            )
+
+    def _buffer_notification(
+        self,
+        provider_id: UUID,
+        event: str,
+        amount_paise: int,
+        payout_id: str | None,
+    ) -> None:
+        """Hold a push until the transaction that justifies it has committed.
+
+        Used by reconciliation, where one transaction repairs many payouts — see
+        ``reconcile_payouts``. The create and webhook paths enqueue directly instead:
+        each handles a single payout, so there's no batch to lose.
+        """
+        self._pending_notifications.append({
+            "provider_id": str(provider_id),
+            "event": event,
+            "amount_paise": amount_paise,
+            "payout_id": payout_id,
+        })
+
+    @classmethod
+    def dispatch_notifications(cls, notifications: list[dict]) -> None:
+        """Enqueue buffered pushes. Call only after the repairs are committed."""
+        for note in notifications:
+            cls._notify_payout(**note)
+
+    @staticmethod
+    def _batch_amount_paise(payout: dict, bookings: list[Booking]) -> int:
+        """Payout amount in paise, falling back to the batch's own payout total."""
+        return payout.get("amount") or int(sum(b.provider_payout for b in bookings) * 100)
+
+    @staticmethod
     def _batch_idempotency_key(bookings: list[Booking]) -> str:
         """Stable key for a payout batch — a hash of its sorted booking ids."""
         ids = ",".join(sorted(str(b.id) for b in bookings))
@@ -418,6 +506,14 @@ class PayoutService:
             self._add_reconciliation_audit(
                 provider_id=repaired[0].provider_id, payout=payout,
                 target=target, count=len(repaired),
+            )
+            # Reconciliation exists because the webhook never arrived — so neither did
+            # the provider's push. Buffer it (not enqueue) so it only goes out once the
+            # repair is committed; only repaired rows qualify, so a run over
+            # already-consistent payouts stays silent.
+            self._buffer_notification(
+                repaired[0].provider_id, target.value,
+                self._batch_amount_paise(payout, repaired), payout.get("id"),
             )
         return len(repaired)
 
@@ -461,6 +557,12 @@ class PayoutService:
         self._add_reconciliation_audit(
             provider_id=audit.provider_id, payout=payout,
             target=target, count=len(pending),
+        )
+        # The create path crashed before linking the payout, so no push went out for
+        # the initiation either — the terminal state is the provider's first news.
+        self._buffer_notification(
+            audit.provider_id, target.value,
+            self._batch_amount_paise(payout, pending), payout_id,
         )
         return len(pending)
 
