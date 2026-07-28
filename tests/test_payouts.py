@@ -95,6 +95,9 @@ async def _booking_for(db_session, consumer, provider, **kwargs):
     db_session.add(address)
     await db_session.flush()
 
+    # Overridable so a test can vary the amount (ordering / summing cases).
+    provider_payout = kwargs.pop("provider_payout", 80.0)
+
     return await BookingFactory.create(
         db_session,
         consumer_id=consumer.id,
@@ -102,7 +105,7 @@ async def _booking_for(db_session, consumer, provider, **kwargs):
         service_id=service.id,
         address_id=address.id,
         status=BookingStatus.COMPLETED,
-        provider_payout=80.0,
+        provider_payout=provider_payout,
         **kwargs,
     )
 
@@ -1226,3 +1229,249 @@ async def test_upi_payout_ignores_cap():
             vpa="provider@upi",
         )
     assert fake.sent_payloads[0]["mode"] == "UPI"
+
+
+# ---------------------------------------------------------------------------
+# SVC-144 — GET /admin/providers/pending-settlements (admin payouts list)
+# ---------------------------------------------------------------------------
+
+async def _provider_with_bank_details(db_session, provider):
+    profile = ProviderProfile(
+        user_id=provider.id,
+        payout_account_number_encrypted=encrypt("12345678901"),
+        payout_ifsc_encrypted=encrypt("HDFC0001234"),
+    )
+    db_session.add(profile)
+    await db_session.flush()
+    return profile
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_aggregates_per_provider(db_session):
+    """One row per provider: booking count and summed total, in paise."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider)  # 80.00
+    await _booking_for(db_session, consumer, provider)  # 80.00
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    assert report["total"] == 1
+    assert report["truncated"] is False
+    (row,) = report["providers"]
+    assert row["provider_id"] == provider.id
+    assert row["phone"] == provider.phone
+    assert row["pending_booking_count"] == 2
+    assert row["pending_payout_paise"] == 16000  # (80 + 80) * 100
+    assert row["payout_set"] is True
+    assert row["is_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_excludes_everything_not_owed(db_session):
+    """Only COMPLETED + PENDING counts — the same definition the payout uses."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    await _provider_with_payout_vpa(db_session, provider)
+
+    owed = await _booking_for(db_session, consumer, provider)
+    # Already being paid / paid / failed — not owed any more.
+    for state in (
+        SettlementStatus.PROCESSING,
+        SettlementStatus.COMPLETED,
+        SettlementStatus.FAILED,
+        SettlementStatus.REVERSED,
+    ):
+        b = await _booking_for(db_session, consumer, provider)
+        b.settlement_status = state
+    # Settlement is PENDING but the job itself was never completed.
+    not_done = await _booking_for(db_session, consumer, provider)
+    not_done.status = BookingStatus.CANCELLED
+    await db_session.flush()
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    (row,) = report["providers"]
+    assert row["pending_booking_count"] == 1
+    assert row["pending_payout_paise"] == int(owed.provider_payout * 100)
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_orders_largest_debt_first(db_session):
+    """The admin sees who is owed most at the top."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    small = await UserFactory.create(db_session, role="provider")
+    big = await UserFactory.create(db_session, role="provider")
+    await _provider_with_payout_vpa(db_session, small)
+    await _provider_with_payout_vpa(db_session, big)
+    await _booking_for(db_session, consumer, small, provider_payout=50.0)
+    await _booking_for(db_session, consumer, big, provider_payout=900.0)
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    assert [r["provider_id"] for r in report["providers"]] == [big.id, small.id]
+    assert report["providers"][0]["pending_payout_paise"] == 90000
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_empty(db_session):
+    """Nothing owed → empty list, not an error (the UI has an empty state)."""
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    assert report == {"providers": [], "total": 0, "truncated": False}
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_lists_provider_with_no_profile_row(db_session):
+    """A provider with no provider_profiles row must NOT vanish from the list.
+
+    The profile join is a LEFT join precisely for this: an inner join would drop
+    the row and silently hide money the platform owes.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")  # no profile
+    await _booking_for(db_session, consumer, provider)
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    (row,) = report["providers"]
+    assert row["provider_id"] == provider.id
+    assert row["payout_set"] is False
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_payout_set_false_when_profile_has_no_details(
+    db_session,
+):
+    """A profile row exists but carries no destination → still not payable."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    db_session.add(ProviderProfile(user_id=provider.id))
+    await db_session.flush()
+    await _booking_for(db_session, consumer, provider)
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    assert report["providers"][0]["payout_set"] is False
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_bank_details_count_as_payout_set(db_session):
+    """Account + IFSC is a usable destination, same as a VPA."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    await _provider_with_bank_details(db_session, provider)
+    await _booking_for(db_session, consumer, provider)
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    assert report["providers"][0]["payout_set"] is True
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_includes_deactivated_provider(db_session):
+    """A deactivated provider is still owed — flag them, don't hide the debt."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    provider.is_active = False
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider)
+    await db_session.flush()
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    (row,) = report["providers"]
+    assert row["provider_id"] == provider.id
+    assert row["is_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_truncates_and_reports_true_total(db_session):
+    """Over the cap: rows are limited but `total` still tells the admin the truth."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    for amount in (10.0, 20.0, 30.0):
+        provider = await UserFactory.create(db_session, role="provider")
+        await _booking_for(db_session, consumer, provider, provider_payout=amount)
+
+    report = await PayoutService(db_session).list_pending_settlements(limit=2)
+
+    assert len(report["providers"]) == 2
+    assert report["total"] == 3
+    assert report["truncated"] is True
+    # Still the largest debts that made the cut.
+    assert [r["pending_payout_paise"] for r in report["providers"]] == [3000, 2000]
+
+
+@pytest.mark.asyncio
+async def test_listed_total_matches_what_the_payout_actually_charges(db_session):
+    """The figure in the confirmation dialog must equal the money that leaves.
+
+    This is the expensive bug: if the list's filter and the payout's filter ever
+    drift, the admin approves one amount and a different one is sent.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+    for amount in (120.50, 75.25, 340.00):
+        await _booking_for(db_session, consumer, provider, provider_payout=amount)
+    # Noise that must be excluded by both paths identically.
+    already_paid = await _booking_for(db_session, consumer, provider)
+    already_paid.settlement_status = SettlementStatus.COMPLETED
+    await db_session.flush()
+
+    listed = (await PayoutService(db_session).list_pending_settlements())["providers"][0]
+
+    with patch(
+        "app.services.payout_service.create_payout", new_callable=AsyncMock
+    ) as mock_payout:
+        mock_payout.return_value = {"id": "pout_consistency", "status": "processing"}
+        result = await PayoutService(db_session).create_provider_payout(
+            provider.id, admin.id
+        )
+
+    charged = mock_payout.call_args.kwargs["amount_paise"]
+    assert listed["pending_payout_paise"] == charged
+    assert listed["pending_booking_count"] == result["booking_count"]
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_endpoint_returns_rows(
+    client, db_session, auth_headers
+):
+    """Admin gets the list over HTTP in the documented shape."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider)
+
+    resp = await client.get(
+        "/api/v1/admin/providers/pending-settlements",
+        headers=auth_headers(str(admin.id), "admin"),
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["truncated"] is False
+    (row,) = body["providers"]
+    assert row["provider_id"] == str(provider.id)
+    assert row["pending_payout_paise"] == 8000
+    assert row["payout_set"] is True
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_endpoint_rejects_non_admin(
+    client, db_session, auth_headers
+):
+    """Payout data is admin-only."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+
+    resp = await client.get(
+        "/api/v1/admin/providers/pending-settlements",
+        headers=auth_headers(str(consumer.id), "consumer"),
+    )
+
+    assert resp.status_code == 403

@@ -15,6 +15,7 @@ from app.models.payment import Payment
 from app.models.provider_profile import ProviderProfile, KYCStatus
 from app.schemas.user import UserResponse
 from app.schemas.booking import BookingResponse, BookingListResponse
+from app.schemas.payout import PendingSettlementsResponse
 from app.services.payout_service import PayoutService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -124,6 +125,25 @@ async def list_all_bookings(
 # ---------------------------------------------------------------------------
 # Provider payouts
 # ---------------------------------------------------------------------------
+
+# Declared before the /providers/{user_id}/... routes: "pending-settlements" is a
+# literal segment, and if a GET /providers/{user_id} is ever added below, FastAPI
+# would otherwise match this path as a user id.
+@router.get(
+    "/providers/pending-settlements",
+    response_model=PendingSettlementsResponse,
+    dependencies=[_admin_dep],
+)
+async def list_pending_settlements(db: AsyncSession = Depends(get_db)):
+    """Providers awaiting settlement, with the amount and booking count owed.
+
+    The discovery half of the payout flow: ``POST /providers/{user_id}/payout`` can
+    only be triggered for a provider the admin already knows, so this answers "who
+    do we owe, and how much" for the admin payouts screen. Read-only, so it takes
+    the role guard rather than injecting the admin (nothing to audit).
+    """
+    return await PayoutService(db).list_pending_settlements()
+
 
 @router.post("/providers/{user_id}/payout", status_code=status.HTTP_200_OK)
 async def pay_out_provider(
