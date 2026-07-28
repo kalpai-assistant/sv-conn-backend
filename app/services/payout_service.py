@@ -58,16 +58,29 @@ class PayoutService:
 
         Capped at ``limit`` rows; ``total`` is the true provider count so the caller
         can tell the admin the list is incomplete.
+
+        Rows and total come from **one** query. Counting separately would read two
+        snapshots under READ COMMITTED, and a payout committing between them could
+        report a ``total`` lower than the rows already returned — "showing 200 of
+        150". ``COUNT(*) OVER ()`` is evaluated after GROUP BY and before LIMIT, so
+        it counts provider groups pre-cap on the same snapshot as the rows.
         """
         # ProviderProfile is 1:1 with the user and grouped away, so aggregate it.
         # bool_or over the (at most one) profile row = "has a usable destination".
-        # Mirrors ProviderProfile.payout_set, which is a plain @property and so
-        # cannot be evaluated in SQL.
+        #
+        # Mirrors ProviderProfile.payout_set, which is a plain @property and cannot
+        # be evaluated in SQL. That property is Python truthiness, so it treats an
+        # empty string as "not set" — SQL's IS NOT NULL does not, hence the explicit
+        # != '' here. Without it the list would claim a destination the payout path
+        # would then reject.
+        def _present(column):
+            return column.is_not(None) & (column != "")
+
         payout_set = func.bool_or(
-            ProviderProfile.payout_vpa_encrypted.is_not(None)
+            _present(ProviderProfile.payout_vpa_encrypted)
             | (
-                ProviderProfile.payout_account_number_encrypted.is_not(None)
-                & ProviderProfile.payout_ifsc_encrypted.is_not(None)
+                _present(ProviderProfile.payout_account_number_encrypted)
+                & _present(ProviderProfile.payout_ifsc_encrypted)
             )
         )
         total_rupees = func.sum(Booking.provider_payout)
@@ -82,6 +95,7 @@ class PayoutService:
                     func.count(Booking.id),
                     total_rupees,
                     payout_set,
+                    func.count().over().label("total_providers"),
                 )
                 .select_from(Booking)
                 .join(User, User.id == Booking.provider_id)
@@ -97,13 +111,6 @@ class PayoutService:
             )
         ).all()
 
-        total = (
-            await self.db.execute(
-                select(func.count(func.distinct(Booking.provider_id)))
-                .where(*self._owed_filter())
-            )
-        ).scalar_one()
-
         providers = [
             {
                 "provider_id": provider_id,
@@ -117,9 +124,12 @@ class PayoutService:
                 "pending_payout_paise": int(rupees * 100),
                 "payout_set": bool(has_payout),
             }
-            for provider_id, name, phone, is_active, booking_count, rupees, has_payout
+            for provider_id, name, phone, is_active, booking_count, rupees, has_payout, _
             in rows
         ]
+
+        # The window count is identical on every row; no rows means nothing is owed.
+        total = rows[0].total_providers if rows else 0
 
         return {
             "providers": providers,
