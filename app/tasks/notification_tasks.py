@@ -55,8 +55,29 @@ PAYOUT_NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
 
 
 def _format_rupees(amount_paise: int) -> str:
-    """Format a paise amount as rupees for notification copy (₹1,234 / ₹1,234.50)."""
-    return f"₹{amount_paise / 100:,.2f}".removesuffix(".00")
+    """Format a paise amount as rupees for notification copy, Indian-style.
+
+    Indian digit grouping, not Western: the last three digits group together and
+    everything above them groups in pairs — ₹10,00,000, not ₹1,000,000. Providers
+    read these as lakhs; Western grouping misreads at a glance in exactly the range
+    where a weekly batch payout lands.
+
+    Integer arithmetic throughout, so the paise never round on the way to the string.
+    """
+    rupees, paise = divmod(int(amount_paise), 100)
+    digits = str(rupees)
+
+    if len(digits) > 3:
+        head, last3 = digits[:-3], digits[-3:]
+        pairs = []
+        while len(head) > 2:
+            head, pair = head[:-2], head[-2:]
+            pairs.insert(0, pair)
+        grouped = ",".join(([head] if head else []) + pairs + [last3])
+    else:
+        grouped = digits
+
+    return f"₹{grouped}" if paise == 0 else f"₹{grouped}.{paise:02d}"
 
 
 @celery_app.task(

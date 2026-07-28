@@ -1271,8 +1271,13 @@ def _patch_task_session(user):
 
 
 @pytest.mark.asyncio
-async def test_payout_notifies_provider_once_for_the_batch(db_session, stub_payout_push):
-    """A multi-booking payout sends ONE 'processing' push, not one per booking."""
+async def test_payout_buffers_one_notification_for_the_batch(db_session, stub_payout_push):
+    """A multi-booking payout buffers ONE 'processing' push, not one per booking.
+
+    Nothing is enqueued during the call: RazorpayX already has the money, and this
+    transaction hasn't committed, so a push here could announce a payout the DB
+    goes on to lose.
+    """
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     admin = await UserFactory.create(db_session, role="admin")
@@ -1280,16 +1285,27 @@ async def test_payout_notifies_provider_once_for_the_batch(db_session, stub_payo
     await _booking_for(db_session, consumer, provider)
     await _booking_for(db_session, consumer, provider)
 
+    service = PayoutService(db_session)
     with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
         mock_payout.return_value = {"id": "pout_notify_1", "status": "processing"}
-        await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+        await service.create_provider_payout(provider.id, admin.id)
 
-    stub_payout_push.assert_called_once_with(
-        provider_id=str(provider.id),
-        event="processing",
-        amount_paise=16000,  # (80 + 80) * 100 — the batch total, not a per-booking amount
-        payout_id="pout_notify_1",
-    )
+    expected = {
+        "provider_id": str(provider.id),
+        "event": "processing",
+        # (80 + 80) * 100 — the batch total, not a per-booking amount
+        "amount_paise": 16000,
+        "payout_id": "pout_notify_1",
+    }
+    assert service._pending_notifications == [expected]
+    stub_payout_push.assert_not_called()
+
+    # Only once the caller drains (post-commit) does it reach the queue.
+    service.dispatch_pending_notifications()
+    stub_payout_push.assert_called_once_with(**expected)
+    # Draining is not repeatable — a second drain must not re-push.
+    service.dispatch_pending_notifications()
+    assert stub_payout_push.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -1320,8 +1336,8 @@ async def test_failed_payout_creation_does_not_notify(db_session, stub_payout_pu
         ("payout.reversed", "reversed"),
     ],
 )
-async def test_webhook_notifies_provider(db_session, stub_payout_push, event, expected):
-    """Each terminal webhook sends exactly one push carrying that settlement state."""
+async def test_webhook_buffers_notification(db_session, stub_payout_push, event, expected):
+    """Each terminal webhook buffers exactly one push carrying that settlement state."""
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     booking = await _booking_for(db_session, consumer, provider)
@@ -1329,22 +1345,26 @@ async def test_webhook_notifies_provider(db_session, stub_payout_push, event, ex
     booking.settlement_payout_id = "pout_wh"
     await db_session.flush()
 
-    await PayoutService(db_session).handle_payout_webhook(
+    service = PayoutService(db_session)
+    await service.handle_payout_webhook(
         event=event,
         payload={"payout": {"entity": {"id": "pout_wh", "amount": 8000}}},
     )
 
-    stub_payout_push.assert_called_once_with(
-        provider_id=str(provider.id),
-        event=expected,
-        amount_paise=8000,
-        payout_id="pout_wh",
-    )
+    assert service._pending_notifications == [{
+        "provider_id": str(provider.id),
+        "event": expected,
+        "amount_paise": 8000,
+        "payout_id": "pout_wh",
+    }]
+    stub_payout_push.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_webhook_redelivery_does_not_renotify(db_session, stub_payout_push):
-    """A redelivered webhook settles nothing the second time → no second push."""
+async def test_webhook_redelivery_after_commit_does_not_renotify(
+    db_session, stub_payout_push
+):
+    """Redelivery of an already-applied event settles nothing → no second push."""
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     booking = await _booking_for(db_session, consumer, provider)
@@ -1353,17 +1373,56 @@ async def test_webhook_redelivery_does_not_renotify(db_session, stub_payout_push
     await db_session.flush()
 
     payload = {"payout": {"entity": {"id": "pout_dup", "amount": 8000}}}
-    service = PayoutService(db_session)
-    await service.handle_payout_webhook(event="payout.processed", payload=payload)
-    await service.handle_payout_webhook(event="payout.processed", payload=payload)
+    # Two deliveries, each its own service instance + drain — i.e. the first one
+    # committed, exactly how the router behaves.
+    for _ in range(2):
+        service = PayoutService(db_session)
+        await service.handle_payout_webhook(event="payout.processed", payload=payload)
+        service.dispatch_pending_notifications()
 
     assert stub_payout_push.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_webhook_falls_back_to_batch_total_when_amount_absent(
+async def test_webhook_rolled_back_delivery_then_retry_pushes_once(
     db_session, stub_payout_push
 ):
+    """A delivery that rolls back must not notify — only the successful retry does.
+
+    The in-memory ``settled`` filter can't help here: the rollback leaves the
+    bookings PROCESSING, so RazorpayX's retry settles them again. Buffering is what
+    stops the provider being told twice, because the first attempt never drained.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _booking_for(db_session, consumer, provider)
+    booking.settlement_status = SettlementStatus.PROCESSING
+    booking.settlement_payout_id = "pout_retry"
+    await db_session.flush()
+
+    payload = {"payout": {"entity": {"id": "pout_retry", "amount": 8000}}}
+
+    # Delivery 1: handled, then the transaction fails → never drained.
+    failed = PayoutService(db_session)
+    await failed.handle_payout_webhook(event="payout.processed", payload=payload)
+    assert len(failed._pending_notifications) == 1
+    stub_payout_push.assert_not_called()
+    # Roll back exactly what that delivery wrote.
+    booking.settlement_status = SettlementStatus.PROCESSING
+    await db_session.flush()
+
+    # Delivery 2 (RazorpayX retry): settles the same booking, and this one commits.
+    retry = PayoutService(db_session)
+    await retry.handle_payout_webhook(event="payout.processed", payload=payload)
+    retry.dispatch_pending_notifications()
+
+    await db_session.refresh(booking)
+    assert booking.settlement_status == SettlementStatus.COMPLETED
+    assert stub_payout_push.call_count == 1  # not two
+
+
+@pytest.mark.asyncio
+async def test_webhook_falls_back_to_batch_total_when_amount_absent(db_session):
     """A payload with no amount still gets a correct total from the settled bookings."""
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
@@ -1373,12 +1432,13 @@ async def test_webhook_falls_back_to_batch_total_when_amount_absent(
         b.settlement_payout_id = "pout_noamt"
     await db_session.flush()
 
-    await PayoutService(db_session).handle_payout_webhook(
+    service = PayoutService(db_session)
+    await service.handle_payout_webhook(
         event="payout.processed",
         payload={"payout": {"entity": {"id": "pout_noamt"}}},  # no amount
     )
 
-    assert stub_payout_push.call_args.kwargs["amount_paise"] == 16000
+    assert service._pending_notifications[0]["amount_paise"] == 16000
 
 
 @pytest.mark.asyncio
@@ -1454,10 +1514,13 @@ async def test_broker_failure_does_not_break_settlement(db_session, stub_payout_
     await db_session.flush()
 
     stub_payout_push.side_effect = RuntimeError("broker unreachable")
-    await PayoutService(db_session).handle_payout_webhook(
+    service = PayoutService(db_session)
+    await service.handle_payout_webhook(
         event="payout.processed",
         payload={"payout": {"entity": {"id": "pout_broker", "amount": 8000}}},
     )
+    # The drain runs post-commit; a broker failure there must not propagate either.
+    service.dispatch_pending_notifications()
 
     await db_session.refresh(booking)
     assert booking.settlement_status == SettlementStatus.COMPLETED
@@ -1526,13 +1589,33 @@ def test_failed_and_reversed_copy_is_neutral():
         assert "{amount}" in template["body"]
 
 
-def test_format_rupees_drops_trailing_zeros_and_groups():
-    """Rupee copy: whole rupees read cleanly, paise are preserved."""
+def test_format_rupees_uses_indian_digit_grouping():
+    """Amounts are grouped Indian-style — lakhs and crores, not Western thousands.
+
+    ₹10,00,000 is what a provider in India reads as ten lakh; ₹1,000,000 misreads at
+    a glance, and a weekly batch payout lands squarely in that range.
+    """
     from app.tasks.notification_tasks import _format_rupees
 
+    # Identical under both conventions below one lakh.
     assert _format_rupees(16000) == "₹160"
     assert _format_rupees(123450) == "₹1,234.50"
-    assert _format_rupees(100000000) == "₹1,000,000"
+    assert _format_rupees(1000000) == "₹10,000"
+
+    # Where the conventions diverge — these would be ₹1,00,000 / ₹1,000,000 Western.
+    assert _format_rupees(10000000) == "₹1,00,000"
+    assert _format_rupees(100000000) == "₹10,00,000"
+    assert _format_rupees(123456789012) == "₹1,23,45,67,890.12"
+
+
+def test_format_rupees_preserves_paise_exactly():
+    """Integer arithmetic — the paise must never round on the way to the string."""
+    from app.tasks.notification_tasks import _format_rupees
+
+    assert _format_rupees(8009) == "₹80.09"   # the SVC-150 truncation, rendered as-is
+    assert _format_rupees(5) == "₹0.05"
+    assert _format_rupees(0) == "₹0"
+    assert _format_rupees(100) == "₹1"
 
 
 @pytest.mark.asyncio
@@ -1712,3 +1795,70 @@ def test_dispatch_notifications_enqueues_each(stub_payout_push):
         "provider_id": "p2", "event": "failed",
         "amount_paise": 500, "payout_id": None,
     }
+
+
+# --- router wiring: pushes must be dispatched only after the commit -----------
+#
+# The service buffers; the routers drain via FastAPI BackgroundTasks, which run
+# after the get_db dependency's teardown (the commit) and are skipped entirely if
+# that teardown raises. These tests pin that framework behaviour so a refactor
+# can't quietly reintroduce a pre-commit push.
+
+async def _client_with_db(db_override):
+    """An AsyncClient over the real app with get_db replaced."""
+    from httpx import AsyncClient, ASGITransport
+    from app.main import create_app
+    from app.database import get_db as real_get_db
+
+    app = create_app()
+    app.dependency_overrides[real_get_db] = db_override
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+@pytest.mark.asyncio
+async def test_webhook_endpoint_dispatches_push_after_commit(
+    db_session, stub_payout_push
+):
+    """The webhook route actually drains the buffer — the push reaches the queue."""
+    booking = await _booking_in_processing(db_session, "pout_bg_ok")
+    committed = []
+
+    async def _db():
+        yield db_session
+        committed.append(True)  # stands in for get_db's commit
+
+    async with await _client_with_db(_db) as client:
+        resp = await client.post(
+            f"{settings.API_V1_PREFIX}/payments/payout-webhook",
+            json={"event": "payout.processed",
+                  "payload": {"payout": {"entity": {"id": "pout_bg_ok", "amount": 8000}}}},
+        )
+
+    assert resp.status_code == 200
+    assert committed == [True]
+    stub_payout_push.assert_called_once()
+    assert stub_payout_push.call_args.kwargs["event"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_no_push_when_the_commit_fails(db_session, stub_payout_push):
+    """If the transaction can't commit, the provider must not be told anything.
+
+    This is the case the old inline enqueue got wrong: the push had already gone
+    out by the time the commit failed, announcing a state the DB never kept.
+    """
+    await _booking_in_processing(db_session, "pout_bg_fail")
+
+    async def _failing_db():
+        yield db_session
+        raise RuntimeError("commit failed")
+
+    async with await _client_with_db(_failing_db) as client:
+        with pytest.raises(RuntimeError):
+            await client.post(
+                f"{settings.API_V1_PREFIX}/payments/payout-webhook",
+                json={"event": "payout.processed",
+                      "payload": {"payout": {"entity": {"id": "pout_bg_fail", "amount": 8000}}}},
+            )
+
+    stub_payout_push.assert_not_called()

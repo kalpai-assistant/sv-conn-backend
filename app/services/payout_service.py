@@ -36,8 +36,10 @@ class PayoutService:
 
     def __init__(self, db: AsyncSession):
         self.db = db
-        # Notifications buffered during reconciliation rather than enqueued inline —
-        # see ``reconcile_payouts`` for why. Drained by ``dispatch_notifications``.
+        # Provider pushes held until the transaction that justifies them has
+        # committed — see ``_buffer_notification``. Drained by the caller:
+        # ``dispatch_pending_notifications`` (request paths, via BackgroundTasks) or
+        # ``dispatch_notifications`` (the reconcile Celery task, post-commit).
         self._pending_notifications: list[dict] = []
 
     async def create_provider_payout(
@@ -130,8 +132,11 @@ class PayoutService:
             "payout.initiated admin=%s provider=%s payout_id=%s status=%s bookings=%s",
             admin_user_id, provider_id, payout_id, status, len(bookings),
         )
-        # Tell the provider their money is on the way. One push for the whole batch.
-        self._notify_payout(
+        # Buffered, not sent: this transaction has not committed yet. RazorpayX has
+        # already accepted the payout, so if the commit fails the money moved but we
+        # have no record of it — and a "money on the way" push for a payout the DB
+        # never recorded cannot be taken back. The caller drains after commit.
+        self._buffer_notification(
             provider_id, SettlementStatus.PROCESSING.value, amount_paise, payout_id
         )
 
@@ -264,8 +269,14 @@ class PayoutService:
         )
         # Notify only when this webhook actually moved something: a redelivery of an
         # already-applied event settles nothing, and must not re-push.
+        #
+        # Buffered rather than enqueued: if this transaction rolls back, RazorpayX
+        # retries the webhook and the second attempt settles the same bookings again
+        # — an inline push would have already fired on the first attempt, so the
+        # provider would be told twice. The in-memory ``settled`` filter above only
+        # protects redelivery after a *successful* commit.
         if settled:
-            self._notify_payout(
+            self._buffer_notification(
                 settled[0].provider_id,
                 new_status.value,
                 self._batch_amount_paise(entity, list(settled)),
@@ -453,9 +464,19 @@ class PayoutService:
     ) -> None:
         """Hold a push until the transaction that justifies it has committed.
 
-        Used by reconciliation, where one transaction repairs many payouts — see
-        ``reconcile_payouts``. The create and webhook paths enqueue directly instead:
-        each handles a single payout, so there's no batch to lose.
+        Every path buffers, because a push cannot be un-sent and none of these
+        transactions are committed at the point the state changes:
+
+        - **create** — RazorpayX has already taken the money by the time we write
+          PROCESSING. If the commit then fails, an inline push would have announced
+          a payout the database has no record of.
+        - **webhook** — a rolled-back delivery is retried by RazorpayX, and the
+          retry settles the same bookings again; an inline push would fire twice.
+        - **reconcile** — one transaction repairs many payouts, so a failure
+          part-way rolls back repairs whose pushes already went out.
+
+        Drained by ``dispatch_pending_notifications`` (request paths) or
+        ``dispatch_notifications`` (the reconcile task) — both only after commit.
         """
         self._pending_notifications.append({
             "provider_id": str(provider_id),
@@ -464,9 +485,19 @@ class PayoutService:
             "payout_id": payout_id,
         })
 
+    def dispatch_pending_notifications(self) -> None:
+        """Drain this instance's buffered pushes. **Must run after the commit.**
+
+        Request paths hand this to FastAPI ``BackgroundTasks``, which runs it after
+        the ``get_db`` dependency has committed — and not at all if that commit
+        raises, which is precisely the property we want.
+        """
+        notifications, self._pending_notifications = self._pending_notifications, []
+        self.dispatch_notifications(notifications)
+
     @classmethod
     def dispatch_notifications(cls, notifications: list[dict]) -> None:
-        """Enqueue buffered pushes. Call only after the repairs are committed."""
+        """Enqueue buffered pushes. Call only after the state change is committed."""
         for note in notifications:
             cls._notify_payout(**note)
 
