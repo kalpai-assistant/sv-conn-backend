@@ -2198,18 +2198,12 @@ async def test_pending_settlements_endpoint_rejects_non_admin(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="SVC-150: provider_payout is Float, so int(rupees * 100) truncates low. "
-           "Affects the real payout amount too, not just this list — fixing it here "
-           "alone would break agreement with create_provider_payout.",
-    strict=True,
-)
 async def test_amount_is_exact_for_values_that_trip_float_truncation(db_session):
-    """₹80.10 must be 8010 paise. It is currently 8009.
+    """₹80.10 must be 8010 paise, not the 8009 the old Float columns produced.
 
-    Kept as a failing expectation rather than a comment so SVC-150 is visible in
-    the suite; it will start passing the moment the money columns become Numeric,
-    at which point the xfail marker should be removed.
+    Was an xfail while SVC-150 was outstanding; the fix (Numeric columns +
+    round-half-up conversion) makes it pass, so the marker is gone and this now
+    guards against a regression.
     """
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")

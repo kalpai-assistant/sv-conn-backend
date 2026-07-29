@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from functools import lru_cache
@@ -42,7 +44,10 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_ID: str = ""
     RAZORPAY_KEY_SECRET: str = ""
     RAZORPAY_WEBHOOK_SECRET: str = ""  # Set in Razorpay dashboard → Webhooks
-    PLATFORM_COMMISSION_PERCENT: float = 20.0
+    # Decimal, not float: this rate is the source of every booking's money split, so
+    # a binary-approximated 20.0 would seed rounding error into provider_payout
+    # before it is ever stored (SVC-150).
+    PLATFORM_COMMISSION_PERCENT: Decimal = Decimal("20.0")
     # RazorpayX virtual account that funds provider payouts. Blank until RazorpayX
     # is activated; payout creation requires it.
     RAZORPAYX_ACCOUNT_NUMBER: str = ""

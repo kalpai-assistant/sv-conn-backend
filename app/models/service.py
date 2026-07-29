@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Boolean, Integer, Float, ForeignKey, Enum, DateTime, func, Text, Index
+from decimal import Decimal
+from sqlalchemy import String, Boolean, Integer, Numeric, ForeignKey, Enum, DateTime, func, Text, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -25,7 +26,9 @@ class Service(Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
-    base_price: Mapped[float] = mapped_column(Float, nullable=False)
+    # The root money value — every booking's split derives from it, so it must be
+    # exact before anything downstream can be (SVC-150).
+    base_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
