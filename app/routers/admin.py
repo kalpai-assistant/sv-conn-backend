@@ -3,7 +3,7 @@ Admin router: user management, booking oversight, and KYC approval.
 All endpoints require the "admin" role.
 """
 from uuid import UUID
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -128,6 +128,7 @@ async def list_all_bookings(
 @router.post("/providers/{user_id}/payout", status_code=status.HTTP_200_OK)
 async def pay_out_provider(
     user_id: UUID,
+    background_tasks: BackgroundTasks,
     admin: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -137,8 +138,16 @@ async def pay_out_provider(
     written to the audit trail. The transaction is committed by ``get_db`` on a
     clean response, so the payout's booking writes and the commit are owned in one
     place rather than committed here.
+
+    The provider's push is dispatched as a background task, which FastAPI runs
+    *after* that dependency commits — and skips entirely if the commit raises. The
+    money has already left RazorpayX by then, so announcing a payout the database
+    failed to record would be worse than a missing push.
     """
-    return await PayoutService(db).create_provider_payout(user_id, admin.id)
+    service = PayoutService(db)
+    result = await service.create_provider_payout(user_id, admin.id)
+    background_tasks.add_task(service.dispatch_pending_notifications)
+    return result
 
 
 @router.post(

@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, Request, HTTPException, status
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, Request, HTTPException, status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 import hmac
 import hashlib
@@ -89,6 +91,7 @@ async def razorpay_webhook(
 @router.post("/payout-webhook", status_code=status.HTTP_200_OK)
 async def razorpayx_payout_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -97,10 +100,17 @@ async def razorpayx_payout_webhook(
     RazorpayX is a separate Razorpay product with its own webhook secret, so its
     payout.processed / payout.failed / payout.reversed events must arrive on a
     dedicated endpoint rather than the Payments webhook (different secret).
+
+    The provider's push is dispatched as a background task so it runs only after
+    ``get_db`` commits. If this delivery rolls back, RazorpayX retries it and the
+    retry settles the same bookings — pushing inline would notify the provider once
+    per attempt.
     """
     payload_data = await _verify_and_parse(request, settings.RAZORPAYX_WEBHOOK_SECRET)
-    await PayoutService(db).handle_payout_webhook(
+    service = PayoutService(db)
+    await service.handle_payout_webhook(
         event=payload_data.event,
         payload=payload_data.payload,
     )
+    background_tasks.add_task(service.dispatch_pending_notifications)
     return {"status": "ok"}
