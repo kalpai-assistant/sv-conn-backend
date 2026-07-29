@@ -10,12 +10,13 @@ import hashlib
 import logging
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.models.booking import Booking, BookingStatus, SettlementStatus
 from app.models.provider_profile import ProviderProfile
+from app.models.user import User
 from app.models.payout_audit import PayoutAudit
 from app.exceptions import PaymentError, UserNotFound
 from app.utils.encryption import decrypt
@@ -34,6 +35,10 @@ _RECONCILE_MAP = {
 class PayoutService:
     """Bulk provider payouts via RazorpayX."""
 
+    # The admin list is capped, not paginated (SVC-144): the payouts screen answers
+    # "who do we owe right now", it isn't a browsable index.
+    PENDING_SETTLEMENTS_LIMIT = 200
+
     def __init__(self, db: AsyncSession):
         self.db = db
         # Provider pushes held until the transaction that justifies them has
@@ -41,6 +46,101 @@ class PayoutService:
         # ``dispatch_pending_notifications`` (request paths, via BackgroundTasks) or
         # ``dispatch_notifications`` (the reconcile Celery task, post-commit).
         self._pending_notifications: list[dict] = []
+
+    async def list_pending_settlements(
+        self, *, limit: int = PENDING_SETTLEMENTS_LIMIT
+    ) -> dict:
+        """Providers with money owed, aggregated one row per provider.
+
+        Powers the admin payouts screen: each row is a provider the platform owes,
+        with the batch total and booking count that ``create_provider_payout`` would
+        settle if the admin pressed Pay out. Ordered largest debt first.
+
+        Shares ``_owed_filter`` with the payout path so the amount shown and the
+        amount paid cannot drift. Unlike ``_pending_settlements`` this takes **no row
+        locks** — that helper is about to spend money, this one is rendering a page,
+        and locking every provider's bookings to do so would be wrong.
+
+        Capped at ``limit`` rows; ``total`` is the true provider count so the caller
+        can tell the admin the list is incomplete.
+
+        Rows and total come from **one** query. Counting separately would read two
+        snapshots under READ COMMITTED, and a payout committing between them could
+        report a ``total`` lower than the rows already returned — "showing 200 of
+        150". ``COUNT(*) OVER ()`` is evaluated after GROUP BY and before LIMIT, so
+        it counts provider groups pre-cap on the same snapshot as the rows.
+        """
+        # ProviderProfile is 1:1 with the user and grouped away, so aggregate it.
+        # bool_or over the (at most one) profile row = "has a usable destination".
+        #
+        # Mirrors ProviderProfile.payout_set, which is a plain @property and cannot
+        # be evaluated in SQL. That property is Python truthiness, so it treats an
+        # empty string as "not set" — SQL's IS NOT NULL does not, hence the explicit
+        # != '' here. Without it the list would claim a destination the payout path
+        # would then reject.
+        def _present(column):
+            return column.is_not(None) & (column != "")
+
+        payout_set = func.bool_or(
+            _present(ProviderProfile.payout_vpa_encrypted)
+            | (
+                _present(ProviderProfile.payout_account_number_encrypted)
+                & _present(ProviderProfile.payout_ifsc_encrypted)
+            )
+        )
+        total_rupees = func.sum(Booking.provider_payout)
+
+        rows = (
+            await self.db.execute(
+                select(
+                    User.id,
+                    User.name,
+                    User.phone,
+                    User.is_active,
+                    func.count(Booking.id),
+                    total_rupees,
+                    payout_set,
+                    func.count().over().label("total_providers"),
+                )
+                .select_from(Booking)
+                .join(User, User.id == Booking.provider_id)
+                # LEFT join: a provider can have completed bookings but no profile row
+                # at all. An inner join would drop them silently — hiding money owed.
+                # They surface with payout_set=False, which is exactly what the admin
+                # needs to see.
+                .outerjoin(ProviderProfile, ProviderProfile.user_id == User.id)
+                .where(*self._owed_filter())
+                .group_by(User.id, User.name, User.phone, User.is_active)
+                .order_by(total_rupees.desc())
+                .limit(limit)
+            )
+        ).all()
+
+        providers = [
+            {
+                "provider_id": provider_id,
+                "name": name,
+                "phone": phone,
+                "is_active": is_active,
+                "pending_booking_count": booking_count,
+                # Same rupees→paise conversion the payout path uses, so the figure in
+                # the confirmation dialog matches what is actually sent. (Both inherit
+                # the Float rounding tracked on SVC-150.)
+                "pending_payout_paise": int(rupees * 100),
+                "payout_set": bool(has_payout),
+            }
+            for provider_id, name, phone, is_active, booking_count, rupees, has_payout, _
+            in rows
+        ]
+
+        # The window count is identical on every row; no rows means nothing is owed.
+        total = rows[0].total_providers if rows else 0
+
+        return {
+            "providers": providers,
+            "total": total,
+            "truncated": total > len(providers),
+        }
 
     async def create_provider_payout(
         self, provider_id: UUID, admin_user_id: UUID
@@ -722,6 +822,20 @@ class PayoutService:
             raise PaymentError("Provider has no payout details on file")
         return vpa, account_number, ifsc
 
+    @staticmethod
+    def _owed_filter() -> tuple:
+        """What counts as "money owed to a provider" — the single definition.
+
+        Deliberately shared by the payout path (``_pending_settlements``) and the
+        admin list (``list_pending_settlements``). If those two ever drift apart the
+        admin sees one amount in the confirmation dialog and a different amount
+        leaves the bank, so the condition lives in exactly one place.
+        """
+        return (
+            Booking.status == BookingStatus.COMPLETED,
+            Booking.settlement_status == SettlementStatus.PENDING,
+        )
+
     async def _pending_settlements(self, provider_id: UUID) -> list[Booking]:
         # Lock the selected rows for the duration of the transaction so two
         # concurrent payouts for the same provider can't both read the same
@@ -730,11 +844,7 @@ class PayoutService:
         # locked rows, finds nothing PENDING, and raises "No pending settlements".
         result = await self.db.execute(
             select(Booking)
-            .where(
-                Booking.provider_id == provider_id,
-                Booking.status == BookingStatus.COMPLETED,
-                Booking.settlement_status == SettlementStatus.PENDING,
-            )
+            .where(Booking.provider_id == provider_id, *self._owed_filter())
             .with_for_update(skip_locked=True)
         )
         return list(result.scalars().all())
