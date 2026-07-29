@@ -12,18 +12,18 @@ Covers GET /providers/me/earnings:
 - Range filtering boundary (week vs month) works on a real timestamp
 """
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
+from app.models.address import Address
 from app.models.booking import BookingStatus, PaymentStatus
 from app.models.booking_status_log import BookingStatusLog
 from app.models.category import Category
+from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.service import Service
-from app.models.address import Address
-from app.models.provider_profile import ProviderProfile, KYCStatus
-from tests.factories.user_factory import UserFactory
 from tests.factories.booking_factory import BookingFactory
+from tests.factories.user_factory import UserFactory
 
 
 async def _seed_service(db, suffix: str | None = None) -> Service:
@@ -104,7 +104,7 @@ async def test_earnings_sums_recent_payouts(client, auth_headers, db_session):
     """Two completed bookings within window → both appear, total is summed."""
     provider = await _seed_provider(db_session)
     consumer = await UserFactory.create(db_session, role="consumer")
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     await _seed_completed_booking(
         db_session, provider, consumer, payout=80.0, completed_at=now_utc - timedelta(hours=1)
     )
@@ -133,7 +133,7 @@ async def test_earnings_excludes_old_bookings(client, auth_headers, db_session):
     """Bookings completed before the window start are excluded."""
     provider = await _seed_provider(db_session)
     consumer = await UserFactory.create(db_session, role="consumer")
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     # Inside today's window
     await _seed_completed_booking(
         db_session, provider, consumer, payout=80.0, completed_at=now_utc - timedelta(minutes=30)
@@ -157,7 +157,7 @@ async def test_earnings_excludes_cancelled_and_refunded(client, auth_headers, db
     """CANCELLED bookings and REFUNDED payments are not earnings."""
     provider = await _seed_provider(db_session)
     consumer = await UserFactory.create(db_session, role="consumer")
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
 
     # Completed + PAID — counts
     await _seed_completed_booking(
@@ -229,7 +229,7 @@ async def test_earnings_isolated_between_providers(client, auth_headers, db_sess
     provider_a = await _seed_provider(db_session)
     provider_b = await _seed_provider(db_session)
     consumer = await UserFactory.create(db_session, role="consumer")
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
 
     await _seed_completed_booking(
         db_session, provider_a, consumer, payout=80.0, completed_at=now_utc - timedelta(hours=1)

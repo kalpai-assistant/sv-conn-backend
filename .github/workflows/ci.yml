@@ -1,0 +1,137 @@
+# CI — lint / migration check / test on every push + PR.
+#
+# What runs where:
+#   - PR against main:  full pipeline (Postgres + PostGIS + Redis containers)
+#   - Push to main:     same, so a bad merge to main gets caught immediately
+#   - Push to feat/*:   same, so junior sees red before opening the PR
+#
+# What this does NOT do yet (SC-45b will add):
+#   - Build/push a Docker image
+#   - Deploy to staging on main merge
+#   - Deploy to prod on tag
+#
+# Design notes:
+#   - `uv sync --frozen` fails if uv.lock is out of date. Prevents "works on my
+#     machine after uv add" drift.
+#   - Ruff enforces lint but NOT format (72 files would reformat; separate
+#     follow-up PR handles that so this workflow doesn't collide with in-flight
+#     work).
+#   - `alembic check` is blocking — catches "committed the model but forgot
+#     to autogenerate the migration".
+#   - Postgres uses the PostGIS image (`postgis/postgis:16-3.5`) — the plain
+#     postgres image would fail the `CREATE EXTENSION postgis` step.
+#   - Redis included even though most tests mock it — a few integration tests
+#     hit real redis via `get_redis`, and the container is essentially free.
+#   - Tests run against `sc_test` DB (matches conftest.py's TEST_DATABASE_URL).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Also run on any feat/* push so juniors see failures before opening a PR.
+  # Not strictly required but the compute is cheap and the feedback loop
+  # dramatically shortens.
+  workflow_dispatch:
+
+concurrency:
+  # Cancel in-progress runs for the same ref when a new commit arrives —
+  # saves minutes on push-heavy branches.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      # PostGIS image because the app requires the extension. Uses the same
+      # credentials + DB name that tests/conftest.py hard-codes.
+      postgres:
+        image: postgis/postgis:16-3.5
+        env:
+          POSTGRES_USER: sc_user
+          POSTGRES_PASSWORD: sc_password
+          POSTGRES_DB: sc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sc_user -d sc_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        # conftest uses port 6380 per .env.example — remap the container's
+        # standard 6379 to 6380 on the host so tests find it where they expect.
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Match tests/conftest.py TEST_DATABASE_URL exactly.
+      DATABASE_URL: postgresql+asyncpg://sc_user:sc_password@localhost:5432/sc_test
+      SYNC_DATABASE_URL: postgresql+psycopg2://sc_user:sc_password@localhost:5432/sc_test
+      REDIS_URL: redis://localhost:6380/0
+      # Bare-minimum secrets so config.py loads; tests never make real network calls.
+      JWT_SECRET_KEY: ci-test-jwt-secret-not-a-real-secret
+      ENCRYPTION_KEY: ci-test-encryption-key-32-bytes-x
+      RAZORPAY_KEY_ID: ci-test
+      RAZORPAY_KEY_SECRET: ci-test
+      RAZORPAY_WEBHOOK_SECRET: ci-test-webhook-secret
+      RAZORPAYX_WEBHOOK_SECRET: ci-test-payout-webhook-secret
+      RAZORPAYX_ACCOUNT_NUMBER: "9876543210"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          # Cache the dependency install between runs; keyed on uv.lock so it
+          # invalidates when we bump anything.
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies (frozen)
+        # --frozen fails if uv.lock is out of sync with pyproject.toml — catches
+        # a "forgot to commit the lock update" mistake in CI rather than in prod.
+        run: uv sync --frozen
+
+      # Lint runs before the DB spin-up so a bad import / unused var fails fast
+      # (~2s) without waiting on the 15-30s Postgres warmup. Format-check is
+      # NOT enforced yet — the codebase has 72 files that would reformat, and
+      # applying that all at once mid-sprint would collide with every in-flight
+      # PR. Follow-up ticket to apply `ruff format` in a dedicated commit.
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Enable PostGIS extension on the test DB
+        # tests/conftest.py runs Base.metadata.create_all which needs PostGIS
+        # to already exist (the ProviderProfile.service_area_center column uses
+        # geoalchemy2's Geography type).
+        run: |
+          PGPASSWORD=sc_password psql -h localhost -U sc_user -d sc_test \
+            -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+
+      - name: Verify Alembic migration chain
+        # `alembic check` catches "did you commit the model change but forget
+        # to autogenerate the migration?" drift before it hits main. Blocking
+        # now that the initial setup churn has settled.
+        run: uv run alembic check
+
+      - name: Run pytest
+        run: uv run pytest tests/ -v --tb=short

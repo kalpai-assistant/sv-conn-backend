@@ -1,7 +1,7 @@
 from uuid import UUID
+
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
-
 
 # ---------------------------------------------------------------------------
 # Domain exceptions

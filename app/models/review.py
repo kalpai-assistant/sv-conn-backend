@@ -1,8 +1,18 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Integer, String, ForeignKey, DateTime, func, Text, CheckConstraint, UniqueConstraint
+
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.database import Base
 
 

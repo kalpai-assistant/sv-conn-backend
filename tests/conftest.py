@@ -1,8 +1,9 @@
 import pytest
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from app.main import create_app
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from app.database import Base, get_db
+from app.main import create_app
 from app.utils.security import create_access_token
 
 TEST_DATABASE_URL = "postgresql+asyncpg://sc_user:sc_password@localhost:5432/sc_test"

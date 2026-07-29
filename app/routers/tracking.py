@@ -1,9 +1,9 @@
 """
 WebSocket endpoints for real-time provider location tracking — exact from LLD.
 """
-import json
 from uuid import UUID
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from redis.asyncio import Redis
 
 from app.dependencies import get_redis, verify_ws_token

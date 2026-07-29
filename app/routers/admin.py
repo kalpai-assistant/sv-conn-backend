@@ -3,18 +3,19 @@ Admin router: user management, booking oversight, and KYC approval.
 All endpoints require the "admin" role.
 """
 from uuid import UUID
+
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import require_role
-from app.models.user import User
 from app.models.booking import Booking, BookingStatus
-from app.models.provider_profile import ProviderProfile, KYCStatus
+from app.models.provider_profile import KYCStatus, ProviderProfile
+from app.models.user import User
+from app.schemas.booking import BookingListResponse, BookingResponse
+from app.schemas.provider import KYCDocsResponse, KYCRejectionRequest, KYCReviewResponse
 from app.schemas.user import UserResponse
-from app.schemas.booking import BookingResponse, BookingListResponse
-from app.schemas.provider import KYCRejectionRequest, KYCReviewResponse, KYCDocsResponse
 from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])

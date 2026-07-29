@@ -9,13 +9,13 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import app.models  # noqa: F401 — side-effect import registers all mappers
 from alembic import context
 
 # ---------------------------------------------------------------------------
 # Populate Base.metadata by importing all models
 # ---------------------------------------------------------------------------
 from app.database import Base
-import app.models  # noqa: F401 — side-effect import registers all mappers
 
 # ---------------------------------------------------------------------------
 # Alembic config object
@@ -31,6 +31,7 @@ target_metadata = Base.metadata
 def get_url() -> str:
     """Prefer DATABASE_URL from environment for flexibility."""
     import os
+
     from app.config import get_settings
     settings = get_settings()
     # Alembic needs the psycopg2 sync URL for offline mode
@@ -74,7 +75,7 @@ def run_migrations_offline() -> None:
 # ---------------------------------------------------------------------------
 def do_run_migrations(connection: Connection) -> None:
     context.configure(
-        connection=connection, 
+        connection=connection,
         target_metadata=target_metadata,
         include_object=include_object,
     )

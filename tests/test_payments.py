@@ -2,27 +2,28 @@
 Payment integration tests.
 Covers: signature verification pass/fail, webhook idempotency.
 """
-import json
-import pytest
-import hmac
 import hashlib
+import hmac
+import json
 from unittest.mock import patch
-from sqlalchemy import select, func
 
-from tests.factories.user_factory import UserFactory
-from tests.factories.booking_factory import BookingFactory
+import pytest
+from sqlalchemy import func, select
+
+from app.config import get_settings
 from app.models.booking import BookingStatus, PaymentStatus
 from app.models.payment import Payment
-from app.config import get_settings
+from tests.factories.booking_factory import BookingFactory
+from tests.factories.user_factory import UserFactory
 
 settings = get_settings()
 
 
 async def _create_booking_with_deps(db_session, consumer, provider, **kwargs):
     """Create a booking with all required FK dependencies."""
+    from app.models.address import Address
     from app.models.category import Category
     from app.models.service import Service
-    from app.models.address import Address
 
     category = Category(name="Home Repair", slug="home-repair", is_active=True, sort_order=1)
     db_session.add(category)
@@ -64,7 +65,7 @@ async def test_verify_payment_invalid_signature(client, auth_headers, db_session
     """Tampered signature must return 402."""
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
-    booking = await _create_booking_with_deps(
+    await _create_booking_with_deps(
         db_session, consumer, provider,
         status=BookingStatus.COMPLETED,
         razorpay_order_id="order_test_123",

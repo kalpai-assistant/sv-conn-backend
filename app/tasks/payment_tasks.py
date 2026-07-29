@@ -1,9 +1,9 @@
 """
 Payment Celery tasks: handles cash payment recording after booking completion.
 """
-from app.tasks.celery_app import celery_app
-from app.models.payment import Payment, PaymentRecordStatus, PaymentRecordMethod
 from app.models.booking import Booking, PaymentStatus
+from app.models.payment import Payment, PaymentRecordMethod, PaymentRecordStatus
+from app.tasks.celery_app import celery_app
 
 
 @celery_app.task(

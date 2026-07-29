@@ -1,18 +1,20 @@
-from fastapi import APIRouter, Depends, Request, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-import hmac
 import hashlib
+import hmac
 
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import get_settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.user import User
-from app.config import get_settings
 from app.schemas.payment import (
-    CreatePaymentOrderRequest, PaymentOrderResponse,
-    VerifyPaymentRequest, RazorpayWebhookPayload,
+    CreatePaymentOrderRequest,
+    PaymentOrderResponse,
+    RazorpayWebhookPayload,
+    VerifyPaymentRequest,
 )
 from app.services.payment_service import PaymentService
-from app.tasks.notification_tasks import send_booking_notification
 from app.utils.rate_limiter import rate_limit
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -83,8 +85,8 @@ async def razorpay_webhook(
     try:
         import json
         payload_data = RazorpayWebhookPayload.model_validate(json.loads(raw_body))
-    except Exception:
-        raise HTTPException(status_code=400, detail="Malformed webhook payload")
+    except Exception as err:
+        raise HTTPException(status_code=400, detail="Malformed webhook payload") from err
 
     await PaymentService(db).handle_webhook(
         event=payload_data.event,

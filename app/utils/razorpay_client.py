@@ -3,6 +3,7 @@ Razorpay SDK wrapper — lazy singleton, avoids re-instantiation on every call.
 All Razorpay interactions go through this module.
 """
 import razorpay
+
 from app.config import get_settings
 
 settings = get_settings()

@@ -3,12 +3,13 @@ Review service: create reviews and list provider reviews.
 Updates provider average rating after each new review.
 """
 import uuid
-from sqlalchemy import select, func
+
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.review import Review
+from app.exceptions import BookingNotFound, DuplicateReview, UnauthorizedAction
 from app.models.booking import Booking, BookingStatus
-from app.exceptions import DuplicateReview, UnauthorizedAction, BookingNotFound
+from app.models.review import Review
 from app.services.provider_service import ProviderService
 
 

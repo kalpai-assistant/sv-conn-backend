@@ -2,7 +2,9 @@
 Booking factory for test fixtures.
 """
 import uuid
+
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.models.booking import Booking, BookingStatus, PaymentMethod, PaymentStatus
 
 

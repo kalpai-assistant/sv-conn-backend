@@ -9,7 +9,9 @@ No existing code changes needed.
 from __future__ import annotations
 
 import abc
+
 import httpx
+
 from app.config import get_settings
 
 settings = get_settings()

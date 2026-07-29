@@ -26,7 +26,6 @@ from app.dependencies import get_current_user, get_redis
 from app.exceptions import RateLimitExceeded, register_exception_handlers
 from app.utils.rate_limiter import rate_limit
 
-
 # ---------------------------------------------------------------------------
 # Unit tests — hit the dependency function directly with mocks
 # ---------------------------------------------------------------------------

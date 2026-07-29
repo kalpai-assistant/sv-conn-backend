@@ -3,12 +3,13 @@ Seed initial categories with default icons and sort order.
 Run: python scripts/seed_categories.py
 """
 import asyncio
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from sqlalchemy import select
+
 from app.database import AsyncSessionLocal
 from app.models.category import Category
 

@@ -2,15 +2,16 @@
 FastAPI shared dependencies: DB session, Redis, current user resolution, RBAC.
 """
 from uuid import UUID
-from fastapi import Depends, HTTPException, status, WebSocket
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
-from redis.asyncio import Redis as AsyncRedis
 
+from fastapi import Depends, HTTPException, WebSocket, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis.asyncio import Redis as AsyncRedis
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import get_settings
 from app.database import get_db
 from app.models.user import User
 from app.utils.security import decode_jwt
-from app.config import get_settings
 
 settings = get_settings()
 security = HTTPBearer()

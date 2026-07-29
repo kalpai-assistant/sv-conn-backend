@@ -1,12 +1,13 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, func, ForeignKey, Index
+from typing import TYPE_CHECKING
+
+from geoalchemy2 import Geography
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from geoalchemy2 import Geography
-from app.database import Base
 
-from typing import TYPE_CHECKING
+from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.user import User

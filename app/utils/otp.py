@@ -3,7 +3,9 @@ OTP generation + Redis-backed storage/verification.
 All Redis key naming is centralised here — no other module builds OTP keys.
 """
 import secrets
+
 from redis.asyncio import Redis
+
 from app.config import get_settings
 
 settings = get_settings()

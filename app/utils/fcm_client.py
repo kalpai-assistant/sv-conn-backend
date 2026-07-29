@@ -4,6 +4,7 @@ firebase-admin is initialised lazily on first use.
 """
 import firebase_admin
 from firebase_admin import credentials, messaging
+
 from app.config import get_settings
 
 settings = get_settings()

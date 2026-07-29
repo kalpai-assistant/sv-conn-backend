@@ -4,8 +4,6 @@ Uses a synchronous DB session (SyncSessionLocal) because Celery workers are not 
 """
 from app.tasks.celery_app import celery_app
 from app.utils.fcm_client import send_push_notification
-from app.utils.sms_client import get_sms_client
-
 
 NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
     "new_request": {
@@ -49,11 +47,12 @@ def send_booking_notification(self, booking_id: str, event: str):
                 return
 
             if event == "new_request":
-                from sqlalchemy import select, func
-                from app.models.provider_profile import ProviderProfile, KYCStatus
+                from sqlalchemy import func, select
+
+                from app.models.address import Address
+                from app.models.provider_profile import KYCStatus, ProviderProfile
                 from app.models.provider_service import ProviderService
                 from app.models.user import User
-                from app.models.address import Address
 
                 # Get the booking address location directly
                 address = db.get(Address, booking.consumer_address_id)
@@ -65,7 +64,7 @@ def send_booking_notification(self, booking_id: str, event: str):
                     ProviderService, ProviderService.provider_id == ProviderProfile.user_id
                 ).where(
                     ProviderService.service_id == booking.service_id,
-                    ProviderProfile.is_online == True,
+                    ProviderProfile.is_online.is_(True),
                     ProviderProfile.kyc_status == KYCStatus.VERIFIED,
                     func.ST_DWithin(
                         ProviderProfile.service_area_center,

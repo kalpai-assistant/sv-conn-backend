@@ -7,8 +7,9 @@ during the request carries it automatically — no need to pass request_id
 through every service call.
 """
 import uuid
-from starlette.middleware.base import BaseHTTPMiddleware
+
 from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.logging_config import request_id_var
 

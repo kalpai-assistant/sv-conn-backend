@@ -2,12 +2,13 @@
 Catalog service: admin-managed global service catalog.
 """
 import uuid
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.exceptions import ServiceNotFound
 from app.models.category import Category
 from app.models.service import Service
-from app.exceptions import ServiceNotFound
 
 
 class CatalogService:

@@ -5,28 +5,28 @@ toggling, and geospatial discovery.
 import asyncio
 import io
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Literal
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.exceptions import (
+    AppException,
+    DuplicateSubscription,
+    ServiceNotFound,
+    SubscriptionNotFound,
+    UnauthorizedAction,
+    UserNotFound,
+)
 from app.models.booking import Booking, BookingStatus, PaymentStatus
 from app.models.booking_status_log import BookingStatusLog
-from app.models.provider_profile import ProviderProfile, KYCStatus
+from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.service import Service
-from app.exceptions import (
-    ServiceNotFound,
-    UnauthorizedAction,
-    DuplicateSubscription,
-    SubscriptionNotFound,
-    UserNotFound,
-    AppException,
-)
-from app.utils.geo import build_point_wkt, st_dwithin_filter, distance_expression
-from app.utils.encryption import encrypt
 from app.utils import storage
-
+from app.utils.encryption import encrypt
+from app.utils.geo import build_point_wkt, distance_expression, st_dwithin_filter
 
 # Indian Standard Time — earnings windows are user-facing ("today", "this
 # week", "this month") so they must respect the user's local calendar boundary,
@@ -48,7 +48,7 @@ def _earnings_window_start_utc(range_: EarningsRange) -> datetime:
         )
     else:  # month
         start_ist = now_ist.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    return start_ist.astimezone(timezone.utc)
+    return start_ist.astimezone(UTC)
 
 
 class ProviderService:
@@ -345,7 +345,7 @@ class ProviderService:
             "selfie_content_type": selfie_content_type,
         }
         profile.kyc_status = KYCStatus.SUBMITTED
-        profile.kyc_submitted_at = datetime.now(timezone.utc)
+        profile.kyc_submitted_at = datetime.now(UTC)
         # Clear any prior rejection notes so the admin UI doesn't surface stale ones.
         profile.kyc_reviewed_at = None
         profile.kyc_rejection_reason = None
@@ -364,7 +364,7 @@ class ProviderService:
             )
 
         profile.kyc_status = KYCStatus.VERIFIED
-        profile.kyc_reviewed_at = datetime.now(timezone.utc)
+        profile.kyc_reviewed_at = datetime.now(UTC)
         profile.kyc_rejection_reason = None
         await self.db.flush()
         return profile
@@ -380,7 +380,7 @@ class ProviderService:
             )
 
         profile.kyc_status = KYCStatus.REJECTED
-        profile.kyc_reviewed_at = datetime.now(timezone.utc)
+        profile.kyc_reviewed_at = datetime.now(UTC)
         profile.kyc_rejection_reason = reason
         await self.db.flush()
         return profile
@@ -395,7 +395,6 @@ class ProviderService:
         with the User row so the admin sees who they're reviewing without a
         second round-trip.
         """
-        from app.models.user import User  # local import — avoids circular at module load
         from sqlalchemy.orm import joinedload
 
         result = await self.db.execute(

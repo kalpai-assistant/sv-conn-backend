@@ -36,11 +36,51 @@ dev = [
     "factory-boy>=3.3,<4.0",
     "anyio>=4.7,<5.0",
     "coverage>=7.6,<8.0",
+    # Ruff does both linting AND formatting. One tool replaces flake8 + black
+    # + isort + pyupgrade, and it's ~100× faster.
+    "ruff>=0.8,<0.9",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "alembic/versions",  # auto-generated migration files — don't hand-format
+]
+
+[tool.ruff.lint]
+# Deliberately conservative starter set — hoping to add S (bandit) + N (naming)
+# once the current codebase passes cleanly.
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (unused imports, undefined names, etc)
+    "I",   # isort (import order)
+    "B",   # flake8-bugbear (mutable default args, etc)
+    "UP",  # pyupgrade (modernize syntax)
+]
+ignore = [
+    "E501",  # line-too-long — the formatter handles most cases; a few
+             # unbreakable strings shouldn't fail CI.
+    "B008",  # do not perform function calls in argument defaults — FastAPI's
+             # Depends() pattern uses this heavily; disabling it project-wide.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "F401",  # unused imports — fixtures often "leak" via test files
+    "B011",  # assert False — legitimate in some tests
+]
+"alembic/env.py" = ["E402"]  # module-level imports after sys.path manipulation
+"app/models/*" = [
+    "F821",  # SQLAlchemy `Mapped["User"]` uses string forward refs that Ruff
+             # can't resolve — flagging every ORM relationship isn't useful.
+             # Fixable long-term with `from __future__ import annotations`.
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
