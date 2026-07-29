@@ -1767,6 +1767,24 @@ wheels = [
 ]
 
 [[package]]
+name = "sentry-sdk"
+version = "2.66.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7f/6f/d59cad0889d15fde85254cf58e701484de3f3f0406003b3197746910b19b/sentry_sdk-2.66.1.tar.gz", hash = "sha256:f882fb08710c5f8bfc603aafa3e901b384009a19cc3f76a572b863392ee81cdc", size = 940543, upload-time = "2026-07-22T12:26:54.553Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/d3/726bd88f0eece09ddf431bea4c9191c18e7a8d070b854eb0014d447712ee/sentry_sdk-2.66.1-py3-none-any.whl", hash = "sha256:86002793161d9a95ef04bdd8d442e9bfece5d989b755f05d6360215094a7aff6", size = 505555, upload-time = "2026-07-22T12:26:52.71Z" },
+]
+
+[package.optional-dependencies]
+fastapi = [
+    { name = "fastapi" },
+]
+
+[[package]]
 name = "serviceconnect"
 version = "1.0.0"
 source = { editable = "." }
@@ -1788,8 +1806,10 @@ dependencies = [
     { name = "python-multipart" },
     { name = "razorpay" },
     { name = "redis", extra = ["hiredis"] },
+    { name = "sentry-sdk", extra = ["fastapi"] },
     { name = "setuptools" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "structlog" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "uvloop", marker = "sys_platform != 'win32'" },
 ]
@@ -1822,8 +1842,10 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.20,<0.1" },
     { name = "razorpay", specifier = ">=1.4,<1.5" },
     { name = "redis", extras = ["hiredis"], specifier = ">=5.2,<5.3" },
+    { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.19,<3.0" },
     { name = "setuptools", specifier = ">=75.0,<81" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<2.1" },
+    { name = "structlog", specifier = ">=24.4,<25.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<0.35" },
     { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.21,<0.22" },
 ]
@@ -1923,6 +1945,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ce/20/08dfcd9c983f6a6f4a1000d934b9e6d626cff8d2eeb77a89a68eef20a2b7/starlette-0.46.2.tar.gz", hash = "sha256:7f7361f34eed179294600af672f565727419830b54b7b084efe44bb82d2fccd5", size = 2580846, upload-time = "2025-04-13T13:56:17.942Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8b/0c/9d30a4ebeb6db2b25a841afbb80f6ef9a854fc3b41be131d249a977b4959/starlette-0.46.2-py3-none-any.whl", hash = "sha256:595633ce89f8ffa71a015caed34a5b2dc1c0cdb3f0f1fbd1e69339cf2abeec35", size = 72037, upload-time = "2025-04-13T13:56:16.21Z" },
+]
+
+[[package]]
+name = "structlog"
+version = "24.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/78/a3/e811a94ac3853826805253c906faa99219b79951c7d58605e89c79e65768/structlog-24.4.0.tar.gz", hash = "sha256:b27bfecede327a6d2da5fbc96bd859f114ecc398a6389d664f62085ee7ae6fc4", size = 1348634, upload-time = "2024-07-17T12:38:43.483Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bf/65/813fc133609ebcb1299be6a42e5aea99d6344afb35ccb43f67e7daaa3b92/structlog-24.4.0-py3-none-any.whl", hash = "sha256:597f61e80a91cc0749a9fd2a098ed76715a1c8a01f73e336b746504d1aad7610", size = 67180, upload-time = "2024-07-17T12:38:41.043Z" },
 ]
 
 [[package]]

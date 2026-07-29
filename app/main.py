@@ -3,14 +3,13 @@ FastAPI application factory — lifespan, middleware stack, router registration,
 and exception handler wiring. Exact from LLD.
 """
 
-import logging
-import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
 from app.config import get_settings
+from app.logging_config import configure_logging
 from app.routers import (
     auth,
     users,
@@ -29,14 +28,25 @@ from app.middleware.auth import JWTAttachMiddleware
 from app.middleware.admin_ip_allowlist import AdminIPAllowlistMiddleware
 from app.exceptions import register_exception_handlers
 
-# Configure structured application-wide logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s:\t  [%(name)s] %(message)s",
-    stream=sys.stdout,
-)
-
 settings = get_settings()
+
+# SVC-46: structured JSON logs with request-ID correlation. Must run before
+# any module-level `logging.getLogger(...)` handlers get attached.
+configure_logging(level=settings.LOG_LEVEL, json_logs=settings.LOG_JSON)
+
+# SVC-46: Sentry. No-op when DSN is unset (dev-safe). FastAPI + starlette
+# integrations are auto-registered by sentry-sdk[fastapi]; no explicit
+# middleware wiring needed.
+if settings.SENTRY_DSN:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.ENVIRONMENT,
+        traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+        # Don't leak JWTs / request bodies into Sentry by default.
+        send_default_pii=False,
+    )
 
 
 @asynccontextmanager
