@@ -49,8 +49,13 @@ compromise or personnel change."
   `.env.example` only has placeholders).
 - Slack / email / Notion / any chat log.
 - Container images (CI/CD reads from SSM at deploy time; images stay clean).
-- Application logs (structlog config in `app/logging_config.py` masks nothing
-  automatically — treat any `logger.info(f"...{secret}...")` as a leak).
+- Application logs. Note: the structlog processor at
+  `app/logging_config.py::_redact_secrets` catches known-sensitive keys
+  (`password`, `token`, `otp`, `secret`, `authorization`, ...) and known
+  patterns (JWTs, `rzp_live_*`, `AKIA*`) as a safety net. **Do not rely
+  on it** — an `f"OTP is {otp}"` inside a log message body will still leak
+  because we can only redact structured fields. Treat every log call
+  touching a secret as a code-review flag.
 - Screenshots, screen recordings, presentations.
 
 If you catch a secret in any of the above during code review, treat it as

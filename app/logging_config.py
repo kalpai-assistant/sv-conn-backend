@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import re
 import sys
 from typing import Any
 
@@ -34,6 +35,98 @@ def _add_request_id(_logger: Any, _name: str, event_dict: dict) -> dict:
     return event_dict
 
 
+# ---------------------------------------------------------------------------
+# Secret redaction (SC-50 preventive control)
+#
+# The primary defense against secret leaks is code review + not writing them
+# into log calls in the first place. This is a safety net: if a well-meaning
+# `logger.info("payload=%s", payload)` includes a token or the audit key,
+# the raw value never lands in aggregate logs (CloudWatch / Loki / Sentry).
+#
+# Two mechanisms, both cheap:
+#   1. **Key-based**: any event_dict entry whose key matches a sensitive
+#      name (case-insensitive substring — `otp`, `token`, `password`, etc)
+#      gets its value replaced.
+#   2. **Value-based**: string values matching a known-secret pattern (JWT,
+#      Razorpay live key) get replaced regardless of their key.
+#
+# Redaction preserves the field so structure is unchanged — a reader still
+# sees the key existed, just not the value.
+# ---------------------------------------------------------------------------
+
+_REDACTED = "***REDACTED***"
+
+# Substrings that mark a key as sensitive. Match is case-insensitive; matches
+# anywhere in the key name so `access_token`, `authTokenHash`, `RAZORPAY_SECRET`
+# all get caught.
+_SENSITIVE_KEY_SUBSTRINGS = frozenset({
+    "password",
+    "secret",
+    "token",
+    "authorization",
+    "api_key",
+    "apikey",
+    "otp",
+    "encryption_key",
+    "webhook_secret",
+    # Razorpay signature — proves payment authenticity, mustn't leak.
+    "razorpay_signature",
+})
+
+# Value patterns that MUST be redacted regardless of key. Ordered by frequency
+# so cheap ones run first — the walk is called per log record.
+_SENSITIVE_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # JWT: base64url segments separated by two dots. The `eyJ` prefix is the
+    # base64-encoded `{"` that starts every JWT header — cheap first-char match.
+    re.compile(r"^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"),
+    # Razorpay live key prefix. `rzp_test_` is fine to log; `rzp_live_` is not.
+    re.compile(r"^rzp_live_[A-Za-z0-9]+$"),
+    # AWS access key format: AKIA followed by 16 uppercase alphanumeric.
+    re.compile(r"^AKIA[0-9A-Z]{16}$"),
+)
+
+
+def _key_is_sensitive(key: str) -> bool:
+    """True iff the key name contains any known sensitive substring."""
+    key_lower = key.lower()
+    return any(needle in key_lower for needle in _SENSITIVE_KEY_SUBSTRINGS)
+
+
+def _value_is_sensitive(value: Any) -> bool:
+    """True iff the value looks like a known secret pattern."""
+    if not isinstance(value, str):
+        return False
+    return any(pat.match(value) for pat in _SENSITIVE_VALUE_PATTERNS)
+
+
+def _redact(value: Any) -> Any:
+    """Redact a value while preserving structure.
+
+    Dicts + lists get walked recursively so a nested `{"headers":
+    {"Authorization": "Bearer ..."}}` is caught. Scalars matching a
+    sensitive pattern get replaced; everything else passes through.
+    """
+    if isinstance(value, dict):
+        return {k: _REDACTED if _key_is_sensitive(k) else _redact(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_redact(v) for v in value)
+    if _value_is_sensitive(value):
+        return _REDACTED
+    return value
+
+
+def _redact_secrets(_logger: Any, _name: str, event_dict: dict) -> dict:
+    """Structlog processor: redact any key-based or value-based secret.
+
+    Runs after correlation IDs are attached and before the renderer — so
+    the redaction applies to every log destination (JSON, console, Sentry).
+    """
+    return {
+        k: _REDACTED if _key_is_sensitive(k) else _redact(v)
+        for k, v in event_dict.items()
+    }
+
+
 def configure_logging(*, level: str = "INFO", json_logs: bool = False) -> None:
     """Wire stdlib logging → structlog. Idempotent — safe to call twice."""
     shared_processors: list[Any] = [
@@ -42,6 +135,11 @@ def configure_logging(*, level: str = "INFO", json_logs: bool = False) -> None:
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         _add_request_id,
+        # Redaction runs LAST among the transform processors so it catches
+        # any secret injected by earlier processors too — not just call-site
+        # kwargs. Runs before the renderer, so JSON + console + Sentry all
+        # see the redacted form.
+        _redact_secrets,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
     ]
