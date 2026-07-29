@@ -41,6 +41,11 @@ class PayoutService:
 
     def __init__(self, db: AsyncSession):
         self.db = db
+        # Provider pushes held until the transaction that justifies them has
+        # committed — see ``_buffer_notification``. Drained by the caller:
+        # ``dispatch_pending_notifications`` (request paths, via BackgroundTasks) or
+        # ``dispatch_notifications`` (the reconcile Celery task, post-commit).
+        self._pending_notifications: list[dict] = []
 
     async def list_pending_settlements(
         self, *, limit: int = PENDING_SETTLEMENTS_LIMIT
@@ -216,6 +221,9 @@ class PayoutService:
         for booking in bookings:
             booking.settlement_status = SettlementStatus.PROCESSING
             booking.settlement_payout_id = payout_id
+            # Fresh attempt — wipe any prior rejection/failure reason so the field
+            # only ever reflects the current cycle.
+            booking.settlement_failure_reason = None
 
         # Resolve the breadcrumb to the real outcome + payout id.
         await self._resolve_audit(
@@ -226,6 +234,13 @@ class PayoutService:
         logger.info(
             "payout.initiated admin=%s provider=%s payout_id=%s status=%s bookings=%s",
             admin_user_id, provider_id, payout_id, status, len(bookings),
+        )
+        # Buffered, not sent: this transaction has not committed yet. RazorpayX has
+        # already accepted the payout, so if the commit fails the money moved but we
+        # have no record of it — and a "money on the way" push for a payout the DB
+        # never recorded cannot be taken back. The caller drains after commit.
+        self._buffer_notification(
+            provider_id, SettlementStatus.PROCESSING.value, amount_paise, payout_id
         )
 
         return {
@@ -306,32 +321,89 @@ class PayoutService:
         """
         Move a payout's settlements based on its outcome.
 
-        ``payout.processed`` → COMPLETED, ``payout.failed`` → FAILED,
-        ``payout.reversed`` → REVERSED (completed money clawed back; also alerts).
-        Bookings are matched on the RazorpayX payout id (``settlement_payout_id``),
-        so concurrent payouts settle independently. Idempotent: only bookings in a
+        - ``payout.processed`` → COMPLETED
+        - ``payout.failed``    → FAILED (money may have moved → manual re-queue)
+        - ``payout.reversed``  → REVERSED (completed money clawed back; also alerts)
+        - ``payout.rejected``  → back to PENDING (RazorpayX refused before sending, so
+          no money moved — safe to auto-retry; the reason is recorded)
+        - ``payout.queued``    → no state change (RazorpayX accepted, not yet sent)
+
+        Bookings are matched on the RazorpayX payout id (``settlement_payout_id``), so
+        concurrent payouts settle independently. Idempotent: only bookings in a
         transitionable state for that payout are touched.
         """
-        # Terminal payout events we act on. Everything else (payout.updated,
-        # transaction.*) is a legitimate no-op — acknowledge with a breadcrumb.
-        terminal = {
-            "payout.processed": SettlementStatus.COMPLETED,
-            "payout.failed": SettlementStatus.FAILED,
-            "payout.reversed": SettlementStatus.REVERSED,
+        handled = {
+            "payout.processed", "payout.failed", "payout.reversed",
+            "payout.rejected", "payout.queued",
         }
-        if event not in terminal:
-            logger.info("Ignoring non-terminal RazorpayX webhook event: %s", event)
+        if event not in handled:
+            # payout.updated, transaction.*, etc. are a legitimate no-op.
+            logger.info("Ignoring unhandled RazorpayX webhook event: %s", event)
             return
 
         entity = payload.get("payout", {}).get("entity", {})
         payout_id = entity.get("id")
         if not payout_id:
-            # A terminal event with no payout id is malformed — we can't map it to
-            # any settlement. Surface it instead of failing silently.
+            # A handled event with no payout id is malformed — we can't map it to any
+            # settlement. Surface it instead of failing silently.
             logger.error("RazorpayX %s webhook missing payout.entity.id", event)
             raise PaymentError("Payout webhook missing payout id")
 
+        # queued: RazorpayX accepted the payout but hasn't sent it yet — no state
+        # change. The create path already recorded settlement_payout_id in the normal
+        # case; the rare dual-write orphan (id not yet linked) is re-linked by
+        # reconcile_payouts — which cross-checks the amount before matching — rather
+        # than here, so all payout→booking re-linking lives in one guarded place.
+        if event == "payout.queued":
+            linked = (
+                await self.db.execute(
+                    select(Booking).where(Booking.settlement_payout_id == payout_id)
+                )
+            ).scalars().all()
+            logger.info(
+                "payout.webhook event=queued payout_id=%s linked=%s (no state change)",
+                payout_id, len(linked),
+            )
+            return
+
+        # rejected: RazorpayX refused before sending — no money left the account, so
+        # return the bookings to PENDING (the next payout run re-picks them), clear the
+        # payout id, and record the reason. Contrast with failed, which stays FAILED
+        # and requires a manual admin re-queue.
+        if event == "payout.rejected":
+            reason = self._failure_reason(entity)
+            rejected = (
+                await self.db.execute(
+                    select(Booking).where(
+                        Booking.settlement_payout_id == payout_id,
+                        Booking.settlement_status == SettlementStatus.PROCESSING,
+                    )
+                )
+            ).scalars().all()
+            for booking in rejected:
+                booking.settlement_status = SettlementStatus.PENDING
+                booking.settlement_payout_id = None
+                booking.settlement_failure_reason = reason
+            await self.db.flush()
+            logger.info(
+                "payout.webhook event=rejected payout_id=%s returned_to_pending=%s reason=%s",
+                payout_id, len(rejected), reason,
+            )
+            return
+
+        # processed / failed / reversed — terminal transitions.
+        terminal = {
+            "payout.processed": SettlementStatus.COMPLETED,
+            "payout.failed": SettlementStatus.FAILED,
+            "payout.reversed": SettlementStatus.REVERSED,
+        }
         new_status = terminal[event]
+        # A failed payout carries a reason (rejected/reversed do not, per RazorpayX);
+        # record it so an admin can see why before deciding to re-queue the FAILED
+        # settlement.
+        failure_reason = (
+            self._failure_reason(entity) if event == "payout.failed" else None
+        )
         # processed/failed transition a PROCESSING settlement; a reversal claws back a
         # payout that had already COMPLETED (and defensively one still PROCESSING).
         from_statuses = (
@@ -349,18 +421,58 @@ class PayoutService:
         settled = result.scalars().all()
         for booking in settled:
             booking.settlement_status = new_status
+            if event == "payout.failed":
+                booking.settlement_failure_reason = failure_reason
         await self.db.flush()
 
         logger.info(
             "payout.webhook event=%s payout_id=%s settled=%s -> %s",
             event, payout_id, len(settled), new_status.value,
         )
+        # Notify only when this webhook actually moved something: a redelivery of an
+        # already-applied event settles nothing, and must not re-push.
+        #
+        # Buffered rather than enqueued: if this transaction rolls back, RazorpayX
+        # retries the webhook and the second attempt settles the same bookings again
+        # — an inline push would have already fired on the first attempt, so the
+        # provider would be told twice. The in-memory ``settled`` filter above only
+        # protects redelivery after a *successful* commit.
+        if settled:
+            self._buffer_notification(
+                settled[0].provider_id,
+                new_status.value,
+                self._batch_amount_paise(entity, list(settled)),
+                payout_id,
+            )
         if event == "payout.reversed":
             # Completed money was clawed back — always surface for a human to review.
             logger.error(
                 "ALERT payout.reversed payout_id=%s reversed_bookings=%s",
                 payout_id, len(settled),
             )
+
+    @staticmethod
+    def _failure_reason(entity: dict) -> str | None:
+        """Best-effort failure/rejection reason from a RazorpayX payout entity.
+
+        The webhook payload carries ``failure_reason`` (string) and an ``error`` object
+        (``description``/``source``/``reason``). Razorpay is migrating this detail to a
+        newer ``status_details`` object (deprecating ``failure_reason``/``error``), so we
+        check that first for forward-compat, then fall back to the current fields.
+
+        Note: RazorpayX does not populate a reason for ``payout.rejected`` (it's null);
+        the meaningful string appears on ``payout.failed``.
+        """
+        details = entity.get("status_details") or {}
+        error = entity.get("error") or {}
+        reason = (
+            details.get("description")
+            or details.get("reason")
+            or entity.get("failure_reason")
+            or error.get("description")
+            or error.get("reason")
+        )
+        return reason[:500] if reason else None
 
     async def reconcile_payouts(self, *, since_ts: int, until_ts: int) -> dict:
         """
@@ -376,9 +488,17 @@ class PayoutService:
 
         Anything that can't be resolved is counted and alerted for a human. Returns a
         summary dict; the caller commits.
+
+        Provider pushes for these repairs are **not** enqueued here — they're returned
+        under ``notifications`` for the caller to dispatch *after* it commits. One run
+        repairs many payouts in a single transaction, so a failure part-way through
+        rolls all of them back; a push already sent for an earlier repair could not be
+        taken back, and would tell a provider their money arrived when the repair never
+        landed. Pass the list to ``dispatch_notifications`` once the commit succeeds.
         """
         payouts = await list_payouts(from_ts=since_ts, to_ts=until_ts)
         report = {"checked": 0, "case_a": 0, "case_b": 0, "unresolved": 0}
+        self._pending_notifications = []
 
         for payout in payouts:
             target = _RECONCILE_MAP.get(payout.get("status"))
@@ -404,6 +524,7 @@ class PayoutService:
 
         await self.db.flush()
         logger.info("payout.reconcile %s", report)
+        report["notifications"] = self._pending_notifications
         return report
 
     # ------------------------------------------------------------------
@@ -488,6 +609,89 @@ class PayoutService:
                 )
 
     @staticmethod
+    def _notify_payout(
+        provider_id: UUID,
+        event: str,
+        amount_paise: int,
+        payout_id: str | None,
+    ) -> None:
+        """Enqueue a provider push for a payout state change.
+
+        One push per payout (not per booking) — the task is keyed on the provider and
+        carries the batch total. Enqueued rather than sent inline so a slow FCM call
+        never blocks a payout or webhook request.
+
+        A broker failure must never roll back a settlement transition — the money has
+        already moved, and losing that state to a missing push would be far worse than
+        a missing push. So the enqueue is best-effort: failures are logged, not raised.
+        """
+        from app.tasks.notification_tasks import send_payout_notification
+
+        try:
+            send_payout_notification.delay(
+                provider_id=str(provider_id),
+                event=event,
+                amount_paise=amount_paise,
+                payout_id=payout_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "payout.notify enqueue failed provider=%s event=%s payout_id=%s error=%s",
+                provider_id, event, payout_id, exc,
+            )
+
+    def _buffer_notification(
+        self,
+        provider_id: UUID,
+        event: str,
+        amount_paise: int,
+        payout_id: str | None,
+    ) -> None:
+        """Hold a push until the transaction that justifies it has committed.
+
+        Every path buffers, because a push cannot be un-sent and none of these
+        transactions are committed at the point the state changes:
+
+        - **create** — RazorpayX has already taken the money by the time we write
+          PROCESSING. If the commit then fails, an inline push would have announced
+          a payout the database has no record of.
+        - **webhook** — a rolled-back delivery is retried by RazorpayX, and the
+          retry settles the same bookings again; an inline push would fire twice.
+        - **reconcile** — one transaction repairs many payouts, so a failure
+          part-way rolls back repairs whose pushes already went out.
+
+        Drained by ``dispatch_pending_notifications`` (request paths) or
+        ``dispatch_notifications`` (the reconcile task) — both only after commit.
+        """
+        self._pending_notifications.append({
+            "provider_id": str(provider_id),
+            "event": event,
+            "amount_paise": amount_paise,
+            "payout_id": payout_id,
+        })
+
+    def dispatch_pending_notifications(self) -> None:
+        """Drain this instance's buffered pushes. **Must run after the commit.**
+
+        Request paths hand this to FastAPI ``BackgroundTasks``, which runs it after
+        the ``get_db`` dependency has committed — and not at all if that commit
+        raises, which is precisely the property we want.
+        """
+        notifications, self._pending_notifications = self._pending_notifications, []
+        self.dispatch_notifications(notifications)
+
+    @classmethod
+    def dispatch_notifications(cls, notifications: list[dict]) -> None:
+        """Enqueue buffered pushes. Call only after the state change is committed."""
+        for note in notifications:
+            cls._notify_payout(**note)
+
+    @staticmethod
+    def _batch_amount_paise(payout: dict, bookings: list[Booking]) -> int:
+        """Payout amount in paise, falling back to the batch's own payout total."""
+        return payout.get("amount") or int(sum(b.provider_payout for b in bookings) * 100)
+
+    @staticmethod
     def _batch_idempotency_key(bookings: list[Booking]) -> str:
         """Stable key for a payout batch — a hash of its sorted booking ids."""
         ids = ",".join(sorted(str(b.id) for b in bookings))
@@ -518,6 +722,14 @@ class PayoutService:
             self._add_reconciliation_audit(
                 provider_id=repaired[0].provider_id, payout=payout,
                 target=target, count=len(repaired),
+            )
+            # Reconciliation exists because the webhook never arrived — so neither did
+            # the provider's push. Buffer it (not enqueue) so it only goes out once the
+            # repair is committed; only repaired rows qualify, so a run over
+            # already-consistent payouts stays silent.
+            self._buffer_notification(
+                repaired[0].provider_id, target.value,
+                self._batch_amount_paise(payout, repaired), payout.get("id"),
             )
         return len(repaired)
 
@@ -561,6 +773,12 @@ class PayoutService:
         self._add_reconciliation_audit(
             provider_id=audit.provider_id, payout=payout,
             target=target, count=len(pending),
+        )
+        # The create path crashed before linking the payout, so no push went out for
+        # the initiation either — the terminal state is the provider's first news.
+        self._buffer_notification(
+            audit.provider_id, target.value,
+            self._batch_amount_paise(payout, pending), payout_id,
         )
         return len(pending)
 
