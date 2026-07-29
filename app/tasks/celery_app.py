@@ -1,5 +1,8 @@
 from celery import Celery
+from celery.signals import worker_process_init
+
 from app.config import get_settings
+from app.logging_config import configure_logging
 
 settings = get_settings()
 
@@ -8,6 +11,20 @@ celery_app = Celery(
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
 )
+
+# SVC-46: workers don't run through app/main.py, so structlog needs to be
+# configured explicitly per worker process. worker_process_init fires once
+# per prefork child, before any task runs.
+@worker_process_init.connect
+def _configure_worker_logging(**_):
+    configure_logging(level=settings.LOG_LEVEL, json_logs=settings.LOG_JSON)
+
+
+# Import for the side effect of registering the log-correlation signal
+# handlers (before_task_publish / task_prerun / task_postrun). Kept as an
+# import-for-side-effects rather than a call because signals self-register
+# via decorators.
+from app.tasks import log_correlation  # noqa: E402,F401
 
 celery_app.conf.update(
     task_serializer="json",
