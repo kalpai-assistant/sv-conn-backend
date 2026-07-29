@@ -1,7 +1,8 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import String, Float, ForeignKey, Enum, DateTime, func, Index
+from decimal import Decimal
+from sqlalchemy import String, Numeric, ForeignKey, Enum, DateTime, func, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -95,9 +96,12 @@ class Booking(Base):
     )
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     doorstep_otp: Mapped[str] = mapped_column(String(4))
-    service_amount: Mapped[float] = mapped_column(Float, nullable=False)
-    platform_commission: Mapped[float] = mapped_column(Float, nullable=False)
-    provider_payout: Mapped[float] = mapped_column(Float, nullable=False)
+    # Money is Numeric, never Float (SVC-150): a Float cannot hold 80.07 exactly, and
+    # truncating that to paise underpaid the provider by ₹0.01 on ~1 in 22 amounts.
+    # Scale 2 also makes the column itself round imprecise input on write.
+    service_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    platform_commission: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    provider_payout: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     payment_method: Mapped[PaymentMethod | None] = mapped_column(Enum(PaymentMethod))
     payment_status: Mapped[PaymentStatus] = mapped_column(
         Enum(PaymentStatus), default=PaymentStatus.PENDING

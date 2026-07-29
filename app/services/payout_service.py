@@ -8,6 +8,7 @@ service pays the provider their share afterwards.
 """
 import hashlib
 import logging
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -20,6 +21,7 @@ from app.models.user import User
 from app.models.payout_audit import PayoutAudit
 from app.exceptions import PaymentError, UserNotFound
 from app.utils.encryption import decrypt
+from app.utils.money import to_paise
 from app.utils.razorpayx_client import create_payout, list_payouts
 
 logger = logging.getLogger(__name__)
@@ -123,10 +125,9 @@ class PayoutService:
                 "phone": phone,
                 "is_active": is_active,
                 "pending_booking_count": booking_count,
-                # Same rupees→paise conversion the payout path uses, so the figure in
-                # the confirmation dialog matches what is actually sent. (Both inherit
-                # the Float rounding tracked on SVC-150.)
-                "pending_payout_paise": int(rupees * 100),
+                # Same rupees→paise conversion the payout path uses, so the figure
+                # in the confirmation dialog matches what is actually sent.
+                "pending_payout_paise": to_paise(rupees),
                 "payout_set": bool(has_payout),
             }
             for provider_id, name, phone, is_active, booking_count, rupees, has_payout, _
@@ -171,8 +172,10 @@ class PayoutService:
         if not bookings:
             raise PaymentError("No pending settlements for this provider")
 
-        total_rupees = sum(b.provider_payout for b in bookings)
-        amount_paise = int(total_rupees * 100)
+        # Decimal throughout: the columns are Numeric, so this sum is exact and
+        # to_paise rounds half up instead of dropping a paisa (SVC-150).
+        total_rupees = sum((b.provider_payout for b in bookings), Decimal("0"))
+        amount_paise = to_paise(total_rupees)
 
         # Key derived from the exact batch (sorted booking ids), so the same batch
         # always produces the same key. If create_payout succeeds but the DB write
@@ -295,7 +298,7 @@ class PayoutService:
             booking.settlement_status = SettlementStatus.PENDING
             booking.settlement_payout_id = None
 
-        amount_paise = int(sum(b.provider_payout for b in stuck) * 100)
+        amount_paise = to_paise(sum((b.provider_payout for b in stuck), Decimal("0")))
         self.db.add(PayoutAudit(
             admin_user_id=admin_user_id,
             provider_id=provider_id,
@@ -689,7 +692,9 @@ class PayoutService:
     @staticmethod
     def _batch_amount_paise(payout: dict, bookings: list[Booking]) -> int:
         """Payout amount in paise, falling back to the batch's own payout total."""
-        return payout.get("amount") or int(sum(b.provider_payout for b in bookings) * 100)
+        return payout.get("amount") or to_paise(
+            sum((b.provider_payout for b in bookings), Decimal("0"))
+        )
 
     @staticmethod
     def _batch_idempotency_key(bookings: list[Booking]) -> str:

@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.utils.money import to_paise
 from app.models.booking import Booking, PaymentStatus
 from app.models.payment import Payment, PaymentRecordStatus, PaymentRecordMethod
 from app.models.provider_profile import ProviderProfile
@@ -43,7 +44,9 @@ class PaymentService:
         if not booking:
             raise BookingNotFound(booking_id)
 
-        amount_paise = int(booking.service_amount * 100)
+        # This is what the customer is actually charged — rounds half up rather than
+        # truncating, so a ₹100.09 booking bills 10009 paise and not 10008 (SVC-150).
+        amount_paise = to_paise(booking.service_amount)
 
         order_data = {
             "amount": amount_paise,

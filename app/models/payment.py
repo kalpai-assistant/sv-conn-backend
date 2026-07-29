@@ -1,7 +1,8 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import Float, String, ForeignKey, DateTime, func, Enum, UniqueConstraint, Index
+from decimal import Decimal
+from sqlalchemy import Numeric, String, ForeignKey, DateTime, func, Enum, UniqueConstraint, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -50,9 +51,10 @@ class Payment(Base):
     )
     razorpay_payment_id: Mapped[str | None] = mapped_column(String(255))
     razorpay_order_id: Mapped[str | None] = mapped_column(String(255))
-    amount: Mapped[float] = mapped_column(Float, nullable=False)
-    platform_fee: Mapped[float] = mapped_column(Float, nullable=False)
-    provider_settlement: Mapped[float] = mapped_column(Float, nullable=False)
+    # Numeric, not Float — see the note on Booking's money columns (SVC-150).
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    platform_fee: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    provider_settlement: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     status: Mapped[PaymentRecordStatus] = mapped_column(
         Enum(PaymentRecordStatus), default=PaymentRecordStatus.CREATED
     )

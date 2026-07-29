@@ -4,6 +4,7 @@ Booking factory for test fixtures.
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.booking import Booking, BookingStatus, PaymentMethod, PaymentStatus
+from app.utils.money import to_decimal
 
 
 class BookingFactory:
@@ -32,9 +33,13 @@ class BookingFactory:
             status=status,
             payment_status=payment_status,
             doorstep_otp=doorstep_otp,
-            service_amount=service_amount,
-            platform_commission=platform_commission,
-            provider_payout=provider_payout,
+            # Money columns are Numeric/Decimal (SVC-150). Tests pass plain floats
+            # for readability, so coerce here — otherwise the in-memory object holds
+            # a float until it round-trips through the DB, and any Decimal
+            # arithmetic against it raises TypeError.
+            service_amount=to_decimal(service_amount),
+            platform_commission=to_decimal(platform_commission),
+            provider_payout=to_decimal(provider_payout),
             payment_method=payment_method,
             razorpay_order_id=razorpay_order_id,
         )

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.utils.money import to_decimal
 from app.models.booking import (
     Booking, BookingStatus, PaymentStatus, VALID_TRANSITIONS,
 )
@@ -47,10 +48,18 @@ class BookingService:
         if not service or not service.is_active:
             raise ValueError("Service not found or inactive")
 
-        commission_rate = settings.PLATFORM_COMMISSION_PERCENT / 100
-        service_amount = service.base_price
-        platform_commission = round(service_amount * commission_rate, 2)
-        provider_payout = round(service_amount - platform_commission, 2)
+        # Exact decimal arithmetic (SVC-150). The old float version rounded to 2dp
+        # afterwards, which hides the error rather than avoiding it: the stored
+        # payout could still be a hair under the true value, and truncating that to
+        # paise at payout time cost the provider ₹0.01.
+        #
+        # Commission is the rounded half, and the payout is the remainder — so the
+        # two always add back to exactly service_amount and no paisa is invented or
+        # lost in the split.
+        service_amount = to_decimal(service.base_price)
+        commission_rate = to_decimal(settings.PLATFORM_COMMISSION_PERCENT) / 100
+        platform_commission = to_decimal(service_amount * commission_rate)
+        provider_payout = service_amount - platform_commission
 
         booking = Booking(
             consumer_id=consumer_id,
