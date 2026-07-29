@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     # Encryption (AES-256) for PII at rest
     ENCRYPTION_KEY: str = ""
 
+    # E2E test OTP bypass (SVC-52). Skips SMS + uses a fixed OTP for a
+    # whitelist of phone numbers, so nightly smoke tests can complete auth
+    # against staging without an SMS provider in the loop. **Hard-refuses
+    # to activate when ENVIRONMENT == "production"** — see AuthService.
+    # Both empty in dev/prod defaults; only set in staging env.
+    E2E_TEST_PHONES: str = ""  # comma-separated E.164 numbers
+    E2E_TEST_OTP: str = ""     # fixed OTP to store for those numbers
+
     # Observability (SVC-46)
     # Environment tag propagated to Sentry + log records. staging | production | dev.
     ENVIRONMENT: str = "dev"
