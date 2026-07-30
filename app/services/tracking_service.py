@@ -4,6 +4,7 @@ Redis pub/sub real-time location tracking service — exact from LLD.
 import json
 import time
 from uuid import UUID
+
 from redis.asyncio import Redis
 
 TRACKING_CHANNEL_PREFIX = "tracking:"

@@ -2,9 +2,8 @@
 PostGIS / geospatial query helpers.
 All raw geo SQL is isolated here — no other module builds WKT strings or ST_* expressions.
 """
-from geoalchemy2.functions import ST_DWithin, ST_MakePoint, ST_AsText
-from sqlalchemy import select, func, cast
-from geoalchemy2 import Geography
+from geoalchemy2.functions import ST_DWithin
+from sqlalchemy import func
 
 
 def build_point_wkt(lat: float, lng: float) -> str:

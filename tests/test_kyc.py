@@ -11,12 +11,12 @@ Covers:
 """
 import io
 import uuid
-from uuid import uuid4
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 
-from app.models.provider_profile import ProviderProfile, KYCStatus
+from app.models.provider_profile import KYCStatus, ProviderProfile
 from tests.factories.user_factory import UserFactory
 
 

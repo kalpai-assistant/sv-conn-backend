@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.models.provider_profile import ProviderProfile, KYCStatus
+from app.models.provider_profile import KYCStatus, ProviderProfile
 from tests.factories.user_factory import UserFactory
 
 

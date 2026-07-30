@@ -3,7 +3,7 @@ S3 / MinIO file upload helper.
 Boto3 client is created lazily; S3_ENDPOINT_URL enables MinIO for local dev.
 """
 import boto3
-from botocore.exceptions import ClientError
+
 from app.config import get_settings
 
 settings = get_settings()

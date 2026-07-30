@@ -4,29 +4,30 @@ and exception handler wiring. Exact from LLD.
 """
 
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
 from app.config import get_settings
+from app.exceptions import register_exception_handlers
 from app.logging_config import configure_logging
-from app.routers import (
-    auth,
-    users,
-    providers,
-    services,
-    bookings,
-    payments,
-    reviews,
-    tracking,
-    admin,
-    health,
-)
+from app.middleware.admin_ip_allowlist import AdminIPAllowlistMiddleware
+from app.middleware.auth import JWTAttachMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.request_id import RequestIDMiddleware
-from app.middleware.auth import JWTAttachMiddleware
-from app.middleware.admin_ip_allowlist import AdminIPAllowlistMiddleware
-from app.exceptions import register_exception_handlers
+from app.routers import (
+    admin,
+    auth,
+    bookings,
+    health,
+    payments,
+    providers,
+    reviews,
+    services,
+    tracking,
+    users,
+)
 
 settings = get_settings()
 

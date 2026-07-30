@@ -4,18 +4,25 @@ Auth service: OTP flow + JWT token management.
 Single Responsibility: this service owns the full auth lifecycle.
 It does NOT touch HTTP concerns — that belongs to the router.
 """
-import uuid
 import logging
+import uuid
+
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from redis.asyncio import Redis
 
+from app.config import get_settings
+from app.exceptions import InvalidOTP, RateLimitExceeded
 from app.models.user import User, UserRole
-from app.utils.otp import generate_otp, store_otp, verify_otp, is_rate_limited, otp_retry_after_seconds
+from app.utils.otp import (
+    generate_otp,
+    is_rate_limited,
+    otp_retry_after_seconds,
+    store_otp,
+    verify_otp,
+)
 from app.utils.security import create_access_token, create_refresh_token, decode_jwt
 from app.utils.sms_client import get_sms_client
-from app.exceptions import InvalidOTP, RateLimitExceeded
-from app.config import get_settings
 
 settings = get_settings()
 logger = logging.getLogger(__name__)

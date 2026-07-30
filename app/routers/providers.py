@@ -6,13 +6,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user, require_role
-from app.models.user import User, UserRole
+from app.models.user import User
 from app.schemas.provider import (
-    ProviderProfileUpdate, ProviderStatusUpdate,
-    ProviderResponse, NearbyProviderResponse,
-    ProviderServiceSubscribeRequest, ProviderServiceSubscriptionResponse,
-    KYCSubmissionResponse,
     EarningsResponse,
+    KYCSubmissionResponse,
+    NearbyProviderResponse,
+    ProviderProfileUpdate,
+    ProviderResponse,
+    ProviderServiceSubscribeRequest,
+    ProviderServiceSubscriptionResponse,
+    ProviderStatusUpdate,
 )
 from app.services.provider_service import ProviderService
 

@@ -1,12 +1,13 @@
 """
 Cleanup Celery tasks — periodic jobs run by Celery Beat.
 """
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import update
 
-from app.tasks.celery_app import celery_app
-from app.models.booking import Booking, BookingStatus
 from app.config import get_settings
+from app.models.booking import Booking, BookingStatus
+from app.tasks.celery_app import celery_app
 
 settings = get_settings()
 
@@ -19,7 +20,7 @@ def expire_stale_bookings():
     """
     from app.database import SyncSessionLocal
 
-    cutoff = datetime.now(timezone.utc) - timedelta(
+    cutoff = datetime.now(UTC) - timedelta(
         seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS
     )
 

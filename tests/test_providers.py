@@ -2,12 +2,13 @@
 Provider service-subscription integration tests (SVC-23).
 Covers POST /providers/me/services and DELETE /providers/me/services/{id}.
 """
-import pytest
 from uuid import uuid4
+
+import pytest
 from sqlalchemy import select
 
 from app.models.category import Category
-from app.models.provider_profile import ProviderProfile, KYCStatus
+from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.service import Service
 from tests.factories.user_factory import UserFactory

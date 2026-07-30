@@ -2,24 +2,31 @@
 Booking service: state machine enforcement, commission calculation,
 OTP-gated service start, and paginated listing.
 """
-import uuid
 import secrets
-from datetime import datetime, timezone
-from sqlalchemy import select, func
+import uuid
+from datetime import datetime
+
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
+from app.exceptions import (
+    BookingNotFound,
+    InvalidOTP,
+    InvalidStateTransition,
+    UnauthorizedAction,
+)
 from app.models.booking import (
-    Booking, BookingStatus, PaymentStatus, VALID_TRANSITIONS,
+    VALID_TRANSITIONS,
+    Booking,
+    BookingStatus,
+    PaymentStatus,
 )
 from app.models.booking_status_log import BookingStatusLog
-from app.models.service import Service
 from app.models.provider_profile import ProviderProfile
+from app.models.service import Service
 from app.models.user import UserRole
-from app.exceptions import (
-    InvalidStateTransition, BookingNotFound, UnauthorizedAction, InvalidOTP,
-)
 from app.schemas.booking import BookingListResponse, BookingResponse
-from app.config import get_settings
 
 settings = get_settings()
 

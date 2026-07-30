@@ -3,20 +3,21 @@ Booking integration tests.
 Covers: create booking (commission split), state-machine transitions,
 invalid transitions, doorstep OTP verification, single booking fetch.
 """
-import pytest
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
-from unittest.mock import patch, AsyncMock
+
+import pytest
 
 from app.models.booking import BookingStatus, PaymentMethod, PaymentStatus
-from tests.factories.user_factory import UserFactory
 from tests.factories.booking_factory import BookingFactory
+from tests.factories.user_factory import UserFactory
 
 
 async def _create_booking_with_deps(db_session, consumer, provider, **kwargs):
     """Create a booking with all required FK dependencies (service, address)."""
+    from app.models.address import Address
     from app.models.category import Category
     from app.models.service import Service
-    from app.models.address import Address
 
     category = Category(name="Cleaning", slug="cleaning", is_active=True, sort_order=1)
     db_session.add(category)
@@ -49,11 +50,11 @@ async def _create_booking_with_deps(db_session, consumer, provider, **kwargs):
 async def test_create_booking_success(client, auth_headers, db_session):
     """Commission split must be exactly 20% platform / 80% provider."""
     consumer = await UserFactory.create(db_session, role="consumer")
-    provider_user = await UserFactory.create(db_session, role="provider")
+    await UserFactory.create(db_session, role="provider")
 
+    from app.models.address import Address
     from app.models.category import Category
     from app.models.service import Service
-    from app.models.address import Address
 
     category = Category(name="Plumbing", slug="plumbing", is_active=True, sort_order=1)
     db_session.add(category)
@@ -181,7 +182,6 @@ async def test_en_route_transition(client, auth_headers, db_session):
 async def test_complete_cash_booking_triggers_payment_task(client, auth_headers, db_session):
     """Completing a cash booking must trigger process_cash_payment Celery task."""
     from app.models.provider_profile import ProviderProfile
-    from app.models.booking import PaymentMethod
 
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")

@@ -16,7 +16,7 @@ probe itself.
 """
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Response, status
 from redis.asyncio import Redis
@@ -74,7 +74,7 @@ async def readiness(
     return {
         "status": "ok" if all_ok else "degraded",
         "checks": checks,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
 
@@ -106,7 +106,7 @@ async def _check(coro) -> str:
     try:
         await asyncio.wait_for(coro, timeout=_CHECK_TIMEOUT_SECONDS)
         return "ok"
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return "error:timeout"
     except Exception as exc:
         # First 100 chars is plenty — we're not logging stack traces in the

@@ -3,12 +3,13 @@ Create a super admin user.
 Run: python scripts/create_admin.py +91XXXXXXXXXX
 """
 import asyncio
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from sqlalchemy import select
+
 from app.database import AsyncSessionLocal
 from app.models.user import User, UserRole
 

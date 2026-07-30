@@ -5,8 +5,11 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.user import User
 from app.schemas.user import (
-    UserResponse, UpdateProfileRequest, UpdateFCMTokenRequest,
-    AddressResponse, CreateAddressRequest,
+    AddressResponse,
+    CreateAddressRequest,
+    UpdateFCMTokenRequest,
+    UpdateProfileRequest,
+    UserResponse,
 )
 from app.services.user_service import UserService
 

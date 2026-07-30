@@ -5,7 +5,9 @@ goes through this module — nothing else touches cryptography directly.
 """
 import base64
 import os
+
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from app.config import get_settings
 
 settings = get_settings()

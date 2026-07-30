@@ -2,12 +2,13 @@
 User service: profile management and address CRUD.
 """
 import uuid
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user import User
-from app.models.address import Address
 from app.exceptions import UserNotFound
+from app.models.address import Address
+from app.models.user import User
 from app.utils.geo import build_point_wkt
 
 
