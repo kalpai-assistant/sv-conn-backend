@@ -6,7 +6,13 @@ Covers PATCH /providers/me payout fields:
 - set account + IFSC -> stored encrypted, payout_set true
 - invalid UPI / IFSC -> 422
 - account without IFSC (and vice versa) -> 422
-- raw payout values are never returned; stored ciphertext != plaintext
+- stored ciphertext != plaintext
+
+On what the API returns (narrowed by SVC-148): a bank account number is never
+returned in full — only its last 4 — while a VPA is returned as-is, because
+``ProviderResponse`` is only ever served for ``/providers/me`` and every Indian
+payment app shows a VPA in full. See ``tests/test_payout_method.py`` for the test
+that no *other* endpoint exposes payout fields, which is the guarantee that matters.
 """
 import pytest
 from sqlalchemy import select
@@ -45,9 +51,20 @@ async def test_set_payout_vpa(client, auth_headers, db_session):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["payout_set"] is True
-    # Raw PII must never be returned.
+    # The request field itself is never echoed back.
     assert "payout_vpa" not in body
-    assert "okhdfcbank" not in response.text
+
+    # The VPA IS shown back, in full, via payout_display (SVC-148).
+    #
+    # This narrows the original assertion ("okhdfcbank" not in response.text), which
+    # dated from when the response had no reason to carry payout details at all. The
+    # rule it protected is that a provider's payout details never reach anyone else —
+    # and ProviderResponse is only ever returned for /providers/me, so this is the
+    # provider seeing a handle they typed in themselves. Masking it would also be
+    # wrong for the market: GPay, PhonePe and Paytm all show a VPA in full.
+    # Bank account numbers stay masked — see test_set_payout_account_and_ifsc.
+    assert body["payout_method"] == "upi"
+    assert body["payout_display"] == "provider@okhdfcbank"
 
     await db_session.refresh(profile)
     assert profile.payout_vpa_encrypted is not None
@@ -67,7 +84,15 @@ async def test_set_payout_account_and_ifsc(client, auth_headers, db_session):
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["payout_set"] is True
+    body = response.json()
+    assert body["payout_set"] is True
+
+    # Bank accounts ARE masked to the last 4 — the convention wherever someone is
+    # shown their own account (net banking, GPay, the Razorpay/Stripe dashboards).
+    # The full number must never appear in a response.
+    assert body["payout_method"] == "bank"
+    assert body["payout_display"] == "••••••7890"
+    assert "1234567890" not in response.text
 
     await db_session.refresh(profile)
     assert decrypt(profile.payout_account_number_encrypted) == "1234567890"

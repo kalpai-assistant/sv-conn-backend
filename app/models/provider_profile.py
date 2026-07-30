@@ -14,6 +14,19 @@ class KYCStatus(str, enum.Enum):
     REJECTED = "rejected"
 
 
+class PayoutMethod(str, enum.Enum):
+    """Which stored destination a provider's payouts actually go to.
+
+    A provider may keep both a UPI handle and a bank account on file (SVC-148:
+    switching does not erase the old one). This is the single source of truth for
+    which one the money is sent to — the payout must never infer it from which
+    columns happen to be populated.
+    """
+
+    UPI = "upi"
+    BANK = "bank"
+
+
 class ProviderProfile(Base):
     __tablename__ = "provider_profiles"
 
@@ -38,6 +51,14 @@ class ProviderProfile(Base):
     payout_vpa_encrypted: Mapped[str | None] = mapped_column(String(512))
     payout_account_number_encrypted: Mapped[str | None] = mapped_column(String(1024))
     payout_ifsc_encrypted: Mapped[str | None] = mapped_column(String(512))
+    # Which of the above the payout actually uses. Both may be populated at once —
+    # saving a method never erases the other — so this, not column presence, decides
+    # where the money goes (SVC-148).
+    payout_method: Mapped[PayoutMethod | None] = mapped_column(Enum(PayoutMethod))
+    # Ready-to-show label for the saved method: "••••8901" for a bank account, or the
+    # VPA in full. Stored in the clear on purpose — it holds only what we have agreed
+    # is safe to display, which keeps decryption off the profile read path entirely.
+    payout_display: Mapped[str | None] = mapped_column(String(120))
     profile_photo_url: Mapped[str | None] = mapped_column(String(512))
 
     # PostGIS geography column for location-based queries
@@ -59,12 +80,13 @@ class ProviderProfile(Base):
 
     @property
     def payout_set(self) -> bool:
-        """True when a usable payout destination is stored (VPA, or account + IFSC).
+        """True when a payout destination is active.
 
-        Derived so the API can expose 'already added / skip' state to the
-        frontend without ever returning the encrypted PII itself.
+        Derived so the API can expose 'already added / skip' state to the frontend
+        without ever returning the encrypted PII itself.
+
+        Keyed on ``payout_method`` rather than on which encrypted columns are
+        populated (SVC-148): a provider who switched methods still has the old one
+        stored, so column presence no longer answers "can we pay this provider".
         """
-        return bool(
-            self.payout_vpa_encrypted
-            or (self.payout_account_number_encrypted and self.payout_ifsc_encrypted)
-        )
+        return self.payout_method is not None

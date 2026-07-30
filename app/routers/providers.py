@@ -7,7 +7,7 @@ from app.database import get_db
 from app.dependencies import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.schemas.provider import (
-    ProviderProfileUpdate, ProviderStatusUpdate,
+    ProviderProfileUpdate, ProviderStatusUpdate, PayoutMethodSelect,
     ProviderResponse, NearbyProviderResponse,
     ProviderServiceSubscribeRequest, ProviderServiceSubscriptionResponse,
 )
@@ -44,6 +44,38 @@ async def update_provider_profile(
         payout_account_number=request.payout_account_number,
         payout_ifsc=request.payout_ifsc,
     )
+
+
+@router.patch("/me/payout-method", response_model=ProviderResponse)
+async def set_active_payout_method(
+    request: PayoutMethodSelect,
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Switch payouts to a method already on file, without re-entering it.
+
+    A provider who has both a UPI handle and a bank account stored can flip which
+    one gets paid. Returns 400 if nothing is stored for the requested method.
+    """
+    return await ProviderService(db).set_active_payout_method(
+        current_user.id, request.method
+    )
+
+
+@router.delete("/me/payout-method", response_model=ProviderResponse)
+async def remove_payout_method(
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Erase all stored payout destinations.
+
+    Deliberate, explicit action — saving a new method never removes the old one, so
+    this is the only path that deletes payout details. Clears both methods, not just
+    the active one: "remove my payout details" should leave the platform holding
+    nothing. Afterwards ``payout_set`` is false and the provider cannot be paid until
+    they add a method again.
+    """
+    return await ProviderService(db).remove_payout_method(current_user.id)
 
 
 @router.patch("/me/status", response_model=ProviderResponse)
