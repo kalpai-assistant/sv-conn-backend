@@ -19,18 +19,36 @@ from typing import Any
 
 import structlog
 
-# Request-scoped correlation ID. Set by RequestIDMiddleware, read by the
-# structlog processor below. Default None so logs from startup / background
-# tasks don't crash — they just omit the field.
+# Request-scoped correlation ID. Set by RequestIDMiddleware in the API path
+# and by the Celery task_prerun signal in workers (propagated via task
+# headers). Default None so logs from startup / background init don't crash —
+# they just omit the field.
 request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "request_id", default=None
 )
 
+# Task-scoped correlation ID. Set by the Celery task_prerun signal, unset
+# after task_postrun. Independent from request_id so a task triggered by an
+# HTTP request carries BOTH (request_id shows the originator; task_id shows
+# which specific worker run emitted the log).
+task_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "task_id", default=None
+)
 
-def _add_request_id(_logger: Any, _name: str, event_dict: dict) -> dict:
+
+def _add_correlation_ids(_logger: Any, _name: str, event_dict: dict) -> dict:
+    """Attach any set correlation IDs to every log record.
+
+    Both fields are contextvar-backed so they flow through `await` chains
+    and Celery's per-task context without needing to be threaded through
+    call signatures.
+    """
     rid = request_id_var.get()
     if rid is not None:
         event_dict["request_id"] = rid
+    tid = task_id_var.get()
+    if tid is not None:
+        event_dict["task_id"] = tid
     return event_dict
 
 
@@ -41,7 +59,7 @@ def configure_logging(*, level: str = "INFO", json_logs: bool = False) -> None:
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
-        _add_request_id,
+        _add_correlation_ids,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
     ]
