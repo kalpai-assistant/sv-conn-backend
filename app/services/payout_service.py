@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.models.booking import Booking, BookingStatus, SettlementStatus
-from app.models.provider_profile import ProviderProfile
+from app.models.provider_profile import ProviderProfile, PayoutMethod
 from app.models.user import User
 from app.models.payout_audit import PayoutAudit
 from app.exceptions import PaymentError, UserNotFound
@@ -71,23 +71,14 @@ class PayoutService:
         it counts provider groups pre-cap on the same snapshot as the rows.
         """
         # ProviderProfile is 1:1 with the user and grouped away, so aggregate it.
-        # bool_or over the (at most one) profile row = "has a usable destination".
+        # bool_or over the (at most one) profile row = "has an active destination".
         #
         # Mirrors ProviderProfile.payout_set, which is a plain @property and cannot
-        # be evaluated in SQL. That property is Python truthiness, so it treats an
-        # empty string as "not set" — SQL's IS NOT NULL does not, hence the explicit
-        # != '' here. Without it the list would claim a destination the payout path
-        # would then reject.
-        def _present(column):
-            return column.is_not(None) & (column != "")
-
-        payout_set = func.bool_or(
-            _present(ProviderProfile.payout_vpa_encrypted)
-            | (
-                _present(ProviderProfile.payout_account_number_encrypted)
-                & _present(ProviderProfile.payout_ifsc_encrypted)
-            )
-        )
+        # be evaluated in SQL. Since SVC-148 both are keyed on payout_method, so the
+        # two definitions are trivially the same — and the empty-string mismatch
+        # between Python truthiness and SQL IS NOT NULL that this had to work around
+        # no longer exists, because an enum column cannot hold "".
+        payout_set = func.bool_or(ProviderProfile.payout_method.is_not(None))
         total_rupees = func.sum(Booking.provider_payout)
 
         rows = (
@@ -809,18 +800,44 @@ class PayoutService:
     def _decrypt_payout_details(
         self, profile: ProviderProfile
     ) -> tuple[str | None, str | None, str | None]:
-        """Return (vpa, account_number, ifsc), preferring UPI when both are set."""
-        vpa = decrypt(profile.payout_vpa_encrypted) if profile.payout_vpa_encrypted else None
-        account_number = (
-            decrypt(profile.payout_account_number_encrypted)
-            if profile.payout_account_number_encrypted
-            else None
-        )
-        ifsc = decrypt(profile.payout_ifsc_encrypted) if profile.payout_ifsc_encrypted else None
+        """Return (vpa, account_number, ifsc) for the provider's **active** method.
 
-        if not vpa and not (account_number and ifsc):
-            raise PaymentError("Provider has no payout details on file")
-        return vpa, account_number, ifsc
+        Returns exactly one destination. A provider may have both a UPI handle and a
+        bank account stored — saving one never erases the other (SVC-148) — and
+        ``create_payout`` sends to whichever it is given, preferring UPI if handed
+        both. So this must resolve the choice rather than pass both along: a provider
+        who switched from UPI to bank would otherwise keep being paid to the UPI
+        handle they had just replaced.
+
+        ``payout_method`` is the only authority on that. Column presence is not — it
+        answers "what is stored", not "where should this money go".
+        """
+        if profile.payout_method is PayoutMethod.UPI:
+            vpa = (
+                decrypt(profile.payout_vpa_encrypted)
+                if profile.payout_vpa_encrypted
+                else None
+            )
+            if not vpa:
+                raise PaymentError("Provider has no payout details on file")
+            return vpa, None, None
+
+        if profile.payout_method is PayoutMethod.BANK:
+            account_number = (
+                decrypt(profile.payout_account_number_encrypted)
+                if profile.payout_account_number_encrypted
+                else None
+            )
+            ifsc = (
+                decrypt(profile.payout_ifsc_encrypted)
+                if profile.payout_ifsc_encrypted
+                else None
+            )
+            if not (account_number and ifsc):
+                raise PaymentError("Provider has no payout details on file")
+            return None, account_number, ifsc
+
+        raise PaymentError("Provider has no payout details on file")
 
     @staticmethod
     def _owed_filter() -> tuple:

@@ -2,7 +2,7 @@ import re
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from uuid import UUID
-from app.models.provider_profile import KYCStatus
+from app.models.provider_profile import KYCStatus, PayoutMethod
 
 # VPA: local-part@handle, e.g. "name@okhdfcbank". IFSC: 4 letters + 0 + 6 alnum.
 _UPI_VPA_RE = re.compile(r"^[\w.\-]{2,}@[A-Za-z]{2,}$")
@@ -63,11 +63,25 @@ class ProviderProfileUpdate(BaseModel):
             raise ValueError(
                 "payout_account_number and payout_ifsc must be provided together"
             )
+        # Saving a method makes it the active one (SVC-148), so sending both in one
+        # request has no defined answer to "which is now active". Reject it rather
+        # than pick one — the caller has to say what they mean.
+        if self.payout_vpa and self.payout_account_number:
+            raise ValueError(
+                "Set one payout method at a time — send payout_vpa or "
+                "payout_account_number + payout_ifsc, not both"
+            )
         return self
 
 
 class ProviderStatusUpdate(BaseModel):
     is_online: bool
+
+
+class PayoutMethodSelect(BaseModel):
+    """Switch payouts to a method the provider already has stored (SVC-148)."""
+
+    method: PayoutMethod
 
 
 class ProviderResponse(BaseModel):
@@ -79,8 +93,13 @@ class ProviderResponse(BaseModel):
     kyc_status: KYCStatus
     is_online: bool
     service_area_radius_km: int
-    # Derived: whether a payout destination is on file. Never exposes the PII.
+    # Derived: whether a payout destination is active. Never exposes the PII.
     payout_set: bool = False
+    # Which method payouts go to, and a safe label for it — "••••8901" for a bank
+    # account, or the UPI handle in full. Enough for a provider to recognise what
+    # they saved without the API ever returning the underlying details.
+    payout_method: PayoutMethod | None = None
+    payout_display: str | None = None
 
     model_config = {"from_attributes": True}
 

@@ -27,7 +27,7 @@ from tests.factories.user_factory import UserFactory
 from tests.factories.booking_factory import BookingFactory
 from app.database import Base
 from app.models.booking import Booking, BookingStatus, SettlementStatus
-from app.models.provider_profile import ProviderProfile
+from app.models.provider_profile import ProviderProfile, PayoutMethod
 from app.models.payout_audit import PayoutAudit
 from app.models.user import User
 from app.models.category import Category
@@ -129,6 +129,10 @@ async def _provider_with_payout_vpa(db_session, provider):
     profile = ProviderProfile(
         user_id=provider.id,
         payout_vpa_encrypted=encrypt("provider@upi"),
+        # payout_method is what the payout routes on since SVC-148 — a profile
+        # built directly (bypassing ProviderService) must set it or the provider
+        # looks unpayable.
+        payout_method=PayoutMethod.UPI,
     )
     db_session.add(profile)
     await db_session.flush()
@@ -254,6 +258,7 @@ async def _provider_with_bank_account(db_session, provider):
         user_id=provider.id,
         payout_account_number_encrypted=encrypt("1234567890"),
         payout_ifsc_encrypted=encrypt("HDFC0001234"),
+        payout_method=PayoutMethod.BANK,
     )
     db_session.add(profile)
     await db_session.flush()
@@ -424,7 +429,10 @@ async def test_concurrent_payouts_do_not_double_pay():
         consumer = await UserFactory.create(s, role="consumer")
         provider = await UserFactory.create(s, role="provider")
         admin = await UserFactory.create(s, role="admin")
-        s.add(ProviderProfile(user_id=provider.id, payout_vpa_encrypted=encrypt("provider@upi")))
+        s.add(ProviderProfile(
+            user_id=provider.id, payout_vpa_encrypted=encrypt("provider@upi"),
+            payout_method=PayoutMethod.UPI,
+        ))
         booking = await _booking_for(s, consumer, provider)
         await s.commit()
         provider_id = provider.id
@@ -1952,6 +1960,7 @@ async def _provider_with_bank_details(db_session, provider):
         user_id=provider.id,
         payout_account_number_encrypted=encrypt("12345678901"),
         payout_ifsc_encrypted=encrypt("HDFC0001234"),
+        payout_method=PayoutMethod.BANK,
     )
     db_session.add(profile)
     await db_session.flush()
@@ -2223,18 +2232,24 @@ async def test_amount_is_exact_for_values_that_trip_float_truncation(db_session)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "vpa,account,ifsc,expected",
+    "vpa,account,ifsc,method,expected",
     [
-        (None, None, None, False),          # nothing on file
-        ("enc-vpa", None, None, True),      # UPI only
-        (None, "enc-acct", "enc-ifsc", True),   # bank only
-        (None, "enc-acct", None, False),    # account without IFSC is unusable
-        ("", None, None, False),            # empty string is NOT a destination
-        ("", "enc-acct", "", False),        # empty IFSC likewise
+        # Nothing on file at all.
+        (None, None, None, None, False),
+        # Since SVC-148 payout_set follows payout_method, not column presence — a
+        # provider who switched still has the old method's values stored, so
+        # "something is stored" no longer means "we can pay them".
+        ("enc-vpa", None, None, PayoutMethod.UPI, True),
+        (None, "enc-acct", "enc-ifsc", PayoutMethod.BANK, True),
+        # Stored but never activated: not payable.
+        ("enc-vpa", None, None, None, False),
+        # Both stored, one active — the inactive one must not make it look payable
+        # on its own account.
+        ("enc-vpa", "enc-acct", "enc-ifsc", PayoutMethod.BANK, True),
     ],
 )
 async def test_payout_set_sql_matches_the_model_property(
-    db_session, vpa, account, ifsc, expected
+    db_session, vpa, account, ifsc, method, expected
 ):
     """The SQL check and ProviderProfile.payout_set must agree on every shape.
 
@@ -2250,6 +2265,7 @@ async def test_payout_set_sql_matches_the_model_property(
         payout_vpa_encrypted=vpa,
         payout_account_number_encrypted=account,
         payout_ifsc_encrypted=ifsc,
+        payout_method=method,
     )
     db_session.add(profile)
     await _booking_for(db_session, consumer, provider)

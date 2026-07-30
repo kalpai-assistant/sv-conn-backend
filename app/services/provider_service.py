@@ -6,7 +6,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.provider_profile import ProviderProfile, KYCStatus
+from app.models.provider_profile import ProviderProfile, KYCStatus, PayoutMethod
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.service import Service
 from app.exceptions import (
@@ -14,9 +14,10 @@ from app.exceptions import (
     UnauthorizedAction,
     DuplicateSubscription,
     SubscriptionNotFound,
+    InvalidPayoutMethod,
 )
 from app.utils.geo import build_point_wkt, st_dwithin_filter, distance_expression
-from app.utils.encryption import encrypt
+from app.utils.encryption import encrypt, decrypt
 
 
 class ProviderService:
@@ -71,10 +72,21 @@ class ProviderService:
             profile.bank_account_encrypted = encrypt(bank_account)
 
         # Payout destination — encrypted at rest, never returned decrypted.
+        #
+        # Saving a method makes it the active one, and deliberately leaves the other
+        # method's stored values alone (SVC-148): a provider who switches keeps the
+        # old destination on file so they can flip back without re-entering it.
+        # Removal is an explicit action, never a side effect of saving.
+        # The schema rejects sending both methods at once, so at most one of these
+        # branches makes itself active — no arbitrary tie-break.
         if payout_vpa is not None:
             profile.payout_vpa_encrypted = encrypt(payout_vpa)
+            profile.payout_method = PayoutMethod.UPI
+            profile.payout_display = payout_vpa
         if payout_account_number is not None:
             profile.payout_account_number_encrypted = encrypt(payout_account_number)
+            profile.payout_method = PayoutMethod.BANK
+            profile.payout_display = self._mask_account(payout_account_number)
         if payout_ifsc is not None:
             profile.payout_ifsc_encrypted = encrypt(payout_ifsc)
 
@@ -83,6 +95,65 @@ class ProviderService:
         if service_area_radius_km is not None:
             profile.service_area_radius_km = service_area_radius_km
 
+        await self.db.flush()
+        return profile
+
+    @staticmethod
+    def _mask_account(account_number: str) -> str:
+        """Bank account as shown back to its owner: last 4 visible, rest masked.
+
+        Last-4 is the convention everywhere a person is shown their own account —
+        Indian net banking, GPay/PhonePe, the Razorpay and Stripe dashboards — and is
+        enough for them to recognise which account they saved. A UPI VPA gets no
+        masking: it is a public handle you hand out in order to be paid, so hiding it
+        would cost usability and protect nothing.
+        """
+        return "•" * max(len(account_number) - 4, 0) + account_number[-4:]
+
+    async def remove_payout_method(self, user_id: uuid.UUID) -> ProviderProfile:
+        """Erase every stored payout destination. Explicit action only.
+
+        Deliberately clears *both* methods, not just the active one: "remove my
+        payout details" means the platform holds nothing, and leaving the inactive
+        method behind would keep PII we have been asked to delete.
+        """
+        profile, _ = await self.get_or_create_profile(user_id)
+        profile.payout_vpa_encrypted = None
+        profile.payout_account_number_encrypted = None
+        profile.payout_ifsc_encrypted = None
+        profile.payout_method = None
+        profile.payout_display = None
+        await self.db.flush()
+        return profile
+
+    async def set_active_payout_method(
+        self, user_id: uuid.UUID, method: PayoutMethod
+    ) -> ProviderProfile:
+        """Switch payouts to an already-stored method, without re-entering it.
+
+        Rejects a method with nothing on file — activating a destination we cannot
+        actually pay to would fail later at payout time, when the provider is no
+        longer around to correct it.
+        """
+        profile, _ = await self.get_or_create_profile(user_id)
+
+        if method is PayoutMethod.UPI and not profile.payout_vpa_encrypted:
+            raise InvalidPayoutMethod("No UPI ID on file to switch to")
+        if method is PayoutMethod.BANK and not (
+            profile.payout_account_number_encrypted and profile.payout_ifsc_encrypted
+        ):
+            raise InvalidPayoutMethod("No bank account on file to switch to")
+
+        profile.payout_method = method
+        # The display label follows the active method, so it must be recomputed from
+        # the stored value — the only point where payout PII is decrypted outside the
+        # payout itself, and only for the method being activated.
+        if method is PayoutMethod.UPI:
+            profile.payout_display = decrypt(profile.payout_vpa_encrypted)
+        else:
+            profile.payout_display = self._mask_account(
+                decrypt(profile.payout_account_number_encrypted)
+            )
         await self.db.flush()
         return profile
 
