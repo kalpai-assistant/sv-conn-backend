@@ -90,3 +90,27 @@ class ProviderProfile(Base):
         stored, so column presence no longer answers "can we pay this provider".
         """
         return self.payout_method is not None
+
+    @property
+    def payout_methods_stored(self) -> list["PayoutMethod"]:
+        """Which methods have details on file, active or not (SVC-152).
+
+        The companion to :attr:`payout_set`, which answers "where does the money go"
+        but says nothing about the *other* method. Without this the frontend cannot
+        tell whether "switch back to your bank account" is even possible, so it fires
+        the switch and reads the 400 as its answer — a button that may be a dead end.
+
+        Derived from column presence, so the profile read path stays decryption-free:
+        it names which slots are filled and never what is in them. Same disclosure
+        category as ``payout_set``, which is already public on this response.
+
+        A bank account needs *both* the account number and the IFSC — either alone
+        cannot be paid to, and reporting it as stored would put back exactly the dead
+        -end switch this removes.
+        """
+        stored = []
+        if self.payout_vpa_encrypted:
+            stored.append(PayoutMethod.UPI)
+        if self.payout_account_number_encrypted and self.payout_ifsc_encrypted:
+            stored.append(PayoutMethod.BANK)
+        return stored
