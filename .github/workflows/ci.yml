@@ -127,6 +127,14 @@ jobs:
           PGPASSWORD=sc_password psql -h localhost -U sc_user -d sc_test \
             -c "CREATE EXTENSION IF NOT EXISTS postgis;"
 
+      - name: Apply Alembic migrations to the test DB
+        # `alembic check` (next step) requires the DB to be at HEAD before it
+        # can compare models vs. current schema. This step both (a) satisfies
+        # that precondition and (b) proves migrations run cleanly against a
+        # fresh Postgres — a compile-check that would otherwise only surface
+        # when someone actually deploys.
+        run: uv run alembic upgrade head
+
       - name: Verify Alembic migration chain
         # `alembic check` catches "did you commit the model change but forget
         # to autogenerate the migration?" drift before it hits main. Blocking
