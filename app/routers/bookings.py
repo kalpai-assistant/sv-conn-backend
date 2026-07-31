@@ -47,18 +47,36 @@ async def create_booking(
     return booking
 
 
-@router.patch("/{booking_id}/accept", response_model=BookingResponse)
+@router.patch(
+    "/{booking_id}/accept",
+    response_model=BookingResponse,
+    # Declared so they reach the generated client — the Incoming Request Card
+    # branches on these codes and must never parse the message (SVC-154).
+    responses={
+        403: {"description": "Another provider claimed this booking first"},
+        404: {"description": "No such booking"},
+        410: {"description": "The booking is no longer available — cancelled or "
+                             "expired. Dismiss the card."},
+    },
+)
 async def accept_booking(
     booking_id: UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    booking = await BookingService(db).transition_status(
-        booking_id=booking_id,
-        new_status=BookingStatus.ACCEPTED,
-        changed_by=current_user.id,
+    """Claim a broadcast booking. First provider to accept wins.
+
+    Idempotent: a provider re-accepting a booking they already hold gets 200 and
+    the booking, with no second notification to the consumer. That case is a
+    retry after a lost response, not a new acceptance — notifying again would
+    tell the consumer twice, and returning an error would tell the *winning*
+    provider they lost (SVC-154).
+    """
+    booking, newly_accepted = await BookingService(db).accept_booking(
+        booking_id=booking_id, provider_id=current_user.id
     )
-    send_booking_notification.delay(booking_id=str(booking.id), event="accepted")
+    if newly_accepted:
+        send_booking_notification.delay(booking_id=str(booking.id), event="accepted")
     return booking
 
 

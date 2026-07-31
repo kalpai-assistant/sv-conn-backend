@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.exceptions import (
     BookingNotFound,
+    BookingOfferClosed,
     InvalidOTP,
     InvalidStateTransition,
     UnauthorizedAction,
@@ -100,6 +101,57 @@ class BookingService:
     # ------------------------------------------------------------------
     # State transitions
     # ------------------------------------------------------------------
+
+    async def accept_booking(
+        self, booking_id: uuid.UUID, provider_id: uuid.UUID
+    ) -> tuple[Booking, bool]:
+        """Claim a broadcast booking. Returns ``(booking, newly_accepted)``.
+
+        Accept needs outcomes the generic state machine cannot express, so it gets
+        its own entry point rather than more special cases inside
+        ``transition_status`` — whose signature five other routes depend on
+        (SVC-154).
+
+        The ``newly_accepted`` flag exists for one reason: the router notifies the
+        consumer after a successful accept, and an idempotent retry must not fire
+        that push a second time. Returning a bare booking would make a lost
+        response send "Booking Confirmed" again on every retry — worse than the
+        error it replaces.
+
+        Order matters, and each branch is a case the card has to tell apart:
+
+        * cancelled/expired first, so a provider re-accepting a booking they had
+          claimed and which was later cancelled gets 410, not a stale 200;
+        * then their own accepted booking → idempotent, no state change, no push;
+        * then anyone else's → 403, the lost race. Checked before the transition
+          guard, which would otherwise always fire first and report the useless
+          "cannot move from accepted to accepted".
+
+        A provider whose booking has moved past ACCEPTED (en route, in progress)
+        falls through to the transition guard and still gets 409 — re-accepting
+        there is a genuinely illegal move, not a retry.
+        """
+        booking = await self.db.get(Booking, booking_id, with_for_update=True)
+        if not booking:
+            raise BookingNotFound(booking_id)
+
+        if booking.status in (BookingStatus.CANCELLED, BookingStatus.EXPIRED):
+            raise BookingOfferClosed()
+
+        if booking.provider_id == provider_id:
+            if booking.status is BookingStatus.ACCEPTED:
+                return booking, False
+        elif booking.provider_id is not None:
+            raise UnauthorizedAction(
+                "This booking has already been claimed by another provider"
+            )
+
+        booking = await self.transition_status(
+            booking_id=booking_id,
+            new_status=BookingStatus.ACCEPTED,
+            changed_by=provider_id,
+        )
+        return booking, True
 
     async def transition_status(
         self,
