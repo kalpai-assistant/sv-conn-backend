@@ -144,7 +144,20 @@ async def list_bookings(
     )
 
 
-@router.get("/{booking_id}/offer", response_model=BookingOfferResponse)
+@router.get(
+    "/{booking_id}/offer",
+    response_model=BookingOfferResponse,
+    # Declared so they reach the generated client. The card's behaviour is keyed
+    # entirely on these codes, and without this the spec advertises only 200/422 —
+    # the app would have no contract for the two cases that actually drive the UI.
+    # First route in this repo to document its error responses; worth copying.
+    responses={
+        403: {"description": "You were not offered this booking"},
+        404: {"description": "No such booking"},
+        410: {"description": "The offer is over — claimed by another provider, "
+                             "cancelled, or expired. Dismiss the card."},
+    },
+)
 async def get_booking_offer(
     booking_id: UUID,
     current_user: User = Depends(get_current_user),
