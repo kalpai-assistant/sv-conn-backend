@@ -9,6 +9,7 @@ from app.models.booking import BookingStatus, PaymentMethod
 from app.models.user import User
 from app.schemas.booking import (
     BookingListResponse,
+    BookingOfferResponse,
     BookingResponse,
     CancelBookingRequest,
     CreateBookingRequest,
@@ -140,6 +141,27 @@ async def list_bookings(
         status_filter=status,
         page=page,
         per_page=per_page,
+    )
+
+
+@router.get("/{booking_id}/offer", response_model=BookingOfferResponse)
+async def get_booking_offer(
+    booking_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """What a provider may see about a broadcast job before accepting it (SVC-153).
+
+    Backs the Incoming Request Card: the ``new_request`` push carries only a booking
+    id, and ``GET /{booking_id}`` refuses a provider who has not been assigned yet.
+
+    403 when the caller was not offered this booking, 410 once it is no longer
+    open. Both come from the service so they carry the standard error shape — the
+    card keys off the status code, not the message. Role is not gated here: the
+    eligibility check subsumes it, since only a matching provider can pass it.
+    """
+    return await BookingService(db).get_offer(
+        booking_id=booking_id, provider_id=current_user.id
     )
 
 
