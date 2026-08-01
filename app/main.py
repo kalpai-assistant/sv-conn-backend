@@ -74,19 +74,15 @@ def create_app() -> FastAPI:
     # -----------------------------------------------------------------------
     app.add_middleware(RequestIDMiddleware)
     app.add_middleware(JWTAttachMiddleware)
+    # B4: origins list is env-driven so staging + prod can add their own
+    # domains without a code change. See `Settings.CORS_ALLOWED_ORIGINS`
+    # for the dev default and the reasoning against wildcard.
+    cors_origins = [
+        origin.strip() for origin in settings.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",  # React dev server
-            "http://localhost:8080",  # Vite dev (alternate port)
-            "http://192.168.1.97:8080",  # Phone testing via Mac IP
-            "http://192.168.0.153:8080",  # Phone testing via Mac IP
-            "https://app.serviceconnect.in",  # Production web
-            # Capacitor mobile app origins
-            "capacitor://localhost",  # iOS Capacitor WebView
-            "https://localhost",  # Android Capacitor WebView (androidScheme=https)
-            "http://localhost",  # Android Capacitor WebView (fallback)
-        ],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
