@@ -1,0 +1,97 @@
+// Fargate task definition snippet — routes container stdout through a
+// Fluent Bit sidecar to Better Stack Logs (SC-47).
+//
+// Apply once per service (api, celery-worker, celery-beat). The Fluent
+// Bit image (`amazon/aws-for-fluent-bit`) is AWS-maintained and small
+// (~50 MB); it adds negligible runtime overhead.
+//
+// Ops steps to activate:
+//   1. Create Better Stack Logs source → copy the ingest token.
+//   2. Push token to SSM: /sc/{env}/BETTERSTACK_LOGS_TOKEN.
+//   3. Merge this snippet into each existing task definition JSON. Keep
+//      the log_router container + the awsfirelens logConfiguration on
+//      every app container that needs shipping.
+//   4. Register the new task-def revision; force-deploy the service.
+//
+// The awsfirelens log driver is a Fargate-native shim: the sidecar
+// receives all container stdout and pushes to whatever OUTPUT is
+// configured. Buffering + retry on the sidecar side means a Better
+// Stack blip doesn't drop logs.
+{
+  "family": "sc-api",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "containerDefinitions": [
+    {
+      // The Fluent Bit sidecar — MUST be marked as a log_router and be
+      // marked essential (kills the task if it exits, since log loss
+      // during runtime is a failure state).
+      "name": "log_router",
+      "image": "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable",
+      "essential": true,
+      "firelensConfiguration": {
+        "type": "fluentbit",
+        "options": {
+          "enable-ecs-log-metadata": "true"
+        }
+      },
+      "cpu": 64,
+      "memoryReservation": 128,
+      // Fluent Bit's own logs go to CloudWatch as a bootstrap fallback —
+      // if the sidecar itself fails, we don't want to be blind about it.
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/sc/prod/fluent-bit",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "log_router",
+          "awslogs-create-group": "true"
+        }
+      }
+    },
+    {
+      // The actual application container. `awsfirelens` driver routes
+      // its stdout through the log_router sidecar above.
+      "name": "api",
+      "image": "<ECR_URL>/sc-api:<COMMIT_SHA>",
+      "essential": true,
+      "portMappings": [{ "containerPort": 8000, "protocol": "tcp" }],
+      "environment": [
+        { "name": "ENVIRONMENT", "value": "production" },
+        { "name": "LOG_JSON", "value": "true" },
+        { "name": "LOG_LEVEL", "value": "INFO" }
+      ],
+      // Secrets pulled from SSM at container start — same pattern as
+      // the rest of the app (see SECRETS.md).
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "/sc/prod/DATABASE_URL" },
+        { "name": "REDIS_URL", "valueFrom": "/sc/prod/REDIS_URL" },
+        { "name": "JWT_SECRET_KEY", "valueFrom": "/sc/prod/JWT_SECRET" },
+        { "name": "SENTRY_DSN", "valueFrom": "/sc/prod/SENTRY_DSN" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awsfirelens",
+        "options": {
+          // Better Stack ingest — HTTP JSON. See the OBSERVABILITY.md
+          // runbook for the vendor decision.
+          "Name": "http",
+          "Host": "in.logs.betterstack.com",
+          "URI": "/",
+          "Port": "443",
+          "tls": "on",
+          "tls.verify": "off",
+          "format": "json",
+          "compress": "gzip",
+          // Batch size + flush cadence — a few seconds of batching keeps
+          // log volume manageable without losing responsiveness on alerts.
+          "Retry_Limit": "5",
+          // The Bearer token is templated at deploy time from SSM. Do
+          // NOT commit an actual token here.
+          "header": "Authorization Bearer ${BETTERSTACK_LOGS_TOKEN}"
+        }
+      }
+    }
+  ]
+}

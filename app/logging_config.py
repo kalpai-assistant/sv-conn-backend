@@ -126,7 +126,7 @@ def _redact(value: Any) -> Any:
     """
     if isinstance(value, dict):
         return {k: _REDACTED if _key_is_sensitive(k) else _redact(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return type(value)(_redact(v) for v in value)
     if _value_is_sensitive(value):
         return _REDACTED

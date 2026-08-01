@@ -22,7 +22,6 @@ from app.logging_config import (
     configure_logging,
 )
 
-
 # ---------------------------------------------------------------------------
 # _key_is_sensitive — substring matching, case-insensitive
 # ---------------------------------------------------------------------------
