@@ -12,10 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.exceptions import (
     BookingNotFound,
+    BookingOfferClosed,
     InvalidOTP,
     InvalidStateTransition,
     UnauthorizedAction,
 )
+from app.models.address import Address
 from app.models.booking import (
     VALID_TRANSITIONS,
     Booking,
@@ -26,7 +28,13 @@ from app.models.booking_status_log import BookingStatusLog
 from app.models.provider_profile import ProviderProfile
 from app.models.service import Service
 from app.models.user import UserRole
-from app.schemas.booking import BookingListResponse, BookingResponse
+from app.schemas.booking import (
+    BookingListResponse,
+    BookingOfferResponse,
+    BookingResponse,
+)
+from app.services.provider_matching import is_eligible_provider_stmt
+from app.utils.geo import distance_km_to_point
 
 settings = get_settings()
 
@@ -96,6 +104,58 @@ class BookingService:
         if user_id not in (booking.consumer_id, booking.provider_id):
             raise UnauthorizedAction("You do not have access to this booking")
         return booking
+
+    async def get_offer(
+        self, booking_id: uuid.UUID, provider_id: uuid.UUID
+    ) -> BookingOfferResponse:
+        """What a broadcast recipient may see about a job before accepting it.
+
+        ``get_booking`` cannot serve this: it admits only the consumer or the
+        *assigned* provider, and a broadcast recipient is neither — ``provider_id``
+        stays NULL until someone accepts. Without this the provider gets a push
+        carrying a booking id they are forbidden to resolve (SVC-153).
+
+        Eligibility is checked **before** the still-open check, deliberately. The
+        reverse order would tell any caller whether a given booking exists and has
+        been taken; this way a provider who was never a recipient learns nothing
+        beyond 403.
+        """
+        booking = await self.db.get(Booking, booking_id)
+        if not booking:
+            raise BookingNotFound(booking_id)
+
+        address = await self.db.get(Address, booking.consumer_address_id)
+        if address is None or address.location is None:
+            # The broadcast bails out on the same condition, so nobody was ever
+            # offered this booking — answer as we would to any non-recipient.
+            raise UnauthorizedAction("You were not offered this booking")
+
+        eligible = await self.db.execute(
+            is_eligible_provider_stmt(booking.service_id, address.location, provider_id)
+        )
+        if eligible.scalar_one_or_none() is None:
+            raise UnauthorizedAction("You were not offered this booking")
+
+        # Open means REQUESTED — the only state a booking can be accepted from.
+        # Anything else (claimed, cancelled, expired) ends the offer.
+        if booking.status is not BookingStatus.REQUESTED:
+            raise BookingOfferClosed()
+
+        service = await self.db.get(Service, booking.service_id)
+
+        distance = await self.db.execute(
+            select(
+                distance_km_to_point(ProviderProfile.service_area_center, address.location)
+            ).where(ProviderProfile.user_id == provider_id)
+        )
+
+        return BookingOfferResponse(
+            booking_id=booking.id,
+            service_name=service.name,
+            service_amount=booking.service_amount,
+            full_address=address.full_address,
+            distance_km=round(distance.scalar_one(), 2),
+        )
 
     # ------------------------------------------------------------------
     # State transitions
