@@ -74,4 +74,5 @@ async def delete_address(
     db: AsyncSession = Depends(get_db),
 ):
     from uuid import UUID
+
     await UserService(db).delete_address(current_user.id, UUID(address_id))

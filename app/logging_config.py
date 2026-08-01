@@ -10,6 +10,7 @@ Why contextvar (not `extra=`): a request-scoped ID that flows through every
 service/util log call without threading `request_id` through every function
 signature. Async-safe (contextvars propagate across `await`).
 """
+
 from __future__ import annotations
 
 import contextvars
@@ -32,9 +33,7 @@ request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # after task_postrun. Independent from request_id so a task triggered by an
 # HTTP request carries BOTH (request_id shows the originator; task_id shows
 # which specific worker run emitted the log).
-task_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "task_id", default=None
-)
+task_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("task_id", default=None)
 
 
 def _add_correlation_ids(_logger: Any, _name: str, event_dict: dict) -> dict:
@@ -77,19 +76,21 @@ _REDACTED = "***REDACTED***"
 # Substrings that mark a key as sensitive. Match is case-insensitive; matches
 # anywhere in the key name so `access_token`, `authTokenHash`, `RAZORPAY_SECRET`
 # all get caught.
-_SENSITIVE_KEY_SUBSTRINGS = frozenset({
-    "password",
-    "secret",
-    "token",
-    "authorization",
-    "api_key",
-    "apikey",
-    "otp",
-    "encryption_key",
-    "webhook_secret",
-    # Razorpay signature — proves payment authenticity, mustn't leak.
-    "razorpay_signature",
-})
+_SENSITIVE_KEY_SUBSTRINGS = frozenset(
+    {
+        "password",
+        "secret",
+        "token",
+        "authorization",
+        "api_key",
+        "apikey",
+        "otp",
+        "encryption_key",
+        "webhook_secret",
+        # Razorpay signature — proves payment authenticity, mustn't leak.
+        "razorpay_signature",
+    }
+)
 
 # Value patterns that MUST be redacted regardless of key. Ordered by frequency
 # so cheap ones run first — the walk is called per log record.
@@ -139,10 +140,7 @@ def _redact_secrets(_logger: Any, _name: str, event_dict: dict) -> dict:
     Runs after correlation IDs are attached and before the renderer — so
     the redaction applies to every log destination (JSON, console, Sentry).
     """
-    return {
-        k: _REDACTED if _key_is_sensitive(k) else _redact(v)
-        for k, v in event_dict.items()
-    }
+    return {k: _REDACTED if _key_is_sensitive(k) else _redact(v) for k, v in event_dict.items()}
 
 
 def configure_logging(*, level: str = "INFO", json_logs: bool = False) -> None:
@@ -170,7 +168,8 @@ def configure_logging(*, level: str = "INFO", json_logs: bool = False) -> None:
 
     # structlog-native loggers.
     structlog.configure(
-        processors=shared_processors + [
+        processors=shared_processors
+        + [
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.stdlib.BoundLogger,

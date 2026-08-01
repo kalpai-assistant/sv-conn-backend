@@ -2,6 +2,7 @@
 Booking service: state machine enforcement, commission calculation,
 OTP-gated service start, and paginated listing.
 """
+
 import secrets
 import uuid
 from datetime import datetime
@@ -131,10 +132,14 @@ class BookingService:
             if booking.provider_id is None:
                 booking.provider_id = changed_by
             elif booking.provider_id != changed_by:
-                raise UnauthorizedAction("This booking has already been claimed by another provider")
+                raise UnauthorizedAction(
+                    "This booking has already been claimed by another provider"
+                )
         elif changed_by not in (booking.provider_id, booking.consumer_id):
             # For other transitions (start, complete), only the assigned parts can mutate
-            raise UnauthorizedAction("Only the assigned provider or consumer can perform this action")
+            raise UnauthorizedAction(
+                "Only the assigned provider or consumer can perform this action"
+            )
 
         # OTP gate for doorstep service start
         if new_status == BookingStatus.IN_PROGRESS:
@@ -227,6 +232,7 @@ class BookingService:
     async def _increment_completed_jobs(self, provider_user_id: uuid.UUID) -> None:
         """Atomically increment total_completed_jobs on the provider's profile."""
         from sqlalchemy import update
+
         await self.db.execute(
             update(ProviderProfile)
             .where(ProviderProfile.user_id == provider_user_id)

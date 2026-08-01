@@ -2,6 +2,7 @@
 Provider service: profile management, KYC field encryption, online-status
 toggling, and geospatial discovery.
 """
+
 import asyncio
 import io
 import uuid
@@ -181,10 +182,7 @@ class ProviderService:
         result = await self.db.execute(stmt)
         rows = result.all()
 
-        return [
-            {**row.ProviderProfile.__dict__, "distance_km": row.distance_km}
-            for row in rows
-        ]
+        return [{**row.ProviderProfile.__dict__, "distance_km": row.distance_km} for row in rows]
 
     # ------------------------------------------------------------------
     # Service Subscriptions
@@ -197,9 +195,7 @@ class ProviderService:
         if profile is None:
             raise UnauthorizedAction("Provider profile not found")
         if profile.kyc_status != KYCStatus.VERIFIED:
-            raise UnauthorizedAction(
-                "Only verified providers can subscribe to services"
-            )
+            raise UnauthorizedAction("Only verified providers can subscribe to services")
 
         service = await self.db.get(Service, service_id)
         if service is None or not service.is_active:
@@ -238,14 +234,10 @@ class ProviderService:
         await self.db.delete(sub)
         await self.db.flush()
 
-    async def list_subscriptions(
-        self, provider_user_id: uuid.UUID
-    ) -> list[ProviderServiceModel]:
+    async def list_subscriptions(self, provider_user_id: uuid.UUID) -> list[ProviderServiceModel]:
         """Return the provider's current service subscriptions."""
         result = await self.db.execute(
-            select(ProviderServiceModel).where(
-                ProviderServiceModel.provider_id == provider_user_id
-            )
+            select(ProviderServiceModel).where(ProviderServiceModel.provider_id == provider_user_id)
         )
         return list(result.scalars().all())
 
@@ -253,9 +245,7 @@ class ProviderService:
     # Rating update (called by review_service after new review)
     # ------------------------------------------------------------------
 
-    async def refresh_avg_rating(
-        self, provider_user_id: uuid.UUID, new_rating: int
-    ) -> None:
+    async def refresh_avg_rating(self, provider_user_id: uuid.UUID, new_rating: int) -> None:
         """Incrementally update avg_rating using a running weighted average."""
         profile = await self.get_profile(provider_user_id)
         if not profile:
@@ -264,9 +254,7 @@ class ProviderService:
         if n == 0:
             profile.avg_rating = float(new_rating)
         else:
-            profile.avg_rating = round(
-                (profile.avg_rating * n + new_rating) / (n + 1), 2
-            )
+            profile.avg_rating = round((profile.avg_rating * n + new_rating) / (n + 1), 2)
         await self.db.flush()
 
     # ------------------------------------------------------------------
@@ -413,14 +401,10 @@ class ProviderService:
         # boto3 presign is sync — to_thread to keep the loop responsive even
         # though presigning itself is local (no network call).
         aadhaar_url = (
-            await asyncio.to_thread(storage.get_presigned_url, aadhaar_key)
-            if aadhaar_key
-            else None
+            await asyncio.to_thread(storage.get_presigned_url, aadhaar_key) if aadhaar_key else None
         )
         selfie_url = (
-            await asyncio.to_thread(storage.get_presigned_url, selfie_key)
-            if selfie_key
-            else None
+            await asyncio.to_thread(storage.get_presigned_url, selfie_key) if selfie_key else None
         )
 
         return {

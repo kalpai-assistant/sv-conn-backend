@@ -7,6 +7,7 @@ Covers:
 - PATCH /providers/me languages round-trip (trim + case-insensitive de-dup)
 - Provider-role gating on both endpoints
 """
+
 from unittest.mock import patch
 
 import pytest
@@ -54,9 +55,7 @@ async def test_upload_photo_happy_path(client, auth_headers, db_session):
     assert mock_upload.call_count == 1
 
     await db_session.refresh(profile)
-    assert profile.profile_photo_url == (
-        "https://bucket.s3.amazonaws.com/provider-photos/x.png"
-    )
+    assert profile.profile_photo_url == ("https://bucket.s3.amazonaws.com/provider-photos/x.png")
 
 
 @pytest.mark.asyncio

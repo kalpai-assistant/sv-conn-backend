@@ -12,6 +12,7 @@ the whole app + hits a real DB, which is overkill (and brittle) for testing
 the health router. Each test builds a minimal FastAPI app with the health
 router mounted and dependencies mocked to the exact behaviour under test.
 """
+
 import asyncio
 
 import pytest
@@ -60,9 +61,7 @@ def _build_app(*, db=None, redis=None) -> FastAPI:
 
 
 async def _get(app, path):
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         return await ac.get(path)
 
 

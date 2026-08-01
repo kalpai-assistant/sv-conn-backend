@@ -3,6 +3,7 @@ PII encryption helper (AES-256-GCM).
 All encryption/decryption of sensitive fields (Aadhaar, PAN, bank details)
 goes through this module — nothing else touches cryptography directly.
 """
+
 import base64
 import os
 

@@ -2,6 +2,7 @@
 Alembic async env — supports both online (async, for CI/migrations) and
 offline (SQL output) modes. Imports all models so metadata is populated.
 """
+
 import asyncio
 from logging.config import fileConfig
 
@@ -33,26 +34,60 @@ def get_url() -> str:
     import os
 
     from app.config import get_settings
+
     settings = get_settings()
     # Alembic needs the psycopg2 sync URL for offline mode
-    return os.getenv("ALEMBIC_DATABASE_URL", settings.SYNC_DATABASE_URL or
-                     settings.DATABASE_URL.replace("postgresql+asyncpg", "postgresql+psycopg2"))
+    return os.getenv(
+        "ALEMBIC_DATABASE_URL",
+        settings.SYNC_DATABASE_URL
+        or settings.DATABASE_URL.replace("postgresql+asyncpg", "postgresql+psycopg2"),
+    )
 
 
 def include_object(object, name, type_, reflected, compare_to):
     if type_ == "table" and name in {
-        "spatial_ref_sys", "topology", "layer", "faces", "county",
-        "addr", "addrfeat", "street_type_lookup", "secondary_unit_lookup",
-        "zip_lookup", "zip_state_loc", "pagc_gaz", "cousub", "pagc_lex",
-        "loader_lookuptables", "direction_lookup", "geocode_settings",
-        "zcta5", "pagc_rules", "tract", "tabblock20", "loader_variables",
-        "tabblock", "zip_lookup_all", "loader_platform", "zip_lookup_base",
-        "place_lookup", "geocode_settings_default", "edges", "node",
-        "place", "zip_state", "bg", "state", "countysub_lookup",
-        "featnames", "state_lookup", "county_lookup"
+        "spatial_ref_sys",
+        "topology",
+        "layer",
+        "faces",
+        "county",
+        "addr",
+        "addrfeat",
+        "street_type_lookup",
+        "secondary_unit_lookup",
+        "zip_lookup",
+        "zip_state_loc",
+        "pagc_gaz",
+        "cousub",
+        "pagc_lex",
+        "loader_lookuptables",
+        "direction_lookup",
+        "geocode_settings",
+        "zcta5",
+        "pagc_rules",
+        "tract",
+        "tabblock20",
+        "loader_variables",
+        "tabblock",
+        "zip_lookup_all",
+        "loader_platform",
+        "zip_lookup_base",
+        "place_lookup",
+        "geocode_settings_default",
+        "edges",
+        "node",
+        "place",
+        "zip_state",
+        "bg",
+        "state",
+        "countysub_lookup",
+        "featnames",
+        "state_lookup",
+        "county_lookup",
     }:
         return False
     return True
+
 
 # ---------------------------------------------------------------------------
 # Offline mode — generate SQL without a live DB connection
@@ -85,6 +120,7 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     from app.config import get_settings
+
     settings = get_settings()
 
     configuration = config.get_section(config.config_ini_section, {})

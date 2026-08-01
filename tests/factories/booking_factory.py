@@ -1,6 +1,7 @@
 """
 Booking factory for test fixtures.
 """
+
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -10,6 +10,7 @@ Covers:
 - X-Forwarded-For only honoured when opted in (spoofing guard)
 - Malformed CIDR entries are dropped, not crashing the app
 """
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient

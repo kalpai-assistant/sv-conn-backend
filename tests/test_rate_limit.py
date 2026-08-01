@@ -15,6 +15,7 @@ The auth OTP path has its own counter (predates SC-35). Its Retry-After
 behaviour is covered in the auth tests; only the RateLimitExceeded contract
 is duplicated here.
 """
+
 import uuid
 from unittest.mock import AsyncMock
 
@@ -149,9 +150,7 @@ async def test_endpoint_returns_429_with_retry_after_header():
         handler_calls += 1
         return {"ok": True}
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         for _ in range(3):
             r = await client.post("/limited")
             assert r.status_code == 200, r.text

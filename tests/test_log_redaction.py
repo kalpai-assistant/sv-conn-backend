@@ -9,6 +9,7 @@ Tests exercise the redaction processor directly (pure function, no logging
 plumbing needed) plus one end-to-end via structlog to prove the processor
 is actually wired into the chain.
 """
+
 import io
 import json
 import logging
@@ -225,7 +226,9 @@ def test_end_to_end_non_secret_passes_through():
     buf, restore = _capture_json_logs()
     try:
         structlog.get_logger("test").info(
-            "booking done", user_id="u-abc", amount_paise=12300,
+            "booking done",
+            user_id="u-abc",
+            amount_paise=12300,
         )
     finally:
         restore()

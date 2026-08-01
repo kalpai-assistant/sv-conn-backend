@@ -24,6 +24,7 @@ default, but the celery prefork pool reuses threads).
 Registration happens by importing this module from `celery_app`; the signal
 decorators wire themselves.
 """
+
 from __future__ import annotations
 
 from typing import Any

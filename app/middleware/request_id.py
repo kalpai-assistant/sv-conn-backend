@@ -6,6 +6,7 @@ SVC-46: also binds the ID into a contextvar so every structlog record emitted
 during the request carries it automatically — no need to pass request_id
 through every service call.
 """
+
 import uuid
 
 from fastapi import Request

@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 # Domain exceptions
 # ---------------------------------------------------------------------------
 
+
 class AppException(Exception):
     """Base for all application-level exceptions."""
 
@@ -105,6 +106,7 @@ class SubscriptionNotFound(AppException):
 # ---------------------------------------------------------------------------
 # Handler registration
 # ---------------------------------------------------------------------------
+
 
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppException)

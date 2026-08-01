@@ -1,6 +1,7 @@
 """
 User service: profile management and address CRUD.
 """
+
 import uuid
 
 from sqlalchemy import select
@@ -48,9 +49,7 @@ class UserService:
     # ------------------------------------------------------------------
 
     async def list_addresses(self, user_id: uuid.UUID) -> list[Address]:
-        result = await self.db.execute(
-            select(Address).where(Address.user_id == user_id)
-        )
+        result = await self.db.execute(select(Address).where(Address.user_id == user_id))
         return list(result.scalars().all())
 
     async def add_address(

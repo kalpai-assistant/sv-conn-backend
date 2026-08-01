@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     # to activate when ENVIRONMENT == "production"** — see AuthService.
     # Both empty in dev/prod defaults; only set in staging env.
     E2E_TEST_PHONES: str = ""  # comma-separated E.164 numbers
-    E2E_TEST_OTP: str = ""     # fixed OTP to store for those numbers
+    E2E_TEST_OTP: str = ""  # fixed OTP to store for those numbers
 
     # Observability (SVC-46)
     # Environment tag propagated to Sentry + log records. staging | production | dev.

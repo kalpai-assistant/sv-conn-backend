@@ -16,6 +16,7 @@ round-trip and the burst pattern this creates at window boundaries is fine
 at these limits — nobody notices whether "10/hour" is a rolling hour or a
 calendar hour when the window is short.
 """
+
 from fastapi import Depends
 from redis.asyncio import Redis
 

@@ -6,6 +6,7 @@ To add a new SMS provider:
 2. Register the new key in get_sms_client().
 No existing code changes needed.
 """
+
 from __future__ import annotations
 
 import abc
@@ -29,6 +30,7 @@ class AbstractSMSClient(abc.ABC):
 # MSG91 implementation
 # ---------------------------------------------------------------------------
 
+
 class MSG91Client(AbstractSMSClient):
     _BASE_URL = "https://api.msg91.com/api/v5/otp"
 
@@ -50,6 +52,7 @@ class MSG91Client(AbstractSMSClient):
 # ---------------------------------------------------------------------------
 # Twilio implementation
 # ---------------------------------------------------------------------------
+
 
 class TwilioClient(AbstractSMSClient):
     async def send_otp(self, phone: str, otp: str) -> None:
@@ -88,7 +91,6 @@ def get_sms_client() -> AbstractSMSClient:
     client_class = _PROVIDER_MAP.get(provider)
     if client_class is None:
         raise ValueError(
-            f"Unknown SMS_PROVIDER '{provider}'. "
-            f"Valid options: {list(_PROVIDER_MAP.keys())}"
+            f"Unknown SMS_PROVIDER '{provider}'. " f"Valid options: {list(_PROVIDER_MAP.keys())}"
         )
     return client_class()

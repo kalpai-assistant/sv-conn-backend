@@ -13,6 +13,7 @@ Config:
   when explicitly opted in — trusting it unconditionally lets any client spoof
   their IP via a header.
 """
+
 import ipaddress
 import logging
 
@@ -90,7 +91,8 @@ class AdminIPAllowlistMiddleware(BaseHTTPMiddleware):
         if self._networks:
             logger.info(
                 "Admin IP allowlist active: %d network(s), trust_forwarded_for=%s",
-                len(self._networks), self._trust_forwarded,
+                len(self._networks),
+                self._trust_forwarded,
             )
         else:
             logger.info(

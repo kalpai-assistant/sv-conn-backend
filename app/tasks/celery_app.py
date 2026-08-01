@@ -12,6 +12,7 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
 )
 
+
 # SVC-46: workers don't run through app/main.py, so structlog needs to be
 # configured explicitly per worker process. worker_process_init fires once
 # per prefork child, before any task runs.

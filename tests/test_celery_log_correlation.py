@@ -12,6 +12,7 @@ The signals are small but easy to get subtly wrong:
 Each behaviour is pinned with its own test rather than a single end-to-end,
 so a regression tells you *which* boundary is broken.
 """
+
 import io
 import json
 import logging

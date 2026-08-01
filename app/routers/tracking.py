@@ -1,6 +1,7 @@
 """
 WebSocket endpoints for real-time provider location tracking — exact from LLD.
 """
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
