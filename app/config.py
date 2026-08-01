@@ -44,6 +44,23 @@ class Settings(BaseSettings):
     RAZORPAY_WEBHOOK_SECRET: str = ""  # Set in Razorpay dashboard → Webhooks
     PLATFORM_COMMISSION_PERCENT: float = 20.0
 
+    # CORS (B4). Comma-separated origins the browser is allowed to send
+    # `Origin:` from. Default covers dev + Capacitor + prod web; staging
+    # / other envs should override via env var. `*` alone is DELIBERATELY
+    # NOT accepted — allow_credentials=True with a wildcard origin is a
+    # spec violation the browser will silently reject.
+    CORS_ALLOWED_ORIGINS: str = ",".join(
+        [
+            "http://localhost:3000",  # React dev server
+            "http://localhost:8080",  # Vite dev (alternate port)
+            "https://app.serviceconnect.in",  # Production web
+            # Capacitor mobile app origins
+            "capacitor://localhost",  # iOS Capacitor WebView
+            "https://localhost",  # Android Capacitor WebView (androidScheme=https)
+            "http://localhost",  # Android Capacitor WebView (fallback)
+        ]
+    )
+
     # Admin IP allowlist (SVC-75) — comma-separated CIDRs. Empty = no restriction
     # (dev-safe default). Production MUST populate. See backend/ADMIN.md.
     ADMIN_ALLOWED_IPS: str = ""
@@ -77,7 +94,7 @@ class Settings(BaseSettings):
     # to activate when ENVIRONMENT == "production"** — see AuthService.
     # Both empty in dev/prod defaults; only set in staging env.
     E2E_TEST_PHONES: str = ""  # comma-separated E.164 numbers
-    E2E_TEST_OTP: str = ""     # fixed OTP to store for those numbers
+    E2E_TEST_OTP: str = ""  # fixed OTP to store for those numbers
 
     # Observability (SVC-46)
     # Environment tag propagated to Sentry + log records. staging | production | dev.
