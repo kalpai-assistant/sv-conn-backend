@@ -100,6 +100,16 @@ class ProviderResponse(BaseModel):
     # they saved without the API ever returning the underlying details.
     payout_method: PayoutMethod | None = None
     payout_display: str | None = None
+    # Which methods have details on file, active or not (SVC-152) — so the frontend
+    # can tell whether "switch back to your bank account" is possible instead of
+    # firing the switch and reading the 400 as its answer. Names the filled slots,
+    # never their contents; a method that is active is always listed here too.
+    #
+    # Deliberately no default, so it lands in the OpenAPI `required` set and generated
+    # clients type it non-optional. The server always sends it — empty list when
+    # nothing is stored — and a client that treats "absent" as "nothing stored" would
+    # hide the switch from a provider who does have the other method on file.
+    payout_methods_stored: list[PayoutMethod]
 
     model_config = {"from_attributes": True}
 

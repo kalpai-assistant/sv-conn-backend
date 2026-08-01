@@ -134,15 +134,20 @@ class ProviderService:
         Rejects a method with nothing on file — activating a destination we cannot
         actually pay to would fail later at payout time, when the provider is no
         longer around to correct it.
+
+        "Is it stored?" is answered by ``ProviderProfile.payout_methods_stored``, the
+        same property the profile response exposes (SVC-152). Deliberately one shared
+        rule: if this check and what we advertise as switchable could drift, the
+        frontend would offer a switch that 400s.
         """
         profile, _ = await self.get_or_create_profile(user_id)
 
-        if method is PayoutMethod.UPI and not profile.payout_vpa_encrypted:
-            raise InvalidPayoutMethod("No UPI ID on file to switch to")
-        if method is PayoutMethod.BANK and not (
-            profile.payout_account_number_encrypted and profile.payout_ifsc_encrypted
-        ):
-            raise InvalidPayoutMethod("No bank account on file to switch to")
+        if method not in profile.payout_methods_stored:
+            raise InvalidPayoutMethod(
+                "No UPI ID on file to switch to"
+                if method is PayoutMethod.UPI
+                else "No bank account on file to switch to"
+            )
 
         profile.payout_method = method
         # The display label follows the active method, so it must be recomputed from

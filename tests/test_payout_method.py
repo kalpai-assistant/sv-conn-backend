@@ -5,6 +5,10 @@ this ticket, switching UPI -> bank kept paying the old UPI handle, because
 ``create_payout`` takes whichever destination it is handed and prefers UPI. Saving a
 method no longer erases the other one, so ``payout_method`` is the only thing that
 decides where money goes.
+
+Also covers SVC-152, split out of this ticket: because both methods can be on file,
+the response has to say which ones *are*, or the frontend cannot know whether
+switching back is possible. See the "which methods are stored" section below.
 """
 import uuid
 from unittest.mock import AsyncMock, patch
@@ -283,6 +287,127 @@ async def test_cannot_set_both_methods_in_one_request(client, db_session, auth_h
     assert "one payout method at a time" in resp.text
 
 
+# --- which methods are stored (SVC-152) --------------------------------------
+#
+# Split out of SVC-148: the response described only the *active* method, so the
+# frontend could not tell whether switching back was possible and had to fire the
+# switch and read the 400 as its answer.
+
+@pytest.mark.asyncio
+async def test_both_stored_methods_are_listed(db_session):
+    user = await _provider(db_session)
+    await _set_bank(db_session, user)
+    profile = await _set_upi(db_session, user)
+
+    assert set(profile.payout_methods_stored) == {PayoutMethod.UPI, PayoutMethod.BANK}
+
+
+@pytest.mark.asyncio
+async def test_upi_only(db_session):
+    user = await _provider(db_session)
+    profile = await _set_upi(db_session, user)
+
+    assert profile.payout_methods_stored == [PayoutMethod.UPI]
+
+
+@pytest.mark.asyncio
+async def test_bank_only(db_session):
+    user = await _provider(db_session)
+    profile = await _set_bank(db_session, user)
+
+    assert profile.payout_methods_stored == [PayoutMethod.BANK]
+
+
+@pytest.mark.asyncio
+async def test_nothing_stored_is_empty(db_session):
+    user = await _provider(db_session)
+    profile, _ = await ProviderService(db_session).get_or_create_profile(user.id)
+
+    assert profile.payout_methods_stored == []
+
+
+@pytest.mark.asyncio
+async def test_bank_without_ifsc_is_not_listed(db_session):
+    """A half-stored bank account cannot be paid to, so it must not be advertised.
+
+    The request schema refuses to save an account number without an IFSC, so this is
+    written at the row level — the shape a partial write or an older row would leave
+    behind. Listing it would show the frontend a switch that 400s, which is the exact
+    dead end this field exists to remove.
+    """
+    user = await _provider(db_session)
+    profile, _ = await ProviderService(db_session).get_or_create_profile(user.id)
+    profile.payout_account_number_encrypted = encrypt(ACCOUNT)
+    profile.payout_ifsc_encrypted = None
+    await db_session.flush()
+
+    assert profile.payout_methods_stored == []
+    # And the switch it would have advertised is still refused — one shared rule.
+    with pytest.raises(InvalidPayoutMethod, match="No bank account on file"):
+        await ProviderService(db_session).set_active_payout_method(
+            user.id, PayoutMethod.BANK
+        )
+
+
+@pytest.mark.asyncio
+async def test_stored_but_inactive_method_is_still_listed(db_session):
+    """The whole point: independent of which method is active."""
+    user = await _provider(db_session)
+    await _set_bank(db_session, user)
+    profile = await _set_upi(db_session, user)  # UPI active, bank merely stored
+
+    assert profile.payout_method is PayoutMethod.UPI
+    assert PayoutMethod.BANK in profile.payout_methods_stored
+
+
+@pytest.mark.asyncio
+async def test_active_method_is_always_listed_as_stored(db_session):
+    """An active method the frontend is told is not stored would be incoherent."""
+    user = await _provider(db_session)
+
+    for save in (_set_upi, _set_bank, _set_upi):
+        profile = await save(db_session, user)
+        assert profile.payout_method in profile.payout_methods_stored
+
+    profile = await ProviderService(db_session).set_active_payout_method(
+        user.id, PayoutMethod.BANK
+    )
+    assert profile.payout_method in profile.payout_methods_stored
+
+
+@pytest.mark.asyncio
+async def test_get_me_reports_stored_methods(client, db_session, auth_headers):
+    user = await _provider(db_session)
+    await _set_bank(db_session, user)
+    await _set_upi(db_session, user)
+
+    resp = await client.get(
+        "/api/v1/providers/me", headers=auth_headers(str(user.id), "provider")
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body["payout_methods_stored"]) == {"upi", "bank"}
+    # Still only the active method's label — the list adds no new detail.
+    assert body["payout_method"] == "upi"
+    assert body["payout_display"] == VPA
+
+
+@pytest.mark.asyncio
+async def test_stored_methods_empty_after_remove(client, db_session, auth_headers):
+    user = await _provider(db_session)
+    await _set_bank(db_session, user)
+    await _set_upi(db_session, user)
+
+    resp = await client.delete(
+        "/api/v1/providers/me/payout-method",
+        headers=auth_headers(str(user.id), "provider"),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["payout_methods_stored"] == []
+
+
 # --- the guarantee that actually matters -------------------------------------
 
 def test_payout_fields_are_not_exposed_on_any_other_provider_schema():
@@ -296,7 +421,9 @@ def test_payout_fields_are_not_exposed_on_any_other_provider_schema():
     """
     from app.schemas.provider import NearbyProviderResponse, ProviderResponse
 
-    payout_fields = {"payout_set", "payout_method", "payout_display"}
+    payout_fields = {
+        "payout_set", "payout_method", "payout_display", "payout_methods_stored",
+    }
     assert payout_fields <= set(ProviderResponse.model_fields)
     assert not (payout_fields & set(NearbyProviderResponse.model_fields))
 
