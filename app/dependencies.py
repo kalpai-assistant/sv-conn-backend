@@ -31,7 +31,13 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """Extract and validate JWT; return the active User object."""
+    """Extract and validate JWT; return the active User object.
+
+    SVC-47: also attaches the user to the current Sentry scope so events
+    raised during the request are filterable by user_id in the Sentry
+    UI. `send_default_pii=False` is set at init time, so only the id +
+    role make it into Sentry — never the phone number or email.
+    """
     payload = decode_jwt(credentials.credentials)
     if not payload:
         raise HTTPException(
@@ -45,7 +51,20 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
         )
+    _tag_sentry_user(str(user.id), user.role.value)
     return user
+
+
+def _tag_sentry_user(user_id: str, role: str) -> None:
+    """Bind user context to the current Sentry scope. Safe no-op when SDK
+    isn't initialised (SENTRY_DSN empty)."""
+    try:
+        import sentry_sdk
+
+        sentry_sdk.set_user({"id": user_id, "role": role})
+    except Exception:
+        # Never let Sentry issues break auth.
+        pass
 
 
 def require_role(*roles: str):
