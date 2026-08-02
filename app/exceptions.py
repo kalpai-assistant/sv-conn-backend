@@ -116,6 +116,27 @@ class SubscriptionNotFound(AppException):
         )
 
 
+class IdempotencyKeyReused(AppException):
+    """Same Idempotency-Key sent with a different request body (SVC-158)."""
+
+    def __init__(self):
+        super().__init__(
+            "Idempotency-Key was reused with a different request body. "
+            "Generate a new key for each distinct request.",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+
+
+class IdempotencyInProgress(AppException):
+    """Concurrent request with the same Idempotency-Key is still in flight (SVC-158)."""
+
+    def __init__(self):
+        super().__init__(
+            "A request with this Idempotency-Key is already in progress. " "Retry in a moment.",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Handler registration
 # ---------------------------------------------------------------------------

@@ -1,10 +1,13 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, status
+from fastapi.responses import JSONResponse
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_redis
+from app.exceptions import IdempotencyInProgress
 from app.models.booking import BookingStatus, PaymentMethod
 from app.models.user import User
 from app.schemas.booking import (
@@ -18,6 +21,7 @@ from app.schemas.booking import (
 from app.services.booking_service import BookingService
 from app.tasks.notification_tasks import send_booking_notification
 from app.tasks.payment_tasks import process_cash_payment
+from app.utils.idempotency import IdempotencyStore, hash_body
 from app.utils.rate_limiter import rate_limit
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
@@ -31,21 +35,73 @@ router = APIRouter(prefix="/bookings", tags=["Bookings"])
     # bypasses this with multiple accounts, but each account they burn costs
     # them SMS OTPs — layered defence with the OTP throttle.
     dependencies=[Depends(rate_limit("booking_create", max_requests=10))],
+    # SVC-158: declared so the generated client sees the idempotency-conflict
+    # codes and can map them to sensible client behaviour instead of a generic
+    # 4xx.
+    responses={
+        409: {
+            "description": "A request with this Idempotency-Key is already in "
+            "progress. Retry after a short backoff."
+        },
+        422: {
+            "description": "Idempotency-Key was reused with a different request "
+            "body. Generate a new key for each distinct request."
+        },
+    },
 )
 async def create_booking(
     request: CreateBookingRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    # SVC-158: optional. Clients that don't send it get the pre-idempotency
+    # behaviour (still safe — 10/hour rate limit caps abuse). Once the mobile
+    # app sends it on every booking, double-taps + network-retry storms can't
+    # create duplicate bookings.
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    booking = await BookingService(db).create_booking(
-        consumer_id=current_user.id,
-        service_id=request.service_id,
-        address_id=request.address_id,
-        scheduled_at=request.scheduled_at,
-        payment_method=request.payment_method,
-    )
-    send_booking_notification.delay(booking_id=str(booking.id), event="new_request")
-    return booking
+    async def do_create() -> BookingResponse:
+        booking = await BookingService(db).create_booking(
+            consumer_id=current_user.id,
+            service_id=request.service_id,
+            address_id=request.address_id,
+            scheduled_at=request.scheduled_at,
+            payment_method=request.payment_method,
+        )
+        send_booking_notification.delay(booking_id=str(booking.id), event="new_request")
+        return booking
+
+    if not idempotency_key:
+        return await do_create()
+
+    store = IdempotencyStore(redis, str(current_user.id), idempotency_key)
+    body_hash = hash_body(request.model_dump(mode="json"))
+
+    # Fast path — we've already served this exact request.
+    cached = await store.check(body_hash)
+    if cached is not None:
+        status_code, cached_body = cached
+        return JSONResponse(status_code=status_code, content=cached_body)
+
+    # Try to claim the lock. If another request beat us to it we re-check —
+    # if it's already done we serve the cached response, otherwise 409.
+    if not await store.reserve(body_hash):
+        cached = await store.check(body_hash)
+        if cached is not None:
+            status_code, cached_body = cached
+            return JSONResponse(status_code=status_code, content=cached_body)
+        raise IdempotencyInProgress()
+
+    try:
+        booking = await do_create()
+        response_body = BookingResponse.model_validate(booking).model_dump(mode="json")
+        await store.commit(body_hash, status.HTTP_201_CREATED, response_body)
+        return JSONResponse(status_code=status.HTTP_201_CREATED, content=response_body)
+    except Exception:
+        # Drop the pending sentinel so a retry isn't blocked by a lock that
+        # will only expire after PENDING_TTL_SECONDS.
+        await store.rollback()
+        raise
 
 
 @router.patch(
