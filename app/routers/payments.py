@@ -1,12 +1,15 @@
 import hashlib
 import hmac
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_redis
+from app.exceptions import IdempotencyInProgress
 from app.models.user import User
 from app.schemas.payment import (
     CreatePaymentOrderRequest,
@@ -15,6 +18,7 @@ from app.schemas.payment import (
     VerifyPaymentRequest,
 )
 from app.services.payment_service import PaymentService
+from app.utils.idempotency import IdempotencyStore, hash_body
 from app.utils.rate_limiter import rate_limit
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -31,13 +35,60 @@ _PAYMENT_RATE_LIMIT = Depends(rate_limit("payment_ops", max_requests=20))
     "/orders",
     response_model=PaymentOrderResponse,
     dependencies=[_PAYMENT_RATE_LIMIT],
+    # SVC-158 follow-up: idempotency conflict codes so the generated client
+    # can distinguish them from generic 4xx and back off / surface correctly.
+    responses={
+        409: {
+            "description": "A request with this Idempotency-Key is already in "
+            "progress. Retry after a short backoff."
+        },
+        422: {
+            "description": "Idempotency-Key was reused with a different request "
+            "body. Generate a new key for each distinct request."
+        },
+    },
 )
 async def create_payment_order(
     request: CreatePaymentOrderRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    # SVC-158 follow-up. `POST /bookings` gets the same treatment; this one
+    # matters more because the side effect is real money: without idempotency
+    # a double-tapped Pay button creates two Razorpay orders, both of which
+    # can be paid, and we've charged the user twice for one booking.
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    return await PaymentService(db).create_order(request.booking_id)
+    async def do_create() -> dict:
+        return await PaymentService(db).create_order(request.booking_id)
+
+    if not idempotency_key:
+        return await do_create()
+
+    store = IdempotencyStore(redis, str(current_user.id), idempotency_key)
+    body_hash = hash_body(request.model_dump(mode="json"))
+
+    cached = await store.check(body_hash)
+    if cached is not None:
+        status_code, cached_body = cached
+        return JSONResponse(status_code=status_code, content=cached_body)
+
+    if not await store.reserve(body_hash):
+        cached = await store.check(body_hash)
+        if cached is not None:
+            status_code, cached_body = cached
+            return JSONResponse(status_code=status_code, content=cached_body)
+        raise IdempotencyInProgress()
+
+    try:
+        order = await do_create()
+        await store.commit(body_hash, status.HTTP_200_OK, order)
+        return JSONResponse(status_code=status.HTTP_200_OK, content=order)
+    except Exception:
+        # Drop the pending sentinel so a retry can proceed without waiting
+        # out PENDING_TTL_SECONDS.
+        await store.rollback()
+        raise
 
 
 @router.post(
