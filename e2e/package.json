@@ -4,7 +4,7 @@
   "description": "SC-52 nightly smoke test against staging. Kept in a separate npm project (not pyproject.toml) so the backend deps stay Python-only and Playwright's node_modules doesn't bloat the Fargate image.",
   "scripts": {
     "test": "playwright test",
-    "test:staging": "STAGING_API_URL=https://api.staging.serviceconnect.in playwright test"
+    "test:staging": "STAGING_API_URL=https://api.staging.eazyserv.com playwright test"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0"

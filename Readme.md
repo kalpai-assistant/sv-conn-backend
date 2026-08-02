@@ -1,4 +1,4 @@
-# ServiceConnect Backend — Build Walkthrough
+# Eazyserv Backend — Build Walkthrough
 
 ## What Was Built
 
@@ -34,7 +34,7 @@ uv add <package>
 ## File Structure Created
 
 ```
-serviceconnect/
+eazyserv/
 ├── app/
 │   ├── main.py                    # App factory, lifespan, middleware stack
 │   ├── config.py                  # Pydantic Settings (env-based)

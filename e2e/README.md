@@ -18,7 +18,7 @@ for the guard logic — production is a hard-refuse.
 ```bash
 cd e2e
 npm install
-STAGING_API_URL=https://api.staging.serviceconnect.in \
+STAGING_API_URL=https://api.staging.eazyserv.com \
 E2E_TEST_PHONE=+919999900001 \
 E2E_TEST_OTP=123456 \
   npm test

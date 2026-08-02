@@ -7,10 +7,11 @@ from app.logging_config import configure_logging
 settings = get_settings()
 
 celery_app = Celery(
-    "serviceconnect",
+    "eazyserv",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
 )
+
 
 # SVC-46: workers don't run through app/main.py, so structlog needs to be
 # configured explicitly per worker process. worker_process_init fires once
