@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # App
-    APP_NAME: str = "ServiceConnect"
+    APP_NAME: str = "Eazyserv"
     DEBUG: bool = False
     API_V1_PREFIX: str = "/api/v1"
 
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
         [
             "http://localhost:3000",  # React dev server
             "http://localhost:8080",  # Vite dev (alternate port)
-            "https://app.serviceconnect.in",  # Production web
+            "https://app.eazyserv.com",  # Production web
             # Capacitor mobile app origins
             "capacitor://localhost",  # iOS Capacitor WebView
             "https://localhost",  # Android Capacitor WebView (androidScheme=https)

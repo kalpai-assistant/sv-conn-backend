@@ -32,7 +32,11 @@ class PaymentStatus(str, enum.Enum):
 
 # Valid state transitions — enforced in booking_service.py
 VALID_TRANSITIONS: dict[BookingStatus, list[BookingStatus]] = {
-    BookingStatus.REQUESTED: [BookingStatus.ACCEPTED, BookingStatus.EXPIRED, BookingStatus.CANCELLED],
+    BookingStatus.REQUESTED: [
+        BookingStatus.ACCEPTED,
+        BookingStatus.EXPIRED,
+        BookingStatus.CANCELLED,
+    ],
     BookingStatus.ACCEPTED: [BookingStatus.EN_ROUTE, BookingStatus.CANCELLED],
     BookingStatus.EN_ROUTE: [BookingStatus.IN_PROGRESS, BookingStatus.CANCELLED],
     BookingStatus.IN_PROGRESS: [BookingStatus.COMPLETED],
@@ -61,18 +65,14 @@ class Booking(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     consumer_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), index=True
     )
     provider_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True
     )
-    service_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("services.id")
-    )
+    service_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("services.id"))
     consumer_address_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("addresses.id")
     )
@@ -90,9 +90,7 @@ class Booking(Base):
     )
     razorpay_order_id: Mapped[str | None] = mapped_column(String(255))
     cancellation_reason: Mapped[str | None] = mapped_column(String(500))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -109,9 +107,5 @@ class Booking(Base):
     status_logs: Mapped[list["BookingStatusLog"]] = relationship(
         "BookingStatusLog", back_populates="booking"
     )
-    review: Mapped["Review"] = relationship(
-        "Review", back_populates="booking", uselist=False
-    )
-    payment: Mapped["Payment"] = relationship(
-        "Payment", back_populates="booking", uselist=False
-    )
+    review: Mapped["Review"] = relationship("Review", back_populates="booking", uselist=False)
+    payment: Mapped["Payment"] = relationship("Payment", back_populates="booking", uselist=False)

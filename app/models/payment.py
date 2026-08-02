@@ -36,9 +36,7 @@ class Payment(Base):
         # The CAPTURED record is the authoritative one (check status field)
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     booking_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("bookings.id"), nullable=False
     )
@@ -51,9 +49,7 @@ class Payment(Base):
         Enum(PaymentRecordStatus), default=PaymentRecordStatus.CREATED
     )
     method: Mapped[PaymentRecordMethod | None] = mapped_column(Enum(PaymentRecordMethod))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     booking: Mapped["Booking"] = relationship("Booking", back_populates="payment")

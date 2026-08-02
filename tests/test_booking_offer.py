@@ -18,6 +18,7 @@ parse messages:
     410  the offer is over (claimed by someone else, cancelled, expired)
     404  no such booking
 """
+
 import uuid
 
 import pytest
@@ -34,8 +35,8 @@ from tests.factories.user_factory import UserFactory
 # Consumer's address: Indiranagar, Bengaluru. The provider fixtures sit at known
 # offsets from it so the distance assertions mean something.
 ADDRESS_POINT = "SRID=4326;POINT(77.6408 12.9784)"
-NEAR_POINT = "SRID=4326;POINT(77.6200 12.9700)"   # ~2.4 km away
-FAR_POINT = "SRID=4326;POINT(78.2000 12.9700)"    # ~60 km away
+NEAR_POINT = "SRID=4326;POINT(77.6200 12.9700)"  # ~2.4 km away
+FAR_POINT = "SRID=4326;POINT(78.2000 12.9700)"  # ~60 km away
 FULL_ADDRESS = "12 MG Road, Indiranagar"
 SERVICE_NAME = "Deep Cleaning"
 SERVICE_AMOUNT = 1499.0
@@ -47,8 +48,11 @@ async def _service(db):
     db.add(category)
     await db.flush()
     service = Service(
-        category_id=category.id, name=SERVICE_NAME,
-        base_price=SERVICE_AMOUNT, duration_minutes=90, is_active=True,
+        category_id=category.id,
+        name=SERVICE_NAME,
+        base_price=SERVICE_AMOUNT,
+        duration_minutes=90,
+        is_active=True,
     )
     db.add(service)
     await db.flush()
@@ -71,10 +75,15 @@ async def _provider(
     flips exactly one and leaves the rest valid.
     """
     user = await UserFactory.create(db, role="provider")
-    db.add(ProviderProfile(
-        user_id=user.id, kyc_status=kyc, is_online=online,
-        service_area_center=point, service_area_radius_km=radius_km,
-    ))
+    db.add(
+        ProviderProfile(
+            user_id=user.id,
+            kyc_status=kyc,
+            is_online=online,
+            service_area_center=point,
+            service_area_radius_km=radius_km,
+        )
+    )
     if subscribed:
         db.add(ProviderServiceModel(provider_id=user.id, service_id=service.id))
     await db.flush()
@@ -87,8 +96,10 @@ async def _open_booking(
     """A REQUESTED booking with a geolocated address — i.e. one that broadcast."""
     consumer = consumer or await UserFactory.create(db, role="consumer")
     address = Address(
-        user_id=consumer.id, label="home",
-        full_address=FULL_ADDRESS, location=ADDRESS_POINT,
+        user_id=consumer.id,
+        label="home",
+        full_address=FULL_ADDRESS,
+        location=ADDRESS_POINT,
     )
     db.add(address)
     await db.flush()
@@ -113,6 +124,7 @@ def _get(client, booking_id, user, auth_headers):
 
 
 # --- the happy path -----------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_eligible_provider_sees_the_card_fields(client, db_session, auth_headers):
@@ -149,7 +161,11 @@ async def test_offer_exposes_nothing_beyond_the_card(client, db_session, auth_he
 
     assert resp.status_code == 200, resp.text
     assert set(resp.json()) == {
-        "booking_id", "service_name", "service_amount", "full_address", "distance_km",
+        "booking_id",
+        "service_name",
+        "service_amount",
+        "full_address",
+        "distance_km",
     }
     assert "9182" not in resp.text
     for leaked in ("consumer_id", "doorstep_otp", "provider_payout", "platform_commission"):
@@ -178,10 +194,9 @@ async def test_two_open_bookings_do_not_cross_wire(client, db_session, auth_head
 # One test per clause of the eligibility rule. Each flips a single knob, so a
 # passing test proves that clause alone is what refuses.
 
+
 @pytest.mark.asyncio
-async def test_provider_outside_their_own_radius_is_refused(
-    client, db_session, auth_headers
-):
+async def test_provider_outside_their_own_radius_is_refused(client, db_session, auth_headers):
     service = await _service(db_session)
     provider = await _provider(db_session, service, point=FAR_POINT)
     _, _, booking = await _open_booking(db_session, service)
@@ -192,9 +207,7 @@ async def test_provider_outside_their_own_radius_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_radius_is_per_provider_not_a_global_constant(
-    client, db_session, auth_headers
-):
+async def test_radius_is_per_provider_not_a_global_constant(client, db_session, auth_headers):
     """The same distance is in range or out of it depending on the provider.
 
     The broadcast matches on each provider's own ``service_area_radius_km``, so a
@@ -211,9 +224,7 @@ async def test_radius_is_per_provider_not_a_global_constant(
 
 
 @pytest.mark.asyncio
-async def test_provider_not_subscribed_to_the_service_is_refused(
-    client, db_session, auth_headers
-):
+async def test_provider_not_subscribed_to_the_service_is_refused(client, db_session, auth_headers):
     service = await _service(db_session)
     provider = await _provider(db_session, service, subscribed=False)
     _, _, booking = await _open_booking(db_session, service)
@@ -300,10 +311,9 @@ async def test_refusal_does_not_reveal_whether_the_booking_was_taken(
 
 # --- 410: the offer is over ---------------------------------------------------
 
+
 @pytest.mark.asyncio
-async def test_claimed_by_another_provider_returns_410(
-    client, db_session, auth_headers
-):
+async def test_claimed_by_another_provider_returns_410(client, db_session, auth_headers):
     """The losing provider's card dismisses on this — it must not be a 403.
 
     403 would be indistinguishable from "you were never eligible", and the card
@@ -328,9 +338,7 @@ async def test_claimed_by_another_provider_returns_410(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [BookingStatus.CANCELLED, BookingStatus.EXPIRED])
-async def test_cancelled_or_expired_booking_returns_410(
-    client, db_session, auth_headers, status
-):
+async def test_cancelled_or_expired_booking_returns_410(client, db_session, auth_headers, status):
     """Expiry matters most: the card says "Accept within 2 minutes"."""
     service = await _service(db_session)
     provider = await _provider(db_session, service)
@@ -354,8 +362,12 @@ async def test_address_without_a_location_is_refused(client, db_session, auth_he
     db_session.add(address)
     await db_session.flush()
     booking = await BookingFactory.create(
-        db_session, consumer_id=consumer.id, provider_id=None,
-        service_id=service.id, address_id=address.id, status=BookingStatus.REQUESTED,
+        db_session,
+        consumer_id=consumer.id,
+        provider_id=None,
+        service_id=service.id,
+        address_id=address.id,
+        status=BookingStatus.REQUESTED,
     )
 
     resp = await _get(client, booking.id, provider, auth_headers)
@@ -364,6 +376,7 @@ async def test_address_without_a_location_is_refused(client, db_session, auth_he
 
 
 # --- 404 ----------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_unknown_booking_returns_404(client, db_session, auth_headers):
@@ -383,6 +396,7 @@ async def test_unknown_booking_returns_404(client, db_session, auth_headers):
 # async test transaction), so these drive it with a stubbed session instead. That
 # covers the logic; it does not cover the SQL, which the endpoint tests above do.
 
+
 def _fake_session(booking, address, service, recipients):
     """Stand-in for SyncSessionLocal: dispatches db.get by model class."""
     from unittest.mock import MagicMock
@@ -393,7 +407,9 @@ def _fake_session(booking, address, service, recipients):
 
     db = MagicMock()
     db.get.side_effect = lambda model, _id: {
-        BookingModel: booking, AddressModel: address, ServiceModel: service,
+        BookingModel: booking,
+        AddressModel: address,
+        ServiceModel: service,
     }.get(model)
     db.execute.return_value.scalars.return_value.all.return_value = recipients
     db.__enter__.return_value = db
@@ -407,9 +423,13 @@ def _run_broadcast(booking, address, service, recipients):
 
     from app.tasks import notification_tasks
 
-    with patch("app.database.SyncSessionLocal",
-               return_value=_fake_session(booking, address, service, recipients)), \
-         patch.object(notification_tasks, "send_push_notification") as push:
+    with (
+        patch(
+            "app.database.SyncSessionLocal",
+            return_value=_fake_session(booking, address, service, recipients),
+        ),
+        patch.object(notification_tasks, "send_push_notification") as push,
+    ):
         notification_tasks.send_booking_notification(
             booking_id=str(booking.id), event="new_request"
         )
@@ -426,8 +446,7 @@ def _stub(**attrs):
 
 
 def test_broadcast_push_names_the_service():
-    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(),
-                    service_id=uuid.uuid4())
+    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(), service_id=uuid.uuid4())
     sent = _run_broadcast(
         booking,
         _stub(location=ADDRESS_POINT, full_address=FULL_ADDRESS),
@@ -448,8 +467,7 @@ def test_broadcast_push_leaks_neither_address_nor_amount():
     out too — rendering it here would need a ₹ formatter this branch does not
     have (see build_new_request_body).
     """
-    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(),
-                    service_id=uuid.uuid4())
+    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(), service_id=uuid.uuid4())
     sent = _run_broadcast(
         booking,
         _stub(location=ADDRESS_POINT, full_address=FULL_ADDRESS),
@@ -467,8 +485,7 @@ def test_broadcast_push_leaks_neither_address_nor_amount():
 
 def test_broadcast_push_falls_back_when_the_service_is_missing():
     """Unreachable via the FK today, but a literal "{service}" would be worse."""
-    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(),
-                    service_id=uuid.uuid4())
+    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(), service_id=uuid.uuid4())
     sent = _run_broadcast(
         booking,
         _stub(location=ADDRESS_POINT, full_address=FULL_ADDRESS),
@@ -482,18 +499,23 @@ def test_broadcast_push_falls_back_when_the_service_is_missing():
 
 def test_broadcast_skips_providers_without_a_token():
     """No FCM token means nothing to send to — must not raise."""
-    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(),
-                    service_id=uuid.uuid4())
+    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(), service_id=uuid.uuid4())
     from unittest.mock import patch
 
     from app.tasks import notification_tasks
 
-    with patch("app.database.SyncSessionLocal", return_value=_fake_session(
-        booking,
-        _stub(location=ADDRESS_POINT, full_address=FULL_ADDRESS),
-        _stub(name=SERVICE_NAME),
-        [_stub(fcm_token=None), _stub(fcm_token="tok_2")],
-    )), patch.object(notification_tasks, "send_push_notification") as push:
+    with (
+        patch(
+            "app.database.SyncSessionLocal",
+            return_value=_fake_session(
+                booking,
+                _stub(location=ADDRESS_POINT, full_address=FULL_ADDRESS),
+                _stub(name=SERVICE_NAME),
+                [_stub(fcm_token=None), _stub(fcm_token="tok_2")],
+            ),
+        ),
+        patch.object(notification_tasks, "send_push_notification") as push,
+    ):
         notification_tasks.send_booking_notification(
             booking_id=str(booking.id), event="new_request"
         )
@@ -503,6 +525,7 @@ def test_broadcast_skips_providers_without_a_token():
 
 
 # --- the rule is shared, not copied -------------------------------------------
+
 
 def test_offer_and_broadcast_use_one_eligibility_definition():
     """Guards the invariant the whole design rests on.
@@ -518,13 +541,11 @@ def test_offer_and_broadcast_use_one_eligibility_definition():
     from app.tasks import notification_tasks
 
     source = inspect.getsource(notification_tasks)
-    assert "eligible_providers_stmt" in source, (
-        "the broadcast no longer calls the shared predicate"
-    )
+    assert "eligible_providers_stmt" in source, "the broadcast no longer calls the shared predicate"
     for reimplemented in ("ST_DWithin", "kyc_status ==", "is_online"):
-        assert reimplemented not in source, (
-            f"broadcast rebuilt {reimplemented!r} instead of using provider_matching"
-        )
+        assert (
+            reimplemented not in source
+        ), f"broadcast rebuilt {reimplemented!r} instead of using provider_matching"
 
     # Both consumers of the rule resolve to the same builder.
     assert provider_matching.eligible_provider_conditions.__module__ == (

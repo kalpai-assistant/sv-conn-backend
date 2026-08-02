@@ -6,6 +6,7 @@ When ``FCM_CREDENTIALS_PATH`` is unset the module logs each push instead of
 sending it, so the app runs without Firebase credentials outside production —
 see ``send_push_notification``.
 """
+
 import firebase_admin
 import structlog
 from firebase_admin import credentials, messaging

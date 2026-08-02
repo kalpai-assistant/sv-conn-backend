@@ -6,7 +6,7 @@ import { defineConfig } from "@playwright/test";
  * browser is booted. Full browser E2E is a follow-up.
  *
  * Required env vars at run time:
- *   STAGING_API_URL       — base URL, e.g. https://api.staging.serviceconnect.in
+ *   STAGING_API_URL       — base URL, e.g. https://api.staging.eazyserv.in
  *   E2E_TEST_PHONE        — a whitelisted phone (matches backend E2E_TEST_PHONES)
  *   E2E_TEST_OTP          — matches backend E2E_TEST_OTP
  */

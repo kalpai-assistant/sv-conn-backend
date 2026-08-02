@@ -15,6 +15,7 @@ TEST_DATABASE_URL = "postgresql+asyncpg://sc_user:sc_password@localhost:5432/sc_
 @pytest.fixture
 async def db_session():
     import app.models  # noqa: F401
+
     engine = create_async_engine(TEST_DATABASE_URL)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -62,7 +63,9 @@ async def client(db_session, redis_client):
 @pytest.fixture
 def auth_headers():
     """Generate JWT authorization headers for a given user_id and role."""
+
     def _make(user_id: str, role: str = "consumer") -> dict:
         token = create_access_token({"sub": user_id, "role": role})
         return {"Authorization": f"Bearer {token}"}
+
     return _make

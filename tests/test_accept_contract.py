@@ -19,6 +19,7 @@ Returning 200 for a retry is only correct if the consumer is not told twice; the
 naive version of this fix fires "Booking Confirmed" again on every retry, which
 is worse than the error it replaces.
 """
+
 import asyncio
 import uuid
 
@@ -42,16 +43,23 @@ async def _booking(db, *, provider_id=None, status=BookingStatus.REQUESTED):
     db.add(category)
     await db.flush()
     service = Service(
-        category_id=category.id, name="Deep Cleaning",
-        base_price=1499.0, duration_minutes=90, is_active=True,
+        category_id=category.id,
+        name="Deep Cleaning",
+        base_price=1499.0,
+        duration_minutes=90,
+        is_active=True,
     )
     db.add(service)
     address = Address(user_id=consumer.id, label="home", full_address="12 MG Road")
     db.add(address)
     await db.flush()
     booking = await BookingFactory.create(
-        db, consumer_id=consumer.id, provider_id=provider_id,
-        service_id=service.id, address_id=address.id, status=status,
+        db,
+        consumer_id=consumer.id,
+        provider_id=provider_id,
+        service_id=service.id,
+        address_id=address.id,
+        status=status,
     )
     return consumer, booking
 
@@ -64,6 +72,7 @@ def _accept(client, booking_id, user, auth_headers):
 
 
 # --- 403: someone else got there first ----------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_second_provider_gets_403_not_409(client, db_session, auth_headers):
@@ -91,9 +100,7 @@ async def test_second_provider_gets_403_not_409(client, db_session, auth_headers
 
 
 @pytest.mark.asyncio
-async def test_losing_does_not_touch_the_winner_or_the_booking(
-    client, db_session, auth_headers
-):
+async def test_losing_does_not_touch_the_winner_or_the_booking(client, db_session, auth_headers):
     winner = await UserFactory.create(db_session, role="provider")
     loser = await UserFactory.create(db_session, role="provider")
     _, booking = await _booking(db_session)
@@ -106,14 +113,13 @@ async def test_losing_does_not_touch_the_winner_or_the_booking(
     assert booking.status is BookingStatus.ACCEPTED
 
     # And the loser has not acquired it in their own list.
-    listing = await client.get(
-        "/api/v1/bookings/", headers=auth_headers(str(loser.id), "provider")
-    )
+    listing = await client.get("/api/v1/bookings/", headers=auth_headers(str(loser.id), "provider"))
     assert listing.status_code == 200
     assert str(booking.id) not in listing.text
 
 
 # --- 410: the booking is gone -------------------------------------------------
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("gone", [BookingStatus.CANCELLED, BookingStatus.EXPIRED])
@@ -142,9 +148,7 @@ async def test_cancelled_after_you_claimed_it_is_410_not_a_stale_200(
     cheerful 200 back — they would navigate into a job that no longer exists.
     """
     provider = await UserFactory.create(db_session, role="provider")
-    _, booking = await _booking(
-        db_session, provider_id=provider.id, status=BookingStatus.CANCELLED
-    )
+    _, booking = await _booking(db_session, provider_id=provider.id, status=BookingStatus.CANCELLED)
 
     resp = await _accept(client, booking.id, provider, auth_headers)
 
@@ -153,10 +157,9 @@ async def test_cancelled_after_you_claimed_it_is_410_not_a_stale_200(
 
 # --- 200: idempotent retry ----------------------------------------------------
 
+
 @pytest.mark.asyncio
-async def test_reaccepting_your_own_booking_is_idempotent(
-    client, db_session, auth_headers
-):
+async def test_reaccepting_your_own_booking_is_idempotent(client, db_session, auth_headers):
     """A retry after a lost response must not tell the winner they lost."""
     provider = await UserFactory.create(db_session, role="provider")
     _, booking = await _booking(db_session)
@@ -171,9 +174,7 @@ async def test_reaccepting_your_own_booking_is_idempotent(
 
 
 @pytest.mark.asyncio
-async def test_reaccept_does_not_notify_the_consumer_again(
-    client, db_session, auth_headers
-):
+async def test_reaccept_does_not_notify_the_consumer_again(client, db_session, auth_headers):
     """The reason idempotency is not just `return booking`.
 
     The router notifies the consumer after a successful accept. If a retry counts
@@ -190,24 +191,20 @@ async def test_reaccept_does_not_notify_the_consumer_again(
         assert push.delay.call_count == 1, "the real accept should notify"
 
         await _accept(client, booking.id, provider, auth_headers)
-        assert push.delay.call_count == 1, (
-            "the idempotent retry notified the consumer a second time"
-        )
+        assert (
+            push.delay.call_count == 1
+        ), "the idempotent retry notified the consumer a second time"
 
 
 @pytest.mark.asyncio
-async def test_reaccepting_after_moving_past_accept_is_still_409(
-    client, db_session, auth_headers
-):
+async def test_reaccepting_after_moving_past_accept_is_still_409(client, db_session, auth_headers):
     """Idempotency is scoped to ACCEPTED — not a licence to rewind the machine.
 
     A provider already en route who calls accept is making a genuinely illegal
     move, not retrying. That stays a transition error.
     """
     provider = await UserFactory.create(db_session, role="provider")
-    _, booking = await _booking(
-        db_session, provider_id=provider.id, status=BookingStatus.EN_ROUTE
-    )
+    _, booking = await _booking(db_session, provider_id=provider.id, status=BookingStatus.EN_ROUTE)
 
     resp = await _accept(client, booking.id, provider, auth_headers)
 
@@ -216,15 +213,12 @@ async def test_reaccepting_after_moving_past_accept_is_still_409(
 
 # --- everything else must be unchanged ----------------------------------------
 
+
 @pytest.mark.asyncio
-async def test_other_invalid_transitions_still_return_409(
-    client, db_session, auth_headers
-):
+async def test_other_invalid_transitions_still_return_409(client, db_session, auth_headers):
     """The fix must not blanket-convert transition errors into 403/410."""
     provider = await UserFactory.create(db_session, role="provider")
-    _, booking = await _booking(
-        db_session, provider_id=provider.id, status=BookingStatus.ACCEPTED
-    )
+    _, booking = await _booking(db_session, provider_id=provider.id, status=BookingStatus.ACCEPTED)
 
     # accepted → in_progress skips en_route, and is illegal regardless of OTP.
     resp = await client.patch(
@@ -246,6 +240,7 @@ async def test_unknown_booking_returns_404(client, db_session, auth_headers):
 
 
 # --- the race, for real -------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_two_providers_racing_produce_exactly_one_winner(db_session):
@@ -318,9 +313,9 @@ async def test_two_providers_racing_produce_exactly_one_winner(db_session):
         assert len(winners) == 1, f"expected exactly one winner, got {results}"
         assert len(losers) == 1, f"expected exactly one loser, got {results}"
         # The loser is told they lost a race — not handed a state-machine error.
-        assert losers[0].status_code == 403, (
-            f"loser got {losers[0].status_code}: {losers[0].message}"
-        )
+        assert (
+            losers[0].status_code == 403
+        ), f"loser got {losers[0].status_code}: {losers[0].message}"
 
         async with sessions() as check:
             from app.models.booking import Booking
@@ -341,8 +336,6 @@ async def test_two_providers_racing_produce_exactly_one_winner(db_session):
                     text("DELETE FROM booking_status_logs WHERE booking_id = :b"),
                     {"b": str(ids["booking"])},
                 )
-                await cleanup.execute(
-                    delete(Booking).where(Booking.id == ids["booking"])
-                )
+                await cleanup.execute(delete(Booking).where(Booking.id == ids["booking"]))
                 await cleanup.commit()
         await engine.dispose()

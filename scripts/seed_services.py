@@ -4,6 +4,7 @@ Run AFTER seed_categories.py:
     python scripts/seed_categories.py
     python scripts/seed_services.py
 """
+
 import asyncio
 import json
 import os

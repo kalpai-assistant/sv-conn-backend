@@ -3,6 +3,7 @@ Booking integration tests.
 Covers: create booking (commission split), state-machine transitions,
 invalid transitions, doorstep OTP verification, single booking fetch.
 """
+
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -36,13 +37,17 @@ async def _create_booking_with_deps(db_session, consumer, provider, **kwargs):
     db_session.add(address)
     await db_session.flush()
 
-    return service, address, await BookingFactory.create(
-        db_session,
-        consumer_id=consumer.id,
-        provider_id=provider.id,
-        service_id=service.id,
-        address_id=address.id,
-        **kwargs,
+    return (
+        service,
+        address,
+        await BookingFactory.create(
+            db_session,
+            consumer_id=consumer.id,
+            provider_id=provider.id,
+            service_id=service.id,
+            address_id=address.id,
+            **kwargs,
+        ),
     )
 
 
@@ -90,7 +95,7 @@ async def test_create_booking_success(client, auth_headers, db_session):
     assert data["status"] == "requested"
     assert data["service_amount"] == 100.0
     assert data["platform_commission"] == 20.0  # 20% of 100
-    assert data["provider_payout"] == 80.0       # 80% of 100
+    assert data["provider_payout"] == 80.0  # 80% of 100
 
 
 @pytest.mark.asyncio
@@ -99,7 +104,10 @@ async def test_invalid_state_transition(client, auth_headers, db_session):
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     _, _, booking = await _create_booking_with_deps(
-        db_session, consumer, provider, status=BookingStatus.REQUESTED,
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.REQUESTED,
     )
 
     response = await client.patch(
@@ -118,7 +126,10 @@ async def test_accept_booking_wrong_provider(client, auth_headers, db_session):
     correct_provider = await UserFactory.create(db_session, role="provider")
     wrong_provider = await UserFactory.create(db_session, role="provider")
     _, _, booking = await _create_booking_with_deps(
-        db_session, consumer, correct_provider, status=BookingStatus.REQUESTED,
+        db_session,
+        consumer,
+        correct_provider,
+        status=BookingStatus.REQUESTED,
     )
 
     response = await client.patch(
@@ -135,8 +146,11 @@ async def test_start_booking_wrong_otp(client, auth_headers, db_session):
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     _, _, booking = await _create_booking_with_deps(
-        db_session, consumer, provider,
-        status=BookingStatus.EN_ROUTE, doorstep_otp="1234",
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.EN_ROUTE,
+        doorstep_otp="1234",
     )
 
     response = await client.patch(
@@ -159,7 +173,10 @@ async def test_en_route_transition(client, auth_headers, db_session):
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     _, _, booking = await _create_booking_with_deps(
-        db_session, consumer, provider, status=BookingStatus.ACCEPTED,
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.ACCEPTED,
     )
 
     response = await client.patch(
@@ -191,13 +208,17 @@ async def test_complete_cash_booking_triggers_payment_task(client, auth_headers,
     await db_session.flush()
 
     _, _, booking = await _create_booking_with_deps(
-        db_session, consumer, provider,
+        db_session,
+        consumer,
+        provider,
         status=BookingStatus.IN_PROGRESS,
         payment_method=PaymentMethod.CASH,
     )
 
-    with patch("app.routers.bookings.send_booking_notification") as mock_notif, \
-         patch("app.routers.bookings.process_cash_payment") as mock_payment:
+    with (
+        patch("app.routers.bookings.send_booking_notification") as mock_notif,
+        patch("app.routers.bookings.process_cash_payment") as mock_payment,
+    ):
         mock_notif.delay = lambda **kwargs: None
 
         response = await client.patch(

@@ -158,9 +158,7 @@ async def subscribe_to_service(
     current_user: User = Depends(require_role("provider")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ProviderService(db).subscribe_to_service(
-        current_user.id, request.service_id
-    )
+    return await ProviderService(db).subscribe_to_service(current_user.id, request.service_id)
 
 
 @router.delete(

@@ -39,6 +39,9 @@ dev = [
     # Ruff does both linting AND formatting. One tool replaces flake8 + black
     # + isort + pyupgrade, and it's ~100× faster.
     "ruff>=0.8,<0.9",
+    # SVC-157: validates live response bodies against the OpenAPI schema
+    # declared on each route. Only used in tests/test_api_contracts.py.
+    "jsonschema>=4.23,<5.0",
 ]
 
 [tool.pytest.ini_options]

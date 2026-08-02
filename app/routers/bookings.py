@@ -56,8 +56,10 @@ async def create_booking(
     responses={
         403: {"description": "Another provider claimed this booking first"},
         404: {"description": "No such booking"},
-        410: {"description": "The booking is no longer available — cancelled or "
-                             "expired. Dismiss the card."},
+        410: {
+            "description": "The booking is no longer available — cancelled or "
+            "expired. Dismiss the card."
+        },
     },
 )
 async def accept_booking(
@@ -172,8 +174,10 @@ async def list_bookings(
     responses={
         403: {"description": "You were not offered this booking"},
         404: {"description": "No such booking"},
-        410: {"description": "The offer is over — claimed by another provider, "
-                             "cancelled, or expired. Dismiss the card."},
+        410: {
+            "description": "The offer is over — claimed by another provider, "
+            "cancelled, or expired. Dismiss the card."
+        },
     },
 )
 async def get_booking_offer(
@@ -191,9 +195,7 @@ async def get_booking_offer(
     card keys off the status code, not the message. Role is not gated here: the
     eligibility check subsumes it, since only a matching provider can pass it.
     """
-    return await BookingService(db).get_offer(
-        booking_id=booking_id, provider_id=current_user.id
-    )
+    return await BookingService(db).get_offer(booking_id=booking_id, provider_id=current_user.id)
 
 
 @router.get("/{booking_id}", response_model=BookingResponse)

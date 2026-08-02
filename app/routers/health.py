@@ -14,6 +14,7 @@ Two endpoints, deliberately separate:
 Each dependency check has a tight timeout so a hung DB can't hang the
 probe itself.
 """
+
 import asyncio
 import logging
 from datetime import UTC, datetime

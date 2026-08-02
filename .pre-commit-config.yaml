@@ -35,12 +35,12 @@ repos:
       - id: check-merge-conflict     # blocks accidentally-committed conflict markers
       - id: detect-private-key       # SSH / GPG / PEM headers
 
-  # Ruff — matches what CI runs. Lints AND fixes in one pass; the format
-  # hook is intentionally disabled here until the format-only follow-up
-  # PR lands (would fight in-flight branches otherwise).
+  # Ruff — matches what CI runs. Lints AND fixes AND formats in one pass.
+  # Format-check enforcement lives in CI (ruff format --check); this hook
+  # auto-applies the same formatter locally so no PR ever fails on format.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.8.6
     hooks:
       - id: ruff
         args: [--fix]
-      # - id: ruff-format          # enable in the format-only follow-up
+      - id: ruff-format

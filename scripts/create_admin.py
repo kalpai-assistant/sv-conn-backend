@@ -2,6 +2,7 @@
 Create a super admin user.
 Run: python scripts/create_admin.py +91XXXXXXXXXX
 """
+
 import asyncio
 import os
 import sys

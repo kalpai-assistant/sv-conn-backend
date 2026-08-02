@@ -1,6 +1,6 @@
 # Database Backups & Restore Runbook (SC-34)
 
-Operational procedure for the ServiceConnect production database. Applies once
+Operational procedure for the Eazyserv production database. Applies once
 the AWS RDS PostgreSQL instance is provisioned (SC-44). Written to be
 followed by anyone with AWS console access — no institutional knowledge
 required.
@@ -90,17 +90,17 @@ Retain 3 months. Automation post-beta via EventBridge → Lambda.
 ```bash
 # 1. Take a manual snapshot in Mumbai
 aws rds create-db-snapshot \
-  --db-instance-identifier serviceconnect-prod \
-  --db-snapshot-identifier serviceconnect-monthly-$(date +%Y-%m-%d)
+  --db-instance-identifier eazyserv-prod \
+  --db-snapshot-identifier eazyserv-monthly-$(date +%Y-%m-%d)
 
 # 2. Wait until it's available (check state = "available")
 aws rds describe-db-snapshots \
-  --db-snapshot-identifier serviceconnect-monthly-$(date +%Y-%m-%d)
+  --db-snapshot-identifier eazyserv-monthly-$(date +%Y-%m-%d)
 
 # 3. Copy to Singapore
 aws rds copy-db-snapshot \
-  --source-db-snapshot-identifier arn:aws:rds:ap-south-1:<account>:snapshot:serviceconnect-monthly-$(date +%Y-%m-%d) \
-  --target-db-snapshot-identifier serviceconnect-monthly-$(date +%Y-%m-%d) \
+  --source-db-snapshot-identifier arn:aws:rds:ap-south-1:<account>:snapshot:eazyserv-monthly-$(date +%Y-%m-%d) \
+  --target-db-snapshot-identifier eazyserv-monthly-$(date +%Y-%m-%d) \
   --source-region ap-south-1 \
   --region ap-southeast-1 \
   --kms-key-id alias/aws/rds
@@ -122,8 +122,8 @@ working database. A backup that hasn't been restore-tested is not a backup.
 
 ```bash
 # Configuration
-SOURCE_INSTANCE=serviceconnect-prod
-DRILL_INSTANCE=serviceconnect-restore-drill-$(date +%Y-%m-%d)
+SOURCE_INSTANCE=eazyserv-prod
+DRILL_INSTANCE=eazyserv-restore-drill-$(date +%Y-%m-%d)
 ```
 
 **1. Pick a snapshot** (either the most recent automated backup or a
@@ -146,7 +146,7 @@ aws rds restore-db-instance-from-db-snapshot \
   --db-snapshot-identifier <snapshot-id-from-step-1> \
   --db-instance-class db.t4g.small \
   --no-publicly-accessible \
-  --db-subnet-group-name serviceconnect-private-subnets \
+  --db-subnet-group-name eazyserv-private-subnets \
   --vpc-security-group-ids <sg-id>
 ```
 
@@ -231,7 +231,7 @@ Rehearse this. Do NOT do it for the first time under pressure.
 ### Step 2 — restore to a NEW instance
 
 Same command as [step 2 of the drill](#procedure) but into a name like
-`serviceconnect-restore-<incident-id>`. Never restore in place.
+`eazyserv-restore-<incident-id>`. Never restore in place.
 
 ### Step 3 — verify (steps 4a–4f above), then cutover
 
@@ -250,8 +250,8 @@ so future ops muscle memory works:
 
 ```bash
 aws rds modify-db-instance \
-  --db-instance-identifier serviceconnect-restore-<incident-id> \
-  --new-db-instance-identifier serviceconnect-prod \
+  --db-instance-identifier eazyserv-restore-<incident-id> \
+  --new-db-instance-identifier eazyserv-prod \
   --apply-immediately
 ```
 

@@ -2,6 +2,7 @@
 Provider service-subscription integration tests (SVC-23).
 Covers POST /providers/me/services and DELETE /providers/me/services/{id}.
 """
+
 from uuid import uuid4
 
 import pytest
@@ -186,10 +187,12 @@ async def test_list_my_services_returns_subscriptions(client, auth_headers, db_s
     user, _ = await _seed_provider(db_session, kyc_status=KYCStatus.VERIFIED)
     s1 = await _seed_service(db_session)
     s2 = await _seed_service(db_session)
-    db_session.add_all([
-        ProviderServiceModel(provider_id=user.id, service_id=s1.id),
-        ProviderServiceModel(provider_id=user.id, service_id=s2.id),
-    ])
+    db_session.add_all(
+        [
+            ProviderServiceModel(provider_id=user.id, service_id=s1.id),
+            ProviderServiceModel(provider_id=user.id, service_id=s2.id),
+        ]
+    )
     await db_session.flush()
 
     response = await client.get(
@@ -229,10 +232,12 @@ async def test_list_my_services_isolated_per_provider(client, auth_headers, db_s
 
     a_service = await _seed_service(db_session)
     b_service = await _seed_service(db_session)
-    db_session.add_all([
-        ProviderServiceModel(provider_id=provider_a.id, service_id=a_service.id),
-        ProviderServiceModel(provider_id=provider_b.id, service_id=b_service.id),
-    ])
+    db_session.add_all(
+        [
+            ProviderServiceModel(provider_id=provider_a.id, service_id=a_service.id),
+            ProviderServiceModel(provider_id=provider_b.id, service_id=b_service.id),
+        ]
+    )
     await db_session.flush()
 
     response = await client.get(

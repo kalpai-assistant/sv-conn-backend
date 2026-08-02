@@ -2,6 +2,7 @@
 Payment integration tests.
 Covers: signature verification pass/fail, webhook idempotency.
 """
+
 import hashlib
 import hmac
 import json
@@ -66,7 +67,9 @@ async def test_verify_payment_invalid_signature(client, auth_headers, db_session
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     await _create_booking_with_deps(
-        db_session, consumer, provider,
+        db_session,
+        consumer,
+        provider,
         status=BookingStatus.COMPLETED,
         razorpay_order_id="order_test_123",
     )
@@ -96,24 +99,26 @@ async def test_webhook_payment_captured_idempotent(client, db_session):
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     booking = await _create_booking_with_deps(
-        db_session, consumer, provider,
+        db_session,
+        consumer,
+        provider,
         status=BookingStatus.COMPLETED,
         payment_status=PaymentStatus.PAID,
         razorpay_order_id="order_already_paid",
     )
 
-    payment_count_before = (await db_session.execute(
-        select(func.count()).select_from(Payment).where(Payment.booking_id == booking.id)
-    )).scalar_one()
+    payment_count_before = (
+        await db_session.execute(
+            select(func.count()).select_from(Payment).where(Payment.booking_id == booking.id)
+        )
+    ).scalar_one()
 
-    webhook_body = json.dumps({
-        "event": "payment.captured",
-        "payload": {
-            "payment": {
-                "entity": {"order_id": "order_already_paid"}
-            }
-        },
-    })
+    webhook_body = json.dumps(
+        {
+            "event": "payment.captured",
+            "payload": {"payment": {"entity": {"order_id": "order_already_paid"}}},
+        }
+    )
 
     with patch.object(settings, "RAZORPAY_WEBHOOK_SECRET", ""):
         response = await client.post(
@@ -127,7 +132,9 @@ async def test_webhook_payment_captured_idempotent(client, db_session):
     await db_session.refresh(booking)
     assert booking.payment_status == PaymentStatus.PAID
 
-    payment_count_after = (await db_session.execute(
-        select(func.count()).select_from(Payment).where(Payment.booking_id == booking.id)
-    )).scalar_one()
+    payment_count_after = (
+        await db_session.execute(
+            select(func.count()).select_from(Payment).where(Payment.booking_id == booking.id)
+        )
+    ).scalar_one()
     assert payment_count_after == payment_count_before

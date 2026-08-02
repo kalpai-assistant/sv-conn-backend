@@ -1,7 +1,7 @@
 # Infrastructure Runbook — Staging + Production (SVC-44)
 
 How to provision, configure, and cut over the two AWS environments that the
-ServiceConnect backend runs on. Companion to [BACKUPS.md](BACKUPS.md) (which
+Eazyserv backend runs on. Companion to [BACKUPS.md](BACKUPS.md) (which
 covers RDS backups + restore drill) and [ADMIN.md](ADMIN.md) (which covers
 the admin IP allowlist).
 
@@ -37,8 +37,8 @@ or credentials.
 │  └─────────────────────────────────┘   └───────────────────────────────┘  │
 │                                                                            │
 │  Route 53:                                                                 │
-│    api.staging.serviceconnect.in    →    staging ALB                       │
-│    api.serviceconnect.in            →    prod ALB                          │
+│    api.staging.eazyserv.com    →    staging ALB                       │
+│    api.eazyserv.com            →    prod ALB                          │
 │                                                                            │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -127,7 +127,7 @@ only path.
 - Backup window: 21:30–22:30 UTC (03:00 IST off-peak)
 - KMS encryption: default AWS-managed key
 - Master user: `sc_admin`
-- DB name: `serviceconnect_staging`
+- DB name: `eazyserv_staging`
 - Security group: `sc-staging-db-sg`
 - Subnet group: private subnets only
 - Publicly accessible: **no**
@@ -139,7 +139,7 @@ only path.
   - Multi-AZ: **yes**
   - Enhanced monitoring: 60s granularity
   - Performance Insights: enabled (7-day retention)
-  - DB name: `serviceconnect_prod`
+  - DB name: `eazyserv_prod`
 
 **After provisioning — enable PostGIS:**
 
@@ -219,10 +219,10 @@ Separate task definition for the Celery worker (same image, different command:
 
 ### 8. Route 53
 
-- Hosted zone: `serviceconnect.in`
+- Hosted zone: `eazyserv.com`
 - A/ALIAS records:
-  - `api.staging.serviceconnect.in` → staging ALB
-  - `api.serviceconnect.in` → prod ALB
+  - `api.staging.eazyserv.com` → staging ALB
+  - `api.eazyserv.com` → prod ALB
 - Health check on each ALB → SNS alert to ops on failure
 
 ### 9. Secrets in SSM Parameter Store
@@ -330,11 +330,11 @@ Copy this into a doc when you actually run it, tick as you go.
 - [ ] S3 bucket `sc-staging-kyc` with block-public-access
 - [ ] ECR repo `sc-backend` created
 - [ ] Fargate cluster `sc-staging` + task definitions
-- [ ] ALB with ACM cert for `api.staging.serviceconnect.in`
+- [ ] ALB with ACM cert for `api.staging.eazyserv.com`
 - [ ] Route 53 A record
 - [ ] SSM parameters at `/sc/staging/*`
 - [ ] Fargate service deployed, health check green
-- [ ] `curl https://api.staging.serviceconnect.in/health` returns 200
+- [ ] `curl https://api.staging.eazyserv.com/health` returns 200
 - [ ] `POST /api/v1/auth/send-otp` from a test phone reaches SMS provider
 
 ### Production

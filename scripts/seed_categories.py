@@ -2,6 +2,7 @@
 Seed initial categories with default icons and sort order.
 Run: python scripts/seed_categories.py
 """
+
 import asyncio
 import os
 import sys
@@ -28,9 +29,7 @@ INITIAL_CATEGORIES = [
 async def seed():
     async with AsyncSessionLocal() as db:
         for cat_data in INITIAL_CATEGORIES:
-            existing = await db.execute(
-                select(Category).where(Category.slug == cat_data["slug"])
-            )
+            existing = await db.execute(select(Category).where(Category.slug == cat_data["slug"]))
             if not existing.scalar_one_or_none():
                 db.add(Category(**cat_data))
                 print(f"  + Created category: {cat_data['name']}")

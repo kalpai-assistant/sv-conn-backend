@@ -6,6 +6,7 @@ updated contract:
 
     uv run python scripts/export_openapi.py
 """
+
 import json
 from pathlib import Path
 
@@ -17,9 +18,7 @@ OUTPUT_PATH = Path(__file__).resolve().parent.parent / "svc_connect.json"
 def main() -> None:
     app = create_app()
     spec = app.openapi()
-    OUTPUT_PATH.write_text(
-        json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    OUTPUT_PATH.write_text(json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"Wrote {OUTPUT_PATH.name}: {len(spec['paths'])} paths")
 
 

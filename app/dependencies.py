@@ -1,6 +1,7 @@
 """
 FastAPI shared dependencies: DB session, Redis, current user resolution, RBAC.
 """
+
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, WebSocket, status
@@ -74,6 +75,7 @@ def require_role(*roles: str):
     Usage:
         @router.get("/admin/...", dependencies=[Depends(require_role("admin"))])
     """
+
     async def checker(user: User = Depends(get_current_user)) -> User:
         if user.role.value not in roles:
             raise HTTPException(

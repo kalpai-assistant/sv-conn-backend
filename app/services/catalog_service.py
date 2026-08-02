@@ -1,6 +1,7 @@
 """
 Catalog service: admin-managed global service catalog.
 """
+
 import uuid
 
 from sqlalchemy import select
@@ -23,9 +24,7 @@ class CatalogService:
 
     async def list_categories(self) -> list[Category]:
         result = await self.db.execute(
-            select(Category)
-            .where(Category.is_active.is_(True))
-            .order_by(Category.sort_order)
+            select(Category).where(Category.is_active.is_(True)).order_by(Category.sort_order)
         )
         return list(result.scalars().all())
 

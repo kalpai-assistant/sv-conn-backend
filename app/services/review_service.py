@@ -2,6 +2,7 @@
 Review service: create reviews and list provider reviews.
 Updates provider average rating after each new review.
 """
+
 import uuid
 
 from sqlalchemy import func, select
@@ -44,9 +45,7 @@ class ReviewService:
             raise UnauthorizedAction("Booking must be completed before reviewing")
 
         # Check for existing review (avoid hitting DB constraint)
-        existing = await self.db.execute(
-            select(Review).where(Review.booking_id == booking_id)
-        )
+        existing = await self.db.execute(select(Review).where(Review.booking_id == booking_id))
         if existing.scalar_one_or_none():
             raise DuplicateReview()
 
@@ -75,15 +74,11 @@ class ReviewService:
         base_where = Review.reviewee_id == provider_user_id
 
         count = (
-            await self.db.execute(
-                select(func.count()).select_from(Review).where(base_where)
-            )
+            await self.db.execute(select(func.count()).select_from(Review).where(base_where))
         ).scalar_one()
 
         avg = (
-            await self.db.execute(
-                select(func.avg(Review.rating)).where(base_where)
-            )
+            await self.db.execute(select(func.avg(Review.rating)).where(base_where))
         ).scalar_one() or 0.0
 
         stmt = (

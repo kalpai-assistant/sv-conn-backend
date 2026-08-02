@@ -63,7 +63,7 @@ async def test_cors_allows_configured_origin(monkeypatch):
     monkeypatch.setattr(
         main_mod.settings,
         "CORS_ALLOWED_ORIGINS",
-        "https://app.serviceconnect.in,capacitor://localhost",
+        "https://app.eazyserv.com,capacitor://localhost",
     )
 
     app = create_app()
@@ -71,12 +71,12 @@ async def test_cors_allows_configured_origin(monkeypatch):
         r = await ac.options(
             "/health",
             headers={
-                "Origin": "https://app.serviceconnect.in",
+                "Origin": "https://app.eazyserv.com",
                 "Access-Control-Request-Method": "GET",
             },
         )
 
-    assert r.headers.get("access-control-allow-origin") == "https://app.serviceconnect.in"
+    assert r.headers.get("access-control-allow-origin") == "https://app.eazyserv.com"
 
 
 @pytest.mark.asyncio
@@ -87,7 +87,7 @@ async def test_cors_rejects_unlisted_origin(monkeypatch):
     monkeypatch.setattr(
         main_mod.settings,
         "CORS_ALLOWED_ORIGINS",
-        "https://app.serviceconnect.in",
+        "https://app.eazyserv.com",
     )
 
     app = create_app()
