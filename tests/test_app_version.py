@@ -87,7 +87,7 @@ async def test_latest_returns_503_when_seed_rows_missing(app, db_session):
     r = await _get(app)
 
     assert r.status_code == 503, r.text
-    assert "missing" in r.json()["message"].lower()
+    assert "missing" in r.json()["detail"].lower()
 
 
 @pytest.mark.asyncio

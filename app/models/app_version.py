@@ -39,8 +39,14 @@ class AppVersion(Base):
 
     # unique=True enforces one row per platform. Simpler than a composite key
     # and matches the query pattern (always "give me the row for X platform").
+    # values_callable: without this, SQLAlchemy writes the Python enum *name*
+    # ("ANDROID") but the Postgres enum type is created from the migration
+    # with lowercase *values* ("android"). The two must agree.
     platform: Mapped[AppPlatform] = mapped_column(
-        Enum(AppPlatform), unique=True, nullable=False, index=True
+        Enum(AppPlatform, name="appplatform", values_callable=lambda e: [m.value for m in e]),
+        unique=True,
+        nullable=False,
+        index=True,
     )
 
     # SemVer strings — comparison is done in-app via the `semver` npm package
