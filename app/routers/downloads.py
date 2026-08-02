@@ -1,25 +1,25 @@
-"""Public download-flow endpoints (SVC-161).
+"""Public download-flow endpoints (SVC-161, SVC-162).
 
-Backs the `/download` page on the web.
+Backs the `/download` page on the web + the in-app version-check hook.
 
 - ``POST /downloads/sms-link`` — visitor enters their phone on desktop,
-  we SMS them a link to open the download page on their phone.
+  we SMS them a link to open the download page on their phone (SVC-161).
+- ``GET  /downloads/latest.json`` — installed app polls this on cold
+  start + foreground; compares to installed version, nudges or hard-
+  blocks per platform. See SVC-162.
 
-Public (no auth), IP-rate-limited to prevent SMS abuse. Reuses the same
-MSG91 client that sends OTPs.
-
-**The SMS endpoint is behind a feature flag** (`SMS_DOWNLOAD_LINK_ENABLED`)
-because sending a URL through MSG91's OTP template produces user-visible
-copy like "Your Eazyserv OTP is https://…" — misleading. Turn on ONLY
-after a dedicated MSG91 template is approved (submit form → 1-3 business
-days). While off, the endpoint returns 501 and the frontend falls back to
-QR-code-only on desktop.
+Public (no auth). SMS endpoint IP-rate-limited to prevent SMS abuse.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.database import get_db
+from app.models.app_version import AppPlatform, AppVersion
+from app.schemas.downloads import LatestVersionResponse, PlatformVersion
 from app.utils.rate_limiter import ip_rate_limit
 from app.utils.sms_client import get_sms_client
 
@@ -71,3 +71,45 @@ async def send_download_link_sms(payload: SmsLinkRequest) -> None:
     # abuse the OTP slot. For now, the flag prevents this from being
     # reached in prod.
     await sms.send_otp(payload.phone, _DOWNLOAD_URL)
+
+
+# ---------------------------------------------------------------------------
+# SVC-162: in-app version check
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/latest.json",
+    response_model=LatestVersionResponse,
+    responses={503: {"description": "Version data not seeded — Alembic migration missing?"}},
+)
+async def get_latest_version(
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> LatestVersionResponse:
+    """Return the latest + minimum-supported version for each platform.
+
+    Hit on every app cold start + foreground event. Cached at the CDN edge
+    for 5 minutes so a burst of foregrounds after a network blip doesn't
+    hammer the DB. Long enough to spare load; short enough that flipping
+    ``min_supported_version`` during an incident propagates in minutes,
+    not hours.
+
+    503 rather than an empty response if seed rows are missing — that's a
+    deployment bug (missing migration), and returning defaults would
+    silently mask it.
+    """
+    result = await db.execute(select(AppVersion))
+    rows = {row.platform: row for row in result.scalars().all()}
+
+    if AppPlatform.ANDROID not in rows or AppPlatform.PWA not in rows:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="App version metadata is missing. Alembic migration may not have run.",
+        )
+
+    response.headers["Cache-Control"] = "public, max-age=300"
+    return LatestVersionResponse(
+        android=PlatformVersion.model_validate(rows[AppPlatform.ANDROID]),
+        pwa=PlatformVersion.model_validate(rows[AppPlatform.PWA]),
+    )
