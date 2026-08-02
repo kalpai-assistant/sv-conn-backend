@@ -1,6 +1,6 @@
 # Secrets Hygiene & Rotation Runbook (SC-50)
 
-Operational procedure for every secret the ServiceConnect backend depends on.
+Operational procedure for every secret the Eazyserv backend depends on.
 Covers where each lives, how to rotate it, and what to do when one leaks.
 Companion to [INFRA.md](INFRA.md) (which established SSM Parameter Store as the
 backing store) and [ADMIN.md](ADMIN.md).
@@ -39,7 +39,7 @@ compromise or personnel change."
 - **SSM Parameter Store** at `/sc/staging/*` and `/sc/prod/*`, all as
   `SecureString` with the default account KMS key. Read by Fargate task IAM
   role at container start.
-- **1Password** (team vault: "ServiceConnect ops") for anything a human ever
+- **1Password** (team vault: "Eazyserv ops") for anything a human ever
   needs to see — AWS root creds, Razorpay dashboard login, MSG91 dashboard
   login, Sentry admin login.
 - **Developer laptops** in `.env` — dev keys only, never prod / staging.
@@ -148,11 +148,11 @@ aws rds modify-db-instance \
 
 # 3. Update SSM (both async + sync URLs — they share the password):
 aws ssm put-parameter --name /sc/prod/DATABASE_URL \
-  --value "postgresql+asyncpg://sc_user:$NEW_PW@sc-prod.xxxx.ap-south-1.rds.amazonaws.com:5432/serviceconnect" \
+  --value "postgresql+asyncpg://sc_user:$NEW_PW@sc-prod.xxxx.ap-south-1.rds.amazonaws.com:5432/eazyserv" \
   --type SecureString --overwrite --region ap-south-1
 
 aws ssm put-parameter --name /sc/prod/SYNC_DATABASE_URL \
-  --value "postgresql+psycopg2://sc_user:$NEW_PW@sc-prod.xxxx.ap-south-1.rds.amazonaws.com:5432/serviceconnect" \
+  --value "postgresql+psycopg2://sc_user:$NEW_PW@sc-prod.xxxx.ap-south-1.rds.amazonaws.com:5432/eazyserv" \
   --type SecureString --overwrite --region ap-south-1
 
 # 4. Force-deploy Fargate:
@@ -257,7 +257,7 @@ task definition, that's a bug — file a security ticket to swap for a role.
   socially, review each `put-parameter` on prod in #ops.
 - **Console logins:** all humans in the AWS account use SSO + MFA. Root
   account has hardware MFA and is used only for break-glass.
-- **1Password vault "ServiceConnect ops"** — membership matches the
+- **1Password vault "Eazyserv ops"** — membership matches the
   on-call rota. Remove departing engineers within 24 hours of last day.
 
 ---

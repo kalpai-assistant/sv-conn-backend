@@ -43,7 +43,7 @@ services:
     image: postgis/postgis:16-3.4
     platform: linux/amd64
     environment:
-      POSTGRES_DB: serviceconnect
+      POSTGRES_DB: eazyserv
       POSTGRES_USER: sc_user
       POSTGRES_PASSWORD: sc_password
     ports:
@@ -51,7 +51,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sc_user -d serviceconnect"]
+      test: ["CMD-SHELL", "pg_isready -U sc_user -d eazyserv"]
       interval: 10s
       timeout: 5s
       retries: 5
