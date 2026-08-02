@@ -1,4 +1,4 @@
-# Low-Level Design — ServiceConnect Backend
+# Low-Level Design — Eazyserv Backend
 
 **Tech Stack:** Python 3.11+ / FastAPI / SQLAlchemy 2.0 / PostgreSQL + PostGIS / Redis / Celery  
 **Document Version:** 1.0  
@@ -9,7 +9,7 @@
 ## 1. Project Structure
 
 ```
-serviceconnect/
+eazyserv/
 ├── alembic/                          # Database migrations
 │   ├── versions/
 │   └── env.py
@@ -114,7 +114,7 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     # App
-    APP_NAME: str = "ServiceConnect"
+    APP_NAME: str = "Eazyserv"
     DEBUG: bool = False
     API_V1_PREFIX: str = "/api/v1"
 
@@ -1228,7 +1228,7 @@ from app.config import get_settings
 settings = get_settings()
 
 celery_app = Celery(
-    "serviceconnect",
+    "eazyserv",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
 )
@@ -1523,7 +1523,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=[
             "http://localhost:3000",       # React dev
-            "https://app.serviceconnect.in",
+            "https://app.eazyserv.com",
         ],
         allow_credentials=True,
         allow_methods=["*"],
@@ -1600,7 +1600,7 @@ services:
   postgres:
     image: postgis/postgis:16-3.4
     environment:
-      POSTGRES_DB: serviceconnect
+      POSTGRES_DB: eazyserv
       POSTGRES_USER: sc_user
       POSTGRES_PASSWORD: sc_password
     ports:

@@ -38,7 +38,7 @@ class MSG91Client(AbstractSMSClient):
         params = {
             "authkey": settings.MSG91_AUTH_KEY,
             "mobile": phone.lstrip("+"),
-            "message": f"Your ServiceConnect OTP is {otp}. Valid for 10 minutes.",
+            "message": f"Your Eazyserv OTP is {otp}. Valid for 10 minutes.",
             "sender": "SVCCNT",
             "route": "4",
             "template_id": settings.MSG91_TEMPLATE_ID,
@@ -63,7 +63,7 @@ class TwilioClient(AbstractSMSClient):
         data = {
             "From": settings.TWILIO_PHONE_NUMBER,
             "To": phone,
-            "Body": f"Your ServiceConnect OTP is {otp}. Valid for 10 minutes.",
+            "Body": f"Your Eazyserv OTP is {otp}. Valid for 10 minutes.",
         }
         async with httpx.AsyncClient() as client:
             response = await client.post(

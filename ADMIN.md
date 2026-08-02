@@ -44,7 +44,7 @@ ADMIN_TRUST_FORWARDED_FOR=false
 3. Redeploy (or `kubectl rollout restart` / equivalent).
 4. Verify from the admin's machine:
    ```bash
-   curl -H "Authorization: Bearer <admin-jwt>" https://api.serviceconnect.in/api/v1/admin/providers/kyc/pending
+   curl -H "Authorization: Bearer <admin-jwt>" https://api.eazyserv.com/api/v1/admin/providers/kyc/pending
    ```
 
 **Don't add home IPs.** Home IPs churn (DHCP), so a next-day 403 wastes ops

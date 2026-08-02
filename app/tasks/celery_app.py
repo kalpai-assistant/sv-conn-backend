@@ -7,7 +7,7 @@ from app.logging_config import configure_logging
 settings = get_settings()
 
 celery_app = Celery(
-    "serviceconnect",
+    "eazyserv",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
 )

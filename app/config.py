@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # App
-    APP_NAME: str = "ServiceConnect"
+    APP_NAME: str = "Eazyserv"
     DEBUG: bool = False
     API_V1_PREFIX: str = "/api/v1"
 
@@ -43,6 +43,23 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_SECRET: str = ""
     RAZORPAY_WEBHOOK_SECRET: str = ""  # Set in Razorpay dashboard → Webhooks
     PLATFORM_COMMISSION_PERCENT: float = 20.0
+
+    # CORS (B4). Comma-separated origins the browser is allowed to send
+    # `Origin:` from. Default covers dev + Capacitor + prod web; staging
+    # / other envs should override via env var. `*` alone is DELIBERATELY
+    # NOT accepted — allow_credentials=True with a wildcard origin is a
+    # spec violation the browser will silently reject.
+    CORS_ALLOWED_ORIGINS: str = ",".join(
+        [
+            "http://localhost:3000",  # React dev server
+            "http://localhost:8080",  # Vite dev (alternate port)
+            "https://app.eazyserv.com",  # Production web
+            # Capacitor mobile app origins
+            "capacitor://localhost",  # iOS Capacitor WebView
+            "https://localhost",  # Android Capacitor WebView (androidScheme=https)
+            "http://localhost",  # Android Capacitor WebView (fallback)
+        ]
+    )
 
     # Admin IP allowlist (SVC-75) — comma-separated CIDRs. Empty = no restriction
     # (dev-safe default). Production MUST populate. See backend/ADMIN.md.

@@ -13,10 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.exceptions import (
     BookingNotFound,
+    BookingOfferClosed,
     InvalidOTP,
     InvalidStateTransition,
     UnauthorizedAction,
 )
+from app.models.address import Address
 from app.models.booking import (
     VALID_TRANSITIONS,
     Booking,
@@ -27,7 +29,13 @@ from app.models.booking_status_log import BookingStatusLog
 from app.models.provider_profile import ProviderProfile
 from app.models.service import Service
 from app.models.user import UserRole
-from app.schemas.booking import BookingListResponse, BookingResponse
+from app.schemas.booking import (
+    BookingListResponse,
+    BookingOfferResponse,
+    BookingResponse,
+)
+from app.services.provider_matching import is_eligible_provider_stmt
+from app.utils.geo import distance_km_to_point
 
 settings = get_settings()
 
@@ -98,9 +106,112 @@ class BookingService:
             raise UnauthorizedAction("You do not have access to this booking")
         return booking
 
+    async def get_offer(
+        self, booking_id: uuid.UUID, provider_id: uuid.UUID
+    ) -> BookingOfferResponse:
+        """What a broadcast recipient may see about a job before accepting it.
+
+        ``get_booking`` cannot serve this: it admits only the consumer or the
+        *assigned* provider, and a broadcast recipient is neither — ``provider_id``
+        stays NULL until someone accepts. Without this the provider gets a push
+        carrying a booking id they are forbidden to resolve (SVC-153).
+
+        Eligibility is checked **before** the still-open check, deliberately. The
+        reverse order would tell any caller whether a given booking exists and has
+        been taken; this way a provider who was never a recipient learns nothing
+        beyond 403.
+        """
+        booking = await self.db.get(Booking, booking_id)
+        if not booking:
+            raise BookingNotFound(booking_id)
+
+        address = await self.db.get(Address, booking.consumer_address_id)
+        if address is None or address.location is None:
+            # The broadcast bails out on the same condition, so nobody was ever
+            # offered this booking — answer as we would to any non-recipient.
+            raise UnauthorizedAction("You were not offered this booking")
+
+        eligible = await self.db.execute(
+            is_eligible_provider_stmt(booking.service_id, address.location, provider_id)
+        )
+        if eligible.scalar_one_or_none() is None:
+            raise UnauthorizedAction("You were not offered this booking")
+
+        # Open means REQUESTED — the only state a booking can be accepted from.
+        # Anything else (claimed, cancelled, expired) ends the offer.
+        if booking.status is not BookingStatus.REQUESTED:
+            raise BookingOfferClosed()
+
+        service = await self.db.get(Service, booking.service_id)
+
+        distance = await self.db.execute(
+            select(
+                distance_km_to_point(ProviderProfile.service_area_center, address.location)
+            ).where(ProviderProfile.user_id == provider_id)
+        )
+
+        return BookingOfferResponse(
+            booking_id=booking.id,
+            service_name=service.name,
+            service_amount=booking.service_amount,
+            full_address=address.full_address,
+            distance_km=round(distance.scalar_one(), 2),
+        )
+
     # ------------------------------------------------------------------
     # State transitions
     # ------------------------------------------------------------------
+
+    async def accept_booking(
+        self, booking_id: uuid.UUID, provider_id: uuid.UUID
+    ) -> tuple[Booking, bool]:
+        """Claim a broadcast booking. Returns ``(booking, newly_accepted)``.
+
+        Accept needs outcomes the generic state machine cannot express, so it gets
+        its own entry point rather than more special cases inside
+        ``transition_status`` — whose signature five other routes depend on
+        (SVC-154).
+
+        The ``newly_accepted`` flag exists for one reason: the router notifies the
+        consumer after a successful accept, and an idempotent retry must not fire
+        that push a second time. Returning a bare booking would make a lost
+        response send "Booking Confirmed" again on every retry — worse than the
+        error it replaces.
+
+        Order matters, and each branch is a case the card has to tell apart:
+
+        * cancelled/expired first, so a provider re-accepting a booking they had
+          claimed and which was later cancelled gets 410, not a stale 200;
+        * then their own accepted booking → idempotent, no state change, no push;
+        * then anyone else's → 403, the lost race. Checked before the transition
+          guard, which would otherwise always fire first and report the useless
+          "cannot move from accepted to accepted".
+
+        A provider whose booking has moved past ACCEPTED (en route, in progress)
+        falls through to the transition guard and still gets 409 — re-accepting
+        there is a genuinely illegal move, not a retry.
+        """
+        booking = await self.db.get(Booking, booking_id, with_for_update=True)
+        if not booking:
+            raise BookingNotFound(booking_id)
+
+        if booking.status in (BookingStatus.CANCELLED, BookingStatus.EXPIRED):
+            raise BookingOfferClosed()
+
+        if booking.provider_id == provider_id:
+            if booking.status is BookingStatus.ACCEPTED:
+                return booking, False
+        elif booking.provider_id is not None:
+            raise UnauthorizedAction(
+                "This booking has already been claimed by another provider"
+            )
+
+        booking = await self.transition_status(
+            booking_id=booking_id,
+            new_status=BookingStatus.ACCEPTED,
+            changed_by=provider_id,
+        )
+        return booking, True
 
     async def transition_status(
         self,

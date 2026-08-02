@@ -51,6 +51,19 @@ class UnauthorizedAction(AppException):
         super().__init__(message, status_code=status.HTTP_403_FORBIDDEN)
 
 
+class BookingOfferClosed(AppException):
+    """The broadcast offer is over — claimed by someone else, cancelled or expired.
+
+    410 rather than 403 on purpose (SVC-153): the provider *was* entitled to see
+    this job, and the card needs to tell "someone beat me to it" (dismiss quietly)
+    apart from "you should never have seen this" (a real error), without parsing
+    the message. The status code is the discriminator.
+    """
+
+    def __init__(self, message: str = "This booking is no longer available"):
+        super().__init__(message, status_code=status.HTTP_410_GONE)
+
+
 class InvalidOTP(AppException):
     def __init__(self, message: str = "Invalid OTP"):
         super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST)

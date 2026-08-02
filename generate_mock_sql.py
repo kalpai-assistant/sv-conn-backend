@@ -12,7 +12,7 @@ service_ids = [str(uuid.uuid4()) for _ in range(12)]
 address_ids = [str(uuid.uuid4()) for _ in range(3)]
 booking_ids = [str(uuid.uuid4()) for _ in range(5)]
 
-sql = f"""-- Seed Mock Data for ServiceConnect
+sql = f"""-- Seed Mock Data for Eazyserv
 
 -- Clear existing data to prevent unique constraint violations
 TRUNCATE TABLE booking_status_logs CASCADE;

@@ -9,6 +9,7 @@ from app.models.booking import BookingStatus, PaymentMethod
 from app.models.user import User
 from app.schemas.booking import (
     BookingListResponse,
+    BookingOfferResponse,
     BookingResponse,
     CancelBookingRequest,
     CreateBookingRequest,
@@ -47,18 +48,36 @@ async def create_booking(
     return booking
 
 
-@router.patch("/{booking_id}/accept", response_model=BookingResponse)
+@router.patch(
+    "/{booking_id}/accept",
+    response_model=BookingResponse,
+    # Declared so they reach the generated client — the Incoming Request Card
+    # branches on these codes and must never parse the message (SVC-154).
+    responses={
+        403: {"description": "Another provider claimed this booking first"},
+        404: {"description": "No such booking"},
+        410: {"description": "The booking is no longer available — cancelled or "
+                             "expired. Dismiss the card."},
+    },
+)
 async def accept_booking(
     booking_id: UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    booking = await BookingService(db).transition_status(
-        booking_id=booking_id,
-        new_status=BookingStatus.ACCEPTED,
-        changed_by=current_user.id,
+    """Claim a broadcast booking. First provider to accept wins.
+
+    Idempotent: a provider re-accepting a booking they already hold gets 200 and
+    the booking, with no second notification to the consumer. That case is a
+    retry after a lost response, not a new acceptance — notifying again would
+    tell the consumer twice, and returning an error would tell the *winning*
+    provider they lost (SVC-154).
+    """
+    booking, newly_accepted = await BookingService(db).accept_booking(
+        booking_id=booking_id, provider_id=current_user.id
     )
-    send_booking_notification.delay(booking_id=str(booking.id), event="accepted")
+    if newly_accepted:
+        send_booking_notification.delay(booking_id=str(booking.id), event="accepted")
     return booking
 
 
@@ -140,6 +159,40 @@ async def list_bookings(
         status_filter=status,
         page=page,
         per_page=per_page,
+    )
+
+
+@router.get(
+    "/{booking_id}/offer",
+    response_model=BookingOfferResponse,
+    # Declared so they reach the generated client. The card's behaviour is keyed
+    # entirely on these codes, and without this the spec advertises only 200/422 —
+    # the app would have no contract for the two cases that actually drive the UI.
+    # First route in this repo to document its error responses; worth copying.
+    responses={
+        403: {"description": "You were not offered this booking"},
+        404: {"description": "No such booking"},
+        410: {"description": "The offer is over — claimed by another provider, "
+                             "cancelled, or expired. Dismiss the card."},
+    },
+)
+async def get_booking_offer(
+    booking_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """What a provider may see about a broadcast job before accepting it (SVC-153).
+
+    Backs the Incoming Request Card: the ``new_request`` push carries only a booking
+    id, and ``GET /{booking_id}`` refuses a provider who has not been assigned yet.
+
+    403 when the caller was not offered this booking, 410 once it is no longer
+    open. Both come from the service so they carry the standard error shape — the
+    card keys off the status code, not the message. Role is not gated here: the
+    eligibility check subsumes it, since only a matching provider can pass it.
+    """
+    return await BookingService(db).get_offer(
+        booking_id=booking_id, provider_id=current_user.id
     )
 
 
