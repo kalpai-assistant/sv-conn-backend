@@ -106,11 +106,16 @@ async def test_earnings_sums_recent_payouts(client, auth_headers, db_session):
     provider = await _seed_provider(db_session)
     consumer = await UserFactory.create(db_session, role="consumer")
     now_utc = datetime.now(UTC)
+    # Offsets in *minutes*, not hours: the week window boundary is IST Monday
+    # 00:00 (= UTC Sunday 18:30), so `now - 2h` slips out of the window when
+    # CI runs during the first ~2h of Monday IST (18:30–20:30 UTC Sunday).
+    # Keeping both bookings inside the last 30 min sidesteps the entire
+    # weekly boundary problem without changing what the test asserts.
     await _seed_completed_booking(
-        db_session, provider, consumer, payout=80.0, completed_at=now_utc - timedelta(hours=1)
+        db_session, provider, consumer, payout=80.0, completed_at=now_utc - timedelta(minutes=10)
     )
     await _seed_completed_booking(
-        db_session, provider, consumer, payout=120.0, completed_at=now_utc - timedelta(hours=2)
+        db_session, provider, consumer, payout=120.0, completed_at=now_utc - timedelta(minutes=20)
     )
 
     response = await client.get(
