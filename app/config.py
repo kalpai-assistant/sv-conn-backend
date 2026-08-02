@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     E2E_TEST_PHONES: str = ""  # comma-separated E.164 numbers
     E2E_TEST_OTP: str = ""  # fixed OTP to store for those numbers
 
+    # SVC-161: SMS-a-link on the /download page. Off by default because
+    # sending a URL via MSG91's OTP template produces "Your Eazyserv OTP is
+    # https://..." — misleading. Flip on AFTER a dedicated MSG91 template
+    # is approved (submit form → 1-3 business days). While off, the endpoint
+    # returns 501 and the /download page falls back to QR-code-only.
+    SMS_DOWNLOAD_LINK_ENABLED: bool = False
+
     # Observability (SVC-46)
     # Environment tag propagated to Sentry + log records. staging | production | dev.
     ENVIRONMENT: str = "dev"

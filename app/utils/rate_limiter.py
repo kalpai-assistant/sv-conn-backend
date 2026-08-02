@@ -17,12 +17,57 @@ at these limits — nobody notices whether "10/hour" is a rolling hour or a
 calendar hour when the window is short.
 """
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from redis.asyncio import Redis
 
 from app.dependencies import get_current_user, get_redis
 from app.exceptions import RateLimitExceeded
 from app.models.user import User
+
+
+def ip_rate_limit(namespace: str, max_requests: int, window_seconds: int = 3600):
+    """Public-endpoint rate limit — keyed by client IP, not user.
+
+    Same shape as ``rate_limit`` but for endpoints without auth (SMS
+    download-link, waitlist signups, etc). Uses ``request.client.host``
+    as the key; when behind a load balancer that sets X-Forwarded-For,
+    the ALB / CloudFront forwards a chain — the leftmost is the real
+    client. The global ``RateLimitMiddleware`` (600/min) still applies
+    as a floor; this is a much tighter limit for specific endpoints.
+
+    Bots + shared-NAT edge case: users behind the same corporate NAT
+    share an IP. 3/hour per NAT is fine for our use cases (SMS link
+    sends, waitlist signups); anything tighter would break real users.
+    """
+
+    async def dependency(
+        request: Request,
+        redis: Redis = Depends(get_redis),
+    ) -> None:
+        client_ip = _extract_client_ip(request)
+        key = f"rl:ip:{namespace}:{client_ip}"
+
+        current = await redis.incr(key)
+        if current == 1:
+            await redis.expire(key, window_seconds)
+
+        if current > max_requests:
+            ttl = await redis.ttl(key)
+            retry_after = ttl if ttl > 0 else 60
+            raise RateLimitExceeded(retry_after=retry_after)
+
+    return dependency
+
+
+def _extract_client_ip(request: Request) -> str:
+    """Best-effort client IP. Trusts X-Forwarded-For's leftmost only if
+    the immediate socket peer is the ALB (in prod). In dev / local, the
+    socket peer is the real client and we use that."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        # Leftmost = origin client; rightmost = trusted proxy.
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def rate_limit(namespace: str, max_requests: int, window_seconds: int = 3600):
