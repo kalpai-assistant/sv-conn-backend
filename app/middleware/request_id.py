@@ -9,6 +9,7 @@ through every service call.
 SVC-47: also tags Sentry with the request_id so a Sentry issue cross-links
 to the exact log lines via Better Stack search.
 """
+
 import uuid
 
 from fastapi import Request

@@ -8,6 +8,7 @@ the async request path that serves a provider the offer behind that push. Both
 call the same expressions, so a provider can never be pushed a job they are then
 refused, or shown one they were never sent (SVC-153).
 """
+
 from sqlalchemy import Select, select
 
 from app.models.provider_profile import KYCStatus, ProviderProfile

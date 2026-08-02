@@ -1,6 +1,7 @@
 """
 Payment service: Razorpay order creation, signature verification, and webhook handling.
 """
+
 import hashlib
 import hmac
 from uuid import UUID
@@ -163,9 +164,7 @@ class PaymentService:
         return profile
 
     async def _find_booking_by_order(self, order_id: str) -> Booking:
-        result = await self.db.execute(
-            select(Booking).where(Booking.razorpay_order_id == order_id)
-        )
+        result = await self.db.execute(select(Booking).where(Booking.razorpay_order_id == order_id))
         booking = result.scalar_one_or_none()
         if not booking:
             raise PaymentError(f"No booking found for order {order_id}")

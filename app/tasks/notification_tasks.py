@@ -2,6 +2,7 @@
 Notification Celery tasks — handles async push + SMS dispatch for booking events.
 Uses a synchronous DB session (SyncSessionLocal) because Celery workers are not async.
 """
+
 from app.tasks.celery_app import celery_app
 from app.utils.fcm_client import send_push_notification
 

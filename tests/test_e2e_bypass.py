@@ -7,6 +7,7 @@ independently: production env, empty whitelist, empty test OTP, and the
 happy path. Standalone (no DB fixture) — the logic under test is pure
 and can be exercised without spinning up the full app.
 """
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -124,7 +125,8 @@ async def test_send_otp_non_bypass_phone_uses_normal_path(monkeypatch):
         patch("app.services.auth_service.is_rate_limited", new=AsyncMock(return_value=False)),
         patch("app.services.auth_service.store_otp", new=AsyncMock()) as mock_store,
         patch(
-            "app.services.auth_service.generate_otp", return_value="998877",
+            "app.services.auth_service.generate_otp",
+            return_value="998877",
         ),
         patch("app.services.auth_service.get_sms_client", return_value=fake_sms),
     ):

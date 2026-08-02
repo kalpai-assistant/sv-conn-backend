@@ -9,6 +9,7 @@ Covers:
 - Non-admin caller → 403
 - Verify on non-SUBMITTED profile → 403
 """
+
 import io
 import uuid
 from unittest.mock import patch
@@ -148,9 +149,7 @@ async def test_submit_kyc_double_submit_rejected(client, auth_headers, db_sessio
 @pytest.mark.asyncio
 async def test_admin_verify_kyc(client, auth_headers, db_session):
     """Admin verifies SUBMITTED KYC → 200, status flips to VERIFIED, reviewed_at set."""
-    provider_user, profile = await _seed_provider(
-        db_session, kyc_status=KYCStatus.SUBMITTED
-    )
+    provider_user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.SUBMITTED)
     admin_user = await UserFactory.create(db_session, role="admin")
 
     response = await client.post(
@@ -184,9 +183,7 @@ async def test_admin_verify_kyc_wrong_state(client, auth_headers, db_session):
 @pytest.mark.asyncio
 async def test_admin_reject_kyc_with_reason(client, auth_headers, db_session):
     """Admin rejects SUBMITTED KYC with reason → 200, reason persisted."""
-    provider_user, profile = await _seed_provider(
-        db_session, kyc_status=KYCStatus.SUBMITTED
-    )
+    provider_user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.SUBMITTED)
     admin_user = await UserFactory.create(db_session, role="admin")
 
     response = await client.post(
@@ -269,9 +266,7 @@ async def test_admin_list_pending_kyc(client, auth_headers, db_session):
 @pytest.mark.asyncio
 async def test_admin_get_kyc_review_with_presigned_urls(client, auth_headers, db_session):
     """SUBMITTED profile with docs → response includes presigned aadhaar+selfie URLs."""
-    provider_user, profile = await _seed_provider(
-        db_session, kyc_status=KYCStatus.SUBMITTED
-    )
+    provider_user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.SUBMITTED)
     # Mimic what submit_kyc would write — the keys are what matters for presign.
     profile.kyc_docs = {
         "aadhaar_key": f"kyc/{provider_user.id}/aadhaar-abc.png",
@@ -282,9 +277,7 @@ async def test_admin_get_kyc_review_with_presigned_urls(client, auth_headers, db
     await db_session.flush()
     admin_user = await UserFactory.create(db_session, role="admin")
 
-    with patch(
-        "app.services.provider_service.storage.get_presigned_url"
-    ) as mock_presign:
+    with patch("app.services.provider_service.storage.get_presigned_url") as mock_presign:
         # Return distinct URLs so we can verify each key was minted independently.
         mock_presign.side_effect = lambda key: f"https://signed.example/{key}"
         response = await client.get(
@@ -307,9 +300,7 @@ async def test_admin_get_kyc_review_no_docs_uploaded(client, auth_headers, db_se
     provider_user, _ = await _seed_provider(db_session, kyc_status=KYCStatus.PENDING)
     admin_user = await UserFactory.create(db_session, role="admin")
 
-    with patch(
-        "app.services.provider_service.storage.get_presigned_url"
-    ) as mock_presign:
+    with patch("app.services.provider_service.storage.get_presigned_url") as mock_presign:
         response = await client.get(
             f"/api/v1/admin/providers/{provider_user.id}/kyc",
             headers=auth_headers(str(admin_user.id), "admin"),

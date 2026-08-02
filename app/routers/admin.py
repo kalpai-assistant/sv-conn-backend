@@ -2,6 +2,7 @@
 Admin router: user management, booking oversight, and KYC approval.
 All endpoints require the "admin" role.
 """
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -27,6 +28,7 @@ _admin_dep = Depends(require_role("admin"))
 # Users
 # ---------------------------------------------------------------------------
 
+
 @router.get("/users", response_model=list[UserResponse], dependencies=[_admin_dep])
 async def list_users(
     page: int = Query(1, ge=1),
@@ -38,7 +40,9 @@ async def list_users(
     return list(result.scalars().all())
 
 
-@router.patch("/users/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT, dependencies=[_admin_dep])
+@router.patch(
+    "/users/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT, dependencies=[_admin_dep]
+)
 async def deactivate_user(user_id: UUID, db: AsyncSession = Depends(get_db)):
     user = await db.get(User, user_id)
     if user:
@@ -112,6 +116,7 @@ async def reject_provider_kyc(
 # ---------------------------------------------------------------------------
 # Bookings
 # ---------------------------------------------------------------------------
+
 
 @router.get("/bookings", response_model=BookingListResponse, dependencies=[_admin_dep])
 async def list_all_bookings(

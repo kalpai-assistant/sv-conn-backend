@@ -3,6 +3,7 @@ Import all ORM models here so Alembic can discover them via Base.metadata.
 The order of imports matters for circular-reference safety; models with no
 FK dependencies come first.
 """
+
 from app.models.address import Address  # noqa: F401
 from app.models.booking import (  # noqa: F401
     VALID_TRANSITIONS,

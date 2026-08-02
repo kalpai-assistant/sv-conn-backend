@@ -11,6 +11,7 @@ Covers GET /providers/me/earnings:
 - Non-provider caller → 403
 - Range filtering boundary (week vs month) works on a real timestamp
 """
+
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
 

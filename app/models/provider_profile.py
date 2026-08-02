@@ -11,10 +11,10 @@ from app.database import Base
 
 
 class KYCStatus(str, enum.Enum):
-    PENDING = "pending"      # No docs uploaded yet
+    PENDING = "pending"  # No docs uploaded yet
     SUBMITTED = "submitted"  # Docs uploaded, awaiting admin review
-    VERIFIED = "verified"    # Admin approved — provider can subscribe + earn
-    REJECTED = "rejected"    # Admin rejected — see kyc_rejection_reason
+    VERIFIED = "verified"  # Admin approved — provider can subscribe + earn
+    REJECTED = "rejected"  # Admin rejected — see kyc_rejection_reason
 
 
 class ProviderProfile(Base):
@@ -25,9 +25,7 @@ class ProviderProfile(Base):
         Index("idx_provider_service_area", "service_area_center", postgresql_using="gist"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False
     )
@@ -52,9 +50,7 @@ class ProviderProfile(Base):
     avg_rating: Mapped[float] = mapped_column(Float, default=0.0)
     total_completed_jobs: Mapped[int] = mapped_column(Integer, default=0)
     razorpay_linked_account_id: Mapped[str | None] = mapped_column(String(255))
-    kyc_status: Mapped[KYCStatus] = mapped_column(
-        Enum(KYCStatus), default=KYCStatus.PENDING
-    )
+    kyc_status: Mapped[KYCStatus] = mapped_column(Enum(KYCStatus), default=KYCStatus.PENDING)
     # KYC document storage. JSONB lets us add fields (e.g. video selfie, address proof)
     # without a new migration. Only S3 keys are stored — never raw bytes, never public
     # URLs. Read access goes through a presigned URL endpoint admin-only.

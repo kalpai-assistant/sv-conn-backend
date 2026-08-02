@@ -5,6 +5,7 @@ Proves the piece that's easy to break silently: a request-scoped `request_id`
 set by `RequestIDMiddleware` shows up in every log record emitted during the
 request, without any service code having to pass it explicitly.
 """
+
 import io
 import json
 import logging
@@ -52,18 +53,14 @@ async def test_request_id_appears_in_logs_emitted_inside_a_request():
             logging.getLogger("test.route").info("handling request")
             return {"ok": True}
 
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.get("/log", headers={"X-Request-ID": "test-rid-123"})
 
         assert r.status_code == 200
         assert r.headers["X-Request-ID"] == "test-rid-123"
 
         # Parse each JSON log line, find ours.
-        records = [
-            json.loads(line) for line in buf.getvalue().splitlines() if line.strip()
-        ]
+        records = [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
         ours = [r for r in records if r.get("event") == "handling request"]
         assert ours, f"log line missing; captured: {buf.getvalue()!r}"
         assert ours[0]["request_id"] == "test-rid-123"
@@ -83,18 +80,14 @@ async def test_request_id_is_generated_when_client_omits_header():
             logging.getLogger("test.route").info("no header")
             return {"ok": True}
 
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.get("/log")
 
         assert r.status_code == 200
         rid = r.headers["X-Request-ID"]
         assert len(rid) == 36  # UUID4
 
-        records = [
-            json.loads(line) for line in buf.getvalue().splitlines() if line.strip()
-        ]
+        records = [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
         ours = [r for r in records if r.get("event") == "no header"]
         assert ours and ours[0]["request_id"] == rid
     finally:

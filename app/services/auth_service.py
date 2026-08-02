@@ -4,6 +4,7 @@ Auth service: OTP flow + JWT token management.
 Single Responsibility: this service owns the full auth lifecycle.
 It does NOT touch HTTP concerns — that belongs to the router.
 """
+
 import logging
 import uuid
 
@@ -97,6 +98,7 @@ class AuthService:
         payload = decode_jwt(refresh_token)
         if not payload or payload.get("type") != "refresh":
             from fastapi import HTTPException, status
+
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired refresh token",
@@ -105,6 +107,7 @@ class AuthService:
         user = await self.db.get(User, uuid.UUID(payload["sub"]))
         if not user or not user.is_active:
             from fastapi import HTTPException, status
+
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found or inactive",

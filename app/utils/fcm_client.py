@@ -2,6 +2,7 @@
 Firebase Cloud Messaging push notification client.
 firebase-admin is initialised lazily on first use.
 """
+
 import firebase_admin
 from firebase_admin import credentials, messaging
 

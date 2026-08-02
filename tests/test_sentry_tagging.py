@@ -10,6 +10,7 @@ Both hooks are guarded to never raise — if Sentry SDK is missing or
 misconfigured, the tag/user call is a silent no-op. That's what these
 tests verify: happy path calls through, unhappy path doesn't blow up.
 """
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -85,9 +86,7 @@ async def test_middleware_tags_sentry_with_generated_id():
 
     fake = MagicMock()
     with patch.dict("sys.modules", {"sentry_sdk": fake}):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.get("/ping")
 
     assert r.status_code == 200
@@ -108,9 +107,7 @@ async def test_middleware_tags_sentry_with_client_provided_id():
 
     fake = MagicMock()
     with patch.dict("sys.modules", {"sentry_sdk": fake}):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as ac:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.get("/ping", headers={"X-Request-ID": "client-supplied-rid"})
 
     assert r.headers["X-Request-ID"] == "client-supplied-rid"

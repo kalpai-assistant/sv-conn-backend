@@ -111,13 +111,15 @@ jobs:
         # a "forgot to commit the lock update" mistake in CI rather than in prod.
         run: uv sync --frozen
 
-      # Lint runs before the DB spin-up so a bad import / unused var fails fast
-      # (~2s) without waiting on the 15-30s Postgres warmup. Format-check is
-      # NOT enforced yet — the codebase has 72 files that would reformat, and
-      # applying that all at once mid-sprint would collide with every in-flight
-      # PR. Follow-up ticket to apply `ruff format` in a dedicated commit.
+      # Lint runs before the DB spin-up so a bad import / unused var fails
+      # fast (~2s) without waiting on the 15-30s Postgres warmup. Format-check
+      # runs alongside — the full-tree format sweep landed with this PR, so
+      # any new PR that drifts from `ruff format` output now fails CI.
       - name: Lint (ruff check)
         run: uv run ruff check .
+
+      - name: Format check (ruff format --check)
+        run: uv run ruff format --check .
 
       - name: Enable PostGIS extension on the test DB
         # tests/conftest.py runs Base.metadata.create_all which needs PostGIS

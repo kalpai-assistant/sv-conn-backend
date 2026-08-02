@@ -21,6 +21,7 @@ router = APIRouter(tags=["Catalog"])
 # Categories (public)
 # ---------------------------------------------------------------------------
 
+
 @router.get("/categories", response_model=list[CategoryResponse])
 async def list_categories(db: AsyncSession = Depends(get_db)):
     return await CatalogService(db).list_categories()
@@ -29,6 +30,7 @@ async def list_categories(db: AsyncSession = Depends(get_db)):
 # ---------------------------------------------------------------------------
 # Services — public listing, admin CRUD
 # ---------------------------------------------------------------------------
+
 
 @router.get("/services", response_model=list[ServiceResponse])
 async def list_services(

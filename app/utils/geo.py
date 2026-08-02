@@ -2,6 +2,7 @@
 PostGIS / geospatial query helpers.
 All raw geo SQL is isolated here — no other module builds WKT strings or ST_* expressions.
 """
+
 from geoalchemy2.functions import ST_DWithin
 from sqlalchemy import func
 
