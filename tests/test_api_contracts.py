@@ -52,8 +52,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from jsonschema import Draft202012Validator
-from referencing import Registry, Resource
-from referencing.jsonschema import DRAFT202012
 
 from app.models.address import Address
 from app.models.booking import BookingStatus
@@ -105,25 +103,45 @@ def _response_schema(
     return schema
 
 
-def _validator(spec: dict[str, Any], schema: dict[str, Any]) -> Draft202012Validator:
-    """Build a validator whose $ref lookups resolve through the OpenAPI spec.
+def _deref(spec: dict[str, Any], schema: Any) -> Any:
+    """Inline every ``$ref`` in ``schema`` by resolving against ``spec``.
 
-    FastAPI's schemas reference each other via ``$ref: '#/components/schemas/X'``.
-    Without a registry seeded from ``components/schemas``, the validator can't
-    resolve those refs and every test would fail on schema-not-found.
+    FastAPI's OpenAPI output almost always wraps ``response_model`` in a
+    top-level ``$ref: '#/components/schemas/XyzResponse'`` and each schema
+    body can nest further refs (e.g. ``BookingListResponse.bookings`` is a
+    list of another ref). Inlining recursively is the simplest way to get
+    a fully-resolved schema jsonschema can validate against — the
+    ``referencing`` Registry route is possible but has base-URI gotchas
+    around anonymous / empty-URI resources that add more complexity than
+    it saves for the ~20 refs in play.
+
+    Only handles same-document refs (``#/...``) — the whole OpenAPI spec
+    is one document so that's all we ever see.
     """
-    registry = Registry().with_resource(
-        uri="", resource=Resource(contents=spec, specification=DRAFT202012)
-    )
-    return Draft202012Validator(schema, registry=registry)
+    if isinstance(schema, dict):
+        if "$ref" in schema:
+            ref = schema["$ref"]
+            if not ref.startswith("#/"):
+                # External refs aren't produced by FastAPI — if we ever see
+                # one, fail loudly rather than silently skip validation.
+                raise ValueError(f"External $ref not supported: {ref}")
+            pointer = ref[2:].split("/")
+            resolved: Any = spec
+            for part in pointer:
+                resolved = resolved[part]
+            return _deref(spec, resolved)
+        return {k: _deref(spec, v) for k, v in schema.items()}
+    if isinstance(schema, list):
+        return [_deref(spec, item) for item in schema]
+    return schema
 
 
 def _assert_conforms(client, response, path: str, method: str, status_code: int = 200) -> None:
     """Fetch the route's declared schema and validate the response body.
 
-    All-in-one helper: pulls the spec, extracts the schema, builds a
-    ref-resolving validator, validates. On failure jsonschema's error
-    message points at the divergence.
+    All-in-one helper: pulls the spec, extracts the schema, inlines its
+    ``$ref`` pointers, validates. On failure jsonschema's error message
+    points at the divergence.
     """
     assert response.status_code == status_code, (
         f"{method} {path} returned {response.status_code}, expected {status_code}: "
@@ -131,7 +149,8 @@ def _assert_conforms(client, response, path: str, method: str, status_code: int 
     )
     spec = _openapi_spec(client)
     schema = _response_schema(spec, path, method, status_code)
-    _validator(spec, schema).validate(response.json())
+    resolved = _deref(spec, schema)
+    Draft202012Validator(resolved).validate(response.json())
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +382,10 @@ async def test_create_review_response_conforms(client, db_session, auth_headers)
             "comment": "Great service",
         },
     )
-    _assert_conforms(client, r, "/api/v1/reviews/", "post", 201)
+    # Endpoint returns 200 (not 201) — verified against the actual route.
+    # If it ever changes to 201 to align with REST convention, update here
+    # AND the router's response_class.
+    _assert_conforms(client, r, "/api/v1/reviews/", "post", 200)
 
 
 @pytest.mark.asyncio
@@ -375,8 +397,21 @@ async def test_create_payment_order_response_conforms(client, db_session, auth_h
     """
     from unittest.mock import MagicMock
 
-    consumer, _, booking = await _consumer_booking(db_session, status=BookingStatus.COMPLETED)
+    consumer, provider, booking = await _consumer_booking(
+        db_session, status=BookingStatus.COMPLETED
+    )
     booking.payment_method = "online"
+
+    # Payment-order creation requires the provider to have a Razorpay-linked
+    # account (see payment_service._get_provider_profile). Without a profile
+    # carrying razorpay_linked_account_id the endpoint 402s — real behaviour
+    # but not the schema we're pinning here.
+    db_session.add(
+        ProviderProfile(
+            user_id=provider.id,
+            razorpay_linked_account_id="acc_test_contract_link",
+        )
+    )
     await db_session.flush()
 
     fake_order = {
