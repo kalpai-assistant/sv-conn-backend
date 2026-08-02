@@ -20,6 +20,7 @@ from app.routers import (
     admin,
     auth,
     bookings,
+    downloads,
     health,
     payments,
     providers,
@@ -118,6 +119,7 @@ def create_app() -> FastAPI:
     app.include_router(reviews.router, prefix=prefix)
     app.include_router(tracking.router, prefix=prefix)
     app.include_router(admin.router, prefix=prefix)
+    app.include_router(downloads.router, prefix=prefix)
 
     # -----------------------------------------------------------------------
     # Health probes (SVC-48) — /health = liveness, /healthz = readiness.
