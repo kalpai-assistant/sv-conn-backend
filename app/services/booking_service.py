@@ -202,9 +202,7 @@ class BookingService:
             if booking.status is BookingStatus.ACCEPTED:
                 return booking, False
         elif booking.provider_id is not None:
-            raise UnauthorizedAction(
-                "This booking has already been claimed by another provider"
-            )
+            raise UnauthorizedAction("This booking has already been claimed by another provider")
 
         booking = await self.transition_status(
             booking_id=booking_id,
