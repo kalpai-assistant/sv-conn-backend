@@ -18,6 +18,7 @@ it and a deploy that forgets the credential quietly swallows every push forever.
 
 No DB or Redis — part of the standalone set.
 """
+
 import pytest
 
 from app.utils import fcm_client
@@ -51,6 +52,7 @@ def test_unconfigured_never_touches_firebase(unconfigured, monkeypatch):
     A half-initialised send would surface as an opaque Firebase auth error and
     send someone hunting a credentials problem that does not exist.
     """
+
     def _boom(*_a, **_k):  # pragma: no cover - must never run
         raise AssertionError("firebase-admin was called without credentials")
 
