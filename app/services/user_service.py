@@ -39,9 +39,19 @@ class UserService:
         await self.db.refresh(user)
         return user
 
-    async def update_fcm_token(self, user_id: uuid.UUID, token: str) -> None:
+    async def update_fcm_token(self, user_id: uuid.UUID, token: str | None) -> None:
+        """Set or clear the user's FCM token.
+
+        `None` (or a blank string) stores NULL rather than "" — downstream send
+        paths guard on truthiness, and an empty string would read as a live
+        token. Clearing an already-NULL token is a no-op, not an error.
+
+        Note: `users.fcm_token` is a single column, so a clear drops push for
+        the user everywhere, not just on the calling device. Per-device tokens
+        would need their own table — deliberately out of scope for SVC-164.
+        """
         user = await self.get_profile(user_id)
-        user.fcm_token = token
+        user.fcm_token = (token or "").strip() or None
         await self.db.flush()
 
     # ------------------------------------------------------------------
