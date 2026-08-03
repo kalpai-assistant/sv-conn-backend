@@ -72,6 +72,11 @@ Firebase isn't automatically enabled on it. Do this once:
 ```bash
 export PROJECT_ID="eazyserv-2024"   # your GCP project ID
 
+# Path to a checkout of the FRONTEND repo (sv-conn-frontend). It is a separate
+# repo, not a subdirectory of this one, so the config downloads below need an
+# explicit path — adjust to wherever yours lives.
+export FRONTEND_REPO="../sv-conn-frontend"
+
 # Enable the Firebase Management API on the project
 gcloud services enable firebase.googleapis.com \
     fcm.googleapis.com \
@@ -103,7 +108,7 @@ export ANDROID_APP_ID="1:X:android:Y"
 
 # Download google-services.json (Android needs this at build time)
 firebase apps:sdkconfig ANDROID "$ANDROID_APP_ID" \
-    --out frontend/android/app/google-services.json
+    --out "$FRONTEND_REPO/android/app/google-services.json"
 ```
 
 ### 4. Register the Web app (for PWA push)
@@ -114,7 +119,7 @@ export WEB_APP_ID="1:X:web:Y"
 
 # Download the web SDK config (JSON, embedded into PWA client)
 firebase apps:sdkconfig WEB "$WEB_APP_ID" \
-    --out frontend/src/firebase-config.json
+    --out "$FRONTEND_REPO/src/firebase-config.json"
 ```
 
 ### 5. Generate the VAPID key pair (Web Push) — **console step**
@@ -161,8 +166,14 @@ The service account JSON is a **real secret** (see [SECRETS.md](SECRETS.md)):
   reads it into `FCM_CREDENTIALS_JSON` env var; app code base64-decodes to
   a temp file and points `FCM_CREDENTIALS_PATH` at it.
 - **Staging**: same pattern under `/sc/staging/FCM_CREDENTIALS_JSON`.
-- **Local dev**: keep the file at `~/eazyserv-fcm-sa.json`, set
-  `FCM_CREDENTIALS_PATH=~/eazyserv-fcm-sa.json` in your `.env`.
+- **Local dev**: keep the file at `~/eazyserv-fcm-sa.json` and point
+  `FCM_CREDENTIALS_PATH` at it in your `.env` — but write the path **expanded**,
+  e.g. `/home/you/eazyserv-fcm-sa.json` or `C:/Users/you/eazyserv-fcm-sa.json`.
+  `~` is **not** expanded: the value goes to `credentials.Certificate()`, which
+  hands it to `open()` verbatim, so a literal `~/…` fails as a filename.
+  Leaving it **empty** is also fine for day-to-day work — outside production the
+  backend logs each push instead of sending it, so the app runs without
+  credentials at all.
 
 After you've stored the JSON in 1Password + SSM, shred the copy on disk:
 
@@ -177,8 +188,8 @@ shred -u ~/eazyserv-fcm-sa.json
 **Frontend**:
 | File | Committed? | Notes |
 |---|---|---|
-| `frontend/android/app/google-services.json` | ❌ Gitignored | Injected in CI from a base64-encoded GitHub Secret. Local dev keeps a copy per developer. |
-| `frontend/src/firebase-config.json` | ❌ Gitignored | Same as above. |
+| `sv-conn-frontend/android/app/google-services.json` | ❌ Gitignored | Injected in CI from a base64-encoded GitHub Secret. Local dev keeps a copy per developer. |
+| `sv-conn-frontend/src/firebase-config.json` | ❌ Gitignored | Same as above. |
 | VAPID public key | ✅ Committed | Not a secret — the public half of a key pair; safe to include in the client bundle. |
 
 **Backend**:
