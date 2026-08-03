@@ -20,6 +20,8 @@ from tests.factories.user_factory import UserFactory
 
 
 async def _seed(db_session):
+    from uuid import uuid4
+
     from app.models.address import Address
     from app.models.category import Category
     from app.models.service import Service
@@ -32,12 +34,18 @@ async def _seed(db_session):
         razorpay_linked_account_id="acc_test_link_123",
     )
     db_session.add(profile)
-    category = Category(name="Cleaning", slug="cleaning", is_active=True, sort_order=1)
+    # Unique suffix — `categories.name` has a UNIQUE constraint, and one test
+    # (`test_same_key_different_body_returns_422`) calls _seed twice inside a
+    # single session to get two distinct bookings.
+    suffix = uuid4().hex[:8]
+    category = Category(
+        name=f"Cleaning {suffix}", slug=f"cleaning-{suffix}", is_active=True, sort_order=1
+    )
     db_session.add(category)
     await db_session.flush()
     service = Service(
         category_id=category.id,
-        name="Basic Clean",
+        name=f"Basic Clean {suffix}",
         base_price=100.0,
         duration_minutes=60,
         is_active=True,
