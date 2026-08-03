@@ -151,7 +151,15 @@ async def test_no_key_creates_fresh_order_each_time(client, auth_headers, db_ses
 @pytest.mark.asyncio
 async def test_razorpay_failure_releases_lock(client, auth_headers, db_session):
     """If Razorpay itself errors, the pending sentinel must be cleared so
-    the client's retry can proceed instead of being blocked by a stuck lock."""
+    the client's retry can proceed instead of being blocked by a stuck lock.
+
+    Note: httpx's ASGITransport re-raises unhandled exceptions from handlers
+    (default raise_app_exceptions=True), so the RuntimeError surfaces here
+    directly rather than as a 500 body. In prod, FastAPI's exception
+    middleware converts it to a 500 response before it reaches the client;
+    what we care about here is only that the rollback ran, proven by the
+    successful retry below.
+    """
     consumer, booking = await _seed(db_session)
     key = str(uuid4())
     body = {"booking_id": str(booking.id)}
@@ -160,11 +168,12 @@ async def test_razorpay_failure_releases_lock(client, auth_headers, db_session):
     fake_broken = MagicMock()
     fake_broken.order.create = MagicMock(side_effect=RuntimeError("razorpay 500"))
     with patch("app.services.payment_service.razorpay_client", fake_broken):
-        r1 = await client.post("/api/v1/payments/orders", json=body, headers=headers)
+        with pytest.raises(RuntimeError, match="razorpay 500"):
+            await client.post("/api/v1/payments/orders", json=body, headers=headers)
 
-    assert r1.status_code == 500
-
-    # Immediate retry should NOT be blocked by a lingering pending sentinel.
+    # The important assertion: an immediate retry with the same key is NOT
+    # blocked by a lingering pending sentinel. If rollback hadn't fired we'd
+    # get a 409 (or wait out PENDING_TTL_SECONDS).
     fake_ok = _fake_razorpay_client()
     with patch("app.services.payment_service.razorpay_client", fake_ok):
         r2 = await client.post("/api/v1/payments/orders", json=body, headers=headers)
