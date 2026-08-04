@@ -175,3 +175,79 @@ async def test_forwarded_header_uses_leftmost_client():
             headers={"X-Forwarded-For": "203.0.113.4, 10.0.0.1, 10.0.0.2"},
         )
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Boot-time WARN when the allowlist is empty in staging/production.
+#
+# The audit flagged this specifically: an empty allowlist in prod leaves
+# /admin/* reachable from any IP, gated only by JWT role. The old INFO log
+# blended into boot chatter. Now WARN, and ops can wire an alert on the
+# log line.
+# ---------------------------------------------------------------------------
+
+
+def test_empty_allowlist_in_production_logs_warning(caplog):
+    """Constructing the middleware with environment='production' and no
+    allowlist must emit a WARNING — that's the signal for the ops alert."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="app.middleware.admin_ip_allowlist")
+    AdminIPAllowlistMiddleware(
+        app=None,
+        allowed_ips="",
+        environment="production",
+    )
+
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warns, "no WARNING emitted for empty allowlist in production"
+    assert "ADMIN_ALLOWED_IPS is empty" in warns[0].message
+    assert "production" in warns[0].message
+
+
+def test_empty_allowlist_in_staging_logs_warning(caplog):
+    """Same escalation for staging — a staging leak is also a real leak
+    (test data can be sensitive)."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="app.middleware.admin_ip_allowlist")
+    AdminIPAllowlistMiddleware(
+        app=None,
+        allowed_ips="",
+        environment="staging",
+    )
+
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warns, "no WARNING emitted for empty allowlist in staging"
+
+
+def test_empty_allowlist_in_dev_does_not_warn(caplog):
+    """Local dev must NOT be noisy — every contributor booting the API
+    without setting ADMIN_ALLOWED_IPS is the norm. INFO is fine, WARN is not."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="app.middleware.admin_ip_allowlist")
+    AdminIPAllowlistMiddleware(
+        app=None,
+        allowed_ips="",
+        environment="dev",
+    )
+
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert not warns, f"unexpected warning in dev: {[r.message for r in warns]}"
+
+
+def test_non_empty_allowlist_does_not_warn_even_in_production(caplog):
+    """When production HAS an allowlist configured, no warning — everything
+    is fine, don't cry wolf."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="app.middleware.admin_ip_allowlist")
+    AdminIPAllowlistMiddleware(
+        app=None,
+        allowed_ips="10.0.0.0/8",
+        environment="production",
+    )
+
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert not warns, f"unexpected warning when allowlist is set: {[r.message for r in warns]}"

@@ -104,6 +104,9 @@ def create_app() -> FastAPI:
         allowed_ips=settings.ADMIN_ALLOWED_IPS,
         trust_forwarded_for=settings.ADMIN_TRUST_FORWARDED_FOR,
         api_prefix=settings.API_V1_PREFIX,
+        # Threaded through so the middleware can escalate the log level when
+        # the allowlist is empty in staging/prod (SVC-audit sharp-edge fix).
+        environment=settings.ENVIRONMENT,
     )
 
     # -----------------------------------------------------------------------
