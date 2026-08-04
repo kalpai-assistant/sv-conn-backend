@@ -36,12 +36,15 @@ def upgrade() -> None:
         nullable=True,
     )
     # Wipe OTPs on bookings that already moved past the transition that
-    # needed them. Enum values are lowercase per app.models.booking.
+    # needed them. The Postgres enum type stores Python enum *names*
+    # (uppercase) because `Enum(BookingStatus)` in the model doesn't set
+    # `values_callable` — SQLAlchemy's default. Match that here or PG
+    # rejects the update with "invalid input value for enum bookingstatus".
     op.execute(
         """
         UPDATE bookings
         SET doorstep_otp = NULL
-        WHERE status IN ('in_progress', 'completed', 'cancelled')
+        WHERE status IN ('IN_PROGRESS', 'COMPLETED', 'CANCELLED')
         """
     )
 
