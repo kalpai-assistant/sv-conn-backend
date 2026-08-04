@@ -77,9 +77,10 @@ async def test_otp_wiped_on_transition_to_completed(client, auth_headers, db_ses
     booking.doorstep_otp = "9999"
     await db_session.flush()
 
-    with patch("app.routers.bookings.send_booking_notification") as mock_task, patch(
-        "app.routers.bookings.process_cash_payment"
-    ) as mock_pay:
+    with (
+        patch("app.routers.bookings.send_booking_notification") as mock_task,
+        patch("app.routers.bookings.process_cash_payment") as mock_pay,
+    ):
         mock_task.delay = lambda **kwargs: None
         mock_pay.delay = lambda **kwargs: None
         response = await client.patch(
