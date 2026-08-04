@@ -40,6 +40,10 @@ async def update_fcm_token(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Register the caller's FCM token, or clear it by sending `null` on sign-out.
+
+    The field is required, so an empty body is rejected — clearing must be explicit.
+    """
     await UserService(db).update_fcm_token(current_user.id, request.fcm_token)
 
 

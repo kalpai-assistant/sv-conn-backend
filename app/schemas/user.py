@@ -25,7 +25,14 @@ class UpdateProfileRequest(BaseModel):
 
 
 class UpdateFCMTokenRequest(BaseModel):
-    fcm_token: str = Field(..., max_length=255)
+    """Register or clear the caller's FCM token.
+
+    `fcm_token` is nullable but *required* — `null` clears the stored token
+    (sign-out), while an omitted field is a 422. Without that distinction an
+    empty body would silently wipe push for the user.
+    """
+
+    fcm_token: str | None = Field(..., max_length=255)
 
 
 class AddressResponse(BaseModel):
