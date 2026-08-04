@@ -43,10 +43,12 @@ async def test_get_me_returns_caller(client, auth_headers, db_session):
 
 @pytest.mark.asyncio
 async def test_get_me_requires_auth(client):
-    """No token → 401. Anonymous access to /me would leak whichever user
-    happened to be first in the DB in some codepaths — belt-and-braces."""
+    """No token → auth-required response (Starlette's HTTPBearer defaults
+    to 403 when the Authorization header is missing entirely, and 401 when
+    the token itself is invalid — the well-known FastAPI quirk). We only
+    care that the endpoint is gated; either code is fine."""
     response = await client.get("/api/v1/users/me")
-    assert response.status_code == 401
+    assert response.status_code in (401, 403)
 
 
 # ---------------------------------------------------------------------------
