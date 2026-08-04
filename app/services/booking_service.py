@@ -183,9 +183,19 @@ class BookingService:
         * cancelled/expired first, so a provider re-accepting a booking they had
           claimed and which was later cancelled gets 410, not a stale 200;
         * then their own accepted booking → idempotent, no state change, no push;
-        * then anyone else's → 403, the lost race. Checked before the transition
+        * then anyone else's → 410, the lost race. Checked before the transition
           guard, which would otherwise always fire first and report the useless
           "cannot move from accepted to accepted".
+
+        The lost race is **410, not 403** (SVC-167). 403 is this codebase's
+        "your identity was rejected" — the same exception carries "You do not
+        have access to this booking" and "You were not offered this booking".
+        Losing a race is neither: the provider was entitled to the offer and
+        acted on it a moment too late. That is the "someone beat me to it" case
+        SVC-153 chose 410 for, so the card can dismiss quietly without parsing
+        the message, and it is the same outcome as the cancelled/expired branch
+        above. Most recipients of any broadcast land here; it is the common
+        path, not an error.
 
         A provider whose booking has moved past ACCEPTED (en route, in progress)
         falls through to the transition guard and still gets 409 — re-accepting
@@ -202,7 +212,10 @@ class BookingService:
             if booking.status is BookingStatus.ACCEPTED:
                 return booking, False
         elif booking.provider_id is not None:
-            raise UnauthorizedAction("This booking has already been claimed by another provider")
+            # Keeps its own message rather than the default: 410 now covers three
+            # causes (claimed, cancelled, expired) and logs would not be able to
+            # tell them apart otherwise. The card still branches on the code.
+            raise BookingOfferClosed("This booking has already been claimed by another provider")
 
         booking = await self.transition_status(
             booking_id=booking_id,

@@ -9,10 +9,14 @@ shown to a provider and cannot be told apart from any other 409.
 The contract these tests pin, which the Incoming Request Card branches on by
 status code alone — never by message:
 
-    403  another provider claimed it first
-    410  the booking is gone (cancelled or expired)
+    410  the offer is over — claimed by another provider, cancelled, or expired
     404  no such booking
     200  yours already — an idempotent retry, and crucially *no second push*
+
+The lost race returned 403 until SVC-167. It is 410 now, with the other two
+"offer is over" causes: 403 is this codebase's "your identity was rejected",
+and losing a race is not that — the provider was entitled to the offer and was
+simply a moment late. Nothing here may assert 403 for a lost race again.
 
 The load-bearing one is ``test_reaccept_does_not_notify_the_consumer_again``.
 Returning 200 for a retry is only correct if the consumer is not told twice; the
@@ -71,16 +75,19 @@ def _accept(client, booking_id, user, auth_headers):
     )
 
 
-# --- 403: someone else got there first ----------------------------------------
+# --- 410: someone else got there first ----------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_second_provider_gets_403_not_409(client, db_session, auth_headers):
+async def test_second_provider_gets_410_not_409(client, db_session, auth_headers):
     """The bug this ticket exists for.
 
-    Before the fix this was a 409 reading "Cannot move from accepted to accepted.
+    Before SVC-154 this was a 409 reading "Cannot move from accepted to accepted.
     Allowed: ['en_route', 'cancelled']" — the state machine's internal vocabulary,
     leaked to a provider who simply lost a race.
+
+    SVC-154 made it 403; SVC-167 made it 410. Both the 409 and the 403 are
+    regressions if they come back, hence the explicit assertions below.
     """
     winner = await UserFactory.create(db_session, role="provider")
     loser = await UserFactory.create(db_session, role="provider")
@@ -90,13 +97,45 @@ async def test_second_provider_gets_403_not_409(client, db_session, auth_headers
 
     resp = await _accept(client, booking.id, loser, auth_headers)
 
-    assert resp.status_code == 403, resp.text
+    assert resp.status_code == 410, resp.text
+    assert resp.status_code != 403, "a lost race is not an auth failure (SVC-167)"
     body = resp.json()
-    assert body["status_code"] == 403
+    assert body["status_code"] == 410
     # Safe to put in a toast: no internal status names, no winner's identity.
     assert "already been claimed" in body["message"]
     assert "accepted" not in body["message"]
     assert str(winner.id) not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_lost_race_is_indistinguishable_from_expiry_by_status_code(
+    client, db_session, auth_headers
+):
+    """All three "offer is over" causes answer 410, so the card needs one branch.
+
+    This is the point of SVC-167: claimed / cancelled / expired are the same
+    event as far as the Incoming Request Card is concerned — dismiss quietly.
+    Splitting one of them onto a different code is what made 403 read as an auth
+    failure on the majority path.
+    """
+    winner = await UserFactory.create(db_session, role="provider")
+    loser = await UserFactory.create(db_session, role="provider")
+    _, claimed = await _booking(db_session)
+    await _accept(client, claimed.id, winner, auth_headers)
+
+    _, expired = await _booking(db_session, status=BookingStatus.EXPIRED)
+    _, cancelled = await _booking(db_session, status=BookingStatus.CANCELLED)
+
+    codes = {
+        name: (await _accept(client, booking.id, loser, auth_headers)).status_code
+        for name, booking in (
+            ("claimed", claimed),
+            ("expired", expired),
+            ("cancelled", cancelled),
+        )
+    }
+
+    assert codes == {"claimed": 410, "expired": 410, "cancelled": 410}, codes
 
 
 @pytest.mark.asyncio
@@ -216,7 +255,11 @@ async def test_reaccepting_after_moving_past_accept_is_still_409(client, db_sess
 
 @pytest.mark.asyncio
 async def test_other_invalid_transitions_still_return_409(client, db_session, auth_headers):
-    """The fix must not blanket-convert transition errors into 403/410."""
+    """Neither fix may blanket-convert transition errors into 403/410.
+
+    SVC-167 widened 410 to cover the lost race, which makes this guard more
+    load-bearing, not less: a genuinely illegal move is still 409.
+    """
     provider = await UserFactory.create(db_session, role="provider")
     _, booking = await _booking(db_session, provider_id=provider.id, status=BookingStatus.ACCEPTED)
 
@@ -312,9 +355,10 @@ async def test_two_providers_racing_produce_exactly_one_winner(db_session):
 
         assert len(winners) == 1, f"expected exactly one winner, got {results}"
         assert len(losers) == 1, f"expected exactly one loser, got {results}"
-        # The loser is told they lost a race — not handed a state-machine error.
+        # The loser is told the offer is gone — not handed a state-machine error
+        # (409) and not an auth failure (403, which this was until SVC-167).
         assert (
-            losers[0].status_code == 403
+            losers[0].status_code == 410
         ), f"loser got {losers[0].status_code}: {losers[0].message}"
 
         async with sessions() as check:

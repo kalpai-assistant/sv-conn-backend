@@ -121,7 +121,12 @@ async def test_invalid_state_transition(client, auth_headers, db_session):
 
 @pytest.mark.asyncio
 async def test_accept_booking_wrong_provider(client, auth_headers, db_session):
-    """A different provider must not be able to accept another provider's booking."""
+    """A provider cannot accept a booking another provider already holds.
+
+    410, not 403 (SVC-167): this is the lost race, and the caller's identity was
+    never in question. Same code as cancelled/expired, so the Incoming Request
+    Card dismisses on one branch.
+    """
     consumer = await UserFactory.create(db_session, role="consumer")
     correct_provider = await UserFactory.create(db_session, role="provider")
     wrong_provider = await UserFactory.create(db_session, role="provider")
@@ -137,7 +142,7 @@ async def test_accept_booking_wrong_provider(client, auth_headers, db_session):
         headers=auth_headers(str(wrong_provider.id), "provider"),
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 410
 
 
 @pytest.mark.asyncio

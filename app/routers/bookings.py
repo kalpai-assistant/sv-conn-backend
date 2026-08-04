@@ -109,12 +109,16 @@ async def create_booking(
     response_model=BookingResponse,
     # Declared so they reach the generated client — the Incoming Request Card
     # branches on these codes and must never parse the message (SVC-154).
+    #
+    # No 403 here. Losing the race used to return one, which read as an auth
+    # failure for what is the *common* outcome of any broadcast; it is 410 now,
+    # alongside cancelled/expired, because the card treats all of them the same
+    # way — the offer is gone, dismiss it quietly (SVC-167).
     responses={
-        403: {"description": "Another provider claimed this booking first"},
         404: {"description": "No such booking"},
         410: {
-            "description": "The booking is no longer available — cancelled or "
-            "expired. Dismiss the card."
+            "description": "The booking is no longer available — claimed by "
+            "another provider, cancelled, or expired. Dismiss the card."
         },
     },
 )
