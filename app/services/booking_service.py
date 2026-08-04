@@ -261,6 +261,19 @@ class BookingService:
         old_status = booking.status
         booking.status = new_status
 
+        # Zero the doorstep OTP as soon as the transition it protects has
+        # happened. Consumer's view of the OTP is stale from this point
+        # anyway, and there's no legitimate reason to keep a plaintext
+        # 4-digit secret live in the DB row for the life of the booking —
+        # a DB dump would expose every used OTP alongside consumer id.
+        # Same treatment on CANCELLED (the OTP is now meaningless).
+        if new_status in (
+            BookingStatus.IN_PROGRESS,
+            BookingStatus.COMPLETED,
+            BookingStatus.CANCELLED,
+        ):
+            booking.doorstep_otp = None
+
         if new_status == BookingStatus.COMPLETED:
             booking.payment_status = PaymentStatus.PENDING
             # Fix #6: increment provider completed jobs counter
