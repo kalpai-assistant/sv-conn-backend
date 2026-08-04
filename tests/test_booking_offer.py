@@ -20,9 +20,13 @@ parse messages:
 """
 
 import uuid
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
+from app.config import get_settings
 from app.models.address import Address
 from app.models.booking import BookingStatus
 from app.models.category import Category
@@ -166,6 +170,10 @@ async def test_offer_exposes_nothing_beyond_the_card(client, db_session, auth_he
         "service_amount",
         "full_address",
         "distance_km",
+        # SVC-166 — the countdown's anchor. Timing only; carries nothing about
+        # the consumer, so it does not widen what this endpoint discloses.
+        "expires_at",
+        "seconds_remaining",
     }
     assert "9182" not in resp.text
     for leaked in ("consumer_id", "doorstep_otp", "provider_payout", "platform_commission"):
@@ -551,3 +559,114 @@ def test_offer_and_broadcast_use_one_eligibility_definition():
     assert provider_matching.eligible_provider_conditions.__module__ == (
         "app.services.provider_matching"
     )
+
+
+# --- SVC-166: the countdown's anchor ------------------------------------------
+#
+# The card renders a 2-minute countdown. Before this, the response carried no
+# timestamp at all, so the only thing the client could count from was the moment
+# it opened the card — which is not the moment the booking was created. A push
+# takes time to arrive and a provider taps it when they tap it, so a card opened
+# on a 90-second-old job showed a full 2:00 and its Accept then failed.
+#
+# These tests pin the anchor to the booking, not to the request.
+
+
+async def _age(db, booking, seconds: int):
+    """Backdate a booking so its offer looks ``seconds`` old."""
+    booking.created_at = datetime.now(UTC) - timedelta(seconds=seconds)
+    await db.flush()
+    return booking
+
+
+@pytest.mark.asyncio
+async def test_fresh_offer_reports_close_to_the_full_window(client, db_session, auth_headers):
+    service = await _service(db_session)
+    provider = await _provider(db_session, service)
+    _, _, booking = await _open_booking(db_session, service)
+
+    resp = await _get(client, booking.id, provider, auth_headers)
+
+    assert resp.status_code == 200, resp.text
+    window = get_settings().BOOKING_REQUEST_TIMEOUT_SECONDS
+    # A just-created booking has all but a moment of the window left.
+    assert window - 10 <= resp.json()["seconds_remaining"] <= window
+
+
+@pytest.mark.asyncio
+async def test_countdown_counts_from_creation_not_from_the_request(
+    client, db_session, auth_headers
+):
+    """The bug this ticket exists for: a 90s-old job must not report a full window.
+
+    Asserting ``expires_at`` equals ``created_at + timeout`` is the load-bearing
+    part — an implementation anchored to "now" would still return a plausible
+    ``seconds_remaining`` and pass a looser test.
+    """
+    service = await _service(db_session)
+    provider = await _provider(db_session, service)
+    _, _, booking = await _open_booking(db_session, service)
+    window = get_settings().BOOKING_REQUEST_TIMEOUT_SECONDS
+    await _age(db_session, booking, window - 30)
+
+    resp = await _get(client, booking.id, provider, auth_headers)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert 25 <= body["seconds_remaining"] <= 31, body["seconds_remaining"]
+
+    expected = booking.created_at + timedelta(seconds=window)
+    assert datetime.fromisoformat(body["expires_at"]) == expected
+
+
+@pytest.mark.asyncio
+async def test_countdown_floors_at_zero_inside_the_sweep_lag(client, db_session, auth_headers):
+    """Past the deadline but still REQUESTED — the offer is served, 0 is not negative.
+
+    ``expire_stale_bookings`` runs every 30s, so a booking outlives its deadline
+    by up to that long while still being servable here. A negative countdown
+    would be nonsense for the card to render.
+    """
+    service = await _service(db_session)
+    provider = await _provider(db_session, service)
+    _, _, booking = await _open_booking(db_session, service)
+    await _age(db_session, booking, get_settings().BOOKING_REQUEST_TIMEOUT_SECONDS + 80)
+
+    resp = await _get(client, booking.id, provider, auth_headers)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["seconds_remaining"] == 0
+
+
+@pytest.mark.asyncio
+async def test_expiry_tracks_the_configured_timeout(client, db_session, auth_headers):
+    """Changing the server's timeout moves the advertised expiry, with no client change.
+
+    This is why the value is served rather than hardcoded in the app: a client
+    duplicating 120 would silently desync the day the config moves.
+    """
+    service = await _service(db_session)
+    provider = await _provider(db_session, service)
+    _, _, booking = await _open_booking(db_session, service)
+
+    with patch("app.services.booking_service.get_settings") as mock_settings:
+        mock_settings.return_value = SimpleNamespace(BOOKING_REQUEST_TIMEOUT_SECONDS=600)
+        resp = await _get(client, booking.id, provider, auth_headers)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert 590 <= body["seconds_remaining"] <= 600
+    assert datetime.fromisoformat(body["expires_at"]) == booking.created_at + timedelta(seconds=600)
+
+
+def test_expiry_fields_are_required_in_the_generated_contract(client):
+    """Both must land in OpenAPI ``required`` so codegen types them non-optional.
+
+    A Pydantic field with a default falls out of ``required``, the generated
+    client types it optional, and the app writes ``?? 120`` — reinstating exactly
+    the client-side guess this ticket removes.
+    """
+    schema = client._transport.app.openapi()["components"]["schemas"]["BookingOfferResponse"]
+
+    assert "expires_at" in schema["required"]
+    assert "seconds_remaining" in schema["required"]
