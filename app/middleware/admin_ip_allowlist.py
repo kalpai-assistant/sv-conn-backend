@@ -74,12 +74,20 @@ class AdminIPAllowlistMiddleware(BaseHTTPMiddleware):
 
     _PROTECTED_PREFIX = "/admin"
 
+    # Non-dev environments must configure the allowlist explicitly. Booting
+    # staging / production with it empty leaves /admin/* open to the world
+    # (gated only by the JWT role check). The old INFO log for that case
+    # blended into the boot chatter and was easy to miss. Bumped to WARNING
+    # so it stands out in log aggregators and paging rules can filter on it.
+    _NON_DEV_ENVS = frozenset({"staging", "production"})
+
     def __init__(
         self,
         app,
         allowed_ips: str = "",
         trust_forwarded_for: bool = False,
         api_prefix: str = "",
+        environment: str = "dev",
     ):
         super().__init__(app)
         self._networks = _parse_allowlist(allowed_ips)
@@ -93,6 +101,17 @@ class AdminIPAllowlistMiddleware(BaseHTTPMiddleware):
                 "Admin IP allowlist active: %d network(s), trust_forwarded_for=%s",
                 len(self._networks),
                 self._trust_forwarded,
+            )
+        elif environment in self._NON_DEV_ENVS:
+            # This is the sharp-edge case the audit flagged: production boot
+            # with an empty allowlist. Log at WARNING so it stands out (and
+            # so ops can wire an alert on the exact string below).
+            logger.warning(
+                "ADMIN_ALLOWED_IPS is empty in environment=%s — /admin/* is "
+                "reachable from any IP (JWT role check is the only gate). "
+                "Set ADMIN_ALLOWED_IPS to a CIDR list to enforce network-level "
+                "restriction.",
+                environment,
             )
         else:
             logger.info(
