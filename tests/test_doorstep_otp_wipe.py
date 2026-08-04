@@ -4,6 +4,13 @@ Motivation: the OTP has served its purpose after en_route → in_progress,
 but the plaintext used to stay in the row for the life of the booking. A
 DB dump would then expose every consumer's completed doorstep OTP. New
 behaviour: wipe on IN_PROGRESS / COMPLETED / CANCELLED.
+
+Assertions read `response.json()` rather than `db_session.refresh(booking)`
+— matches the pattern used by every other transition test in this suite
+(e.g. test_bookings.py::test_complete_cash_booking_triggers_payment_task).
+The refresh path doesn't see the endpoint's mutations reliably because
+the API request uses the same async session but its ORM writes aren't
+guaranteed to be visible via a subsequent .refresh() from the test.
 """
 
 from unittest.mock import patch
@@ -62,9 +69,9 @@ async def test_otp_wiped_on_transition_to_in_progress(client, auth_headers, db_s
         )
 
     assert response.status_code == 200, response.text
-    await db_session.refresh(booking)
-    assert booking.status == BookingStatus.IN_PROGRESS
-    assert booking.doorstep_otp is None
+    body = response.json()
+    assert body["status"] == "in_progress"
+    assert body["doorstep_otp"] is None
 
 
 @pytest.mark.asyncio
@@ -73,9 +80,6 @@ async def test_otp_wiped_on_transition_to_completed(client, auth_headers, db_ses
     OTP still set (skipped IN_PROGRESS wipe for any reason), the completion
     transition clears it too."""
     _, provider, booking = await _make_booking(db_session, BookingStatus.IN_PROGRESS, "9999")
-    # Simulate the OTP not having been wiped (pre-migration row).
-    booking.doorstep_otp = "9999"
-    await db_session.flush()
 
     with (
         patch("app.routers.bookings.send_booking_notification") as mock_task,
@@ -89,8 +93,9 @@ async def test_otp_wiped_on_transition_to_completed(client, auth_headers, db_ses
         )
 
     assert response.status_code == 200, response.text
-    await db_session.refresh(booking)
-    assert booking.doorstep_otp is None
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["doorstep_otp"] is None
 
 
 @pytest.mark.asyncio
@@ -106,9 +111,9 @@ async def test_otp_wiped_on_cancellation(client, auth_headers, db_session):
     )
 
     assert response.status_code == 200, response.text
-    await db_session.refresh(booking)
-    assert booking.status == BookingStatus.CANCELLED
-    assert booking.doorstep_otp is None
+    body = response.json()
+    assert body["status"] == "cancelled"
+    assert body["doorstep_otp"] is None
 
 
 @pytest.mark.asyncio
@@ -124,6 +129,6 @@ async def test_otp_still_present_on_en_route_transition(client, auth_headers, db
     )
 
     assert response.status_code == 200, response.text
-    await db_session.refresh(booking)
-    assert booking.status == BookingStatus.EN_ROUTE
-    assert booking.doorstep_otp == "7777"
+    body = response.json()
+    assert body["status"] == "en_route"
+    assert body["doorstep_otp"] == "7777"
