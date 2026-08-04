@@ -82,14 +82,26 @@ class RateLimitExceeded(AppException):
     header (see the handler in `register_exception_handlers`). A value of `None`
     means we couldn't compute a meaningful wait — the handler defaults to the
     full policy window.
+
+    `limit` and `reset_at` optionally carry the same X-RateLimit-* context
+    that a within-limit response emits (SVC-159), so clients see a consistent
+    policy on both 200 and 429 and don't have to look in two places.
     """
 
-    def __init__(self, retry_after: int | None = None, message: str = "Too many requests"):
+    def __init__(
+        self,
+        retry_after: int | None = None,
+        message: str = "Too many requests",
+        limit: int | None = None,
+        reset_at: int | None = None,
+    ):
         super().__init__(
             message,
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         )
         self.retry_after = retry_after
+        self.limit = limit
+        self.reset_at = reset_at
 
 
 class DuplicateReview(AppException):
@@ -147,9 +159,18 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def app_exception_handler(request: Request, exc: AppException):
         headers: dict[str, str] = {}
         # Rate-limit responses always carry Retry-After per RFC 6585 §4 so
-        # clients can back off intelligently instead of hammering.
+        # clients can back off intelligently instead of hammering. When the
+        # limiter passed us richer context (SVC-159), mirror the same
+        # X-RateLimit-* headers the 200 path emits so a client sees a
+        # consistent policy view whether they're inside or past the ceiling.
         if isinstance(exc, RateLimitExceeded):
             headers["Retry-After"] = str(exc.retry_after or 60)
+            if exc.limit is not None:
+                headers["X-RateLimit-Limit"] = str(exc.limit)
+                # Remaining is definitionally 0 at 429.
+                headers["X-RateLimit-Remaining"] = "0"
+            if exc.reset_at is not None:
+                headers["X-RateLimit-Reset"] = str(exc.reset_at)
         return JSONResponse(
             status_code=exc.status_code,
             content={

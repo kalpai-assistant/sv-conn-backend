@@ -17,12 +17,25 @@ at these limits — nobody notices whether "10/hour" is a rolling hour or a
 calendar hour when the window is short.
 """
 
-from fastapi import Depends, Request
+import time
+
+from fastapi import Depends, Request, Response
 from redis.asyncio import Redis
 
 from app.dependencies import get_current_user, get_redis
 from app.exceptions import RateLimitExceeded
 from app.models.user import User
+
+
+def _write_rate_headers(response: Response, limit: int, remaining: int, reset_at: int) -> None:
+    """Attach the standard X-RateLimit-* triplet to a within-limit response
+    (SVC-159). Uses the classic X-RateLimit-Limit / -Remaining / -Reset
+    form (absolute Unix-seconds reset) rather than the IETF draft's
+    single-header `RateLimit`. Nearly all client tooling speaks the classic
+    form and the draft is still non-final."""
+    response.headers["X-RateLimit-Limit"] = str(limit)
+    response.headers["X-RateLimit-Remaining"] = str(max(0, remaining))
+    response.headers["X-RateLimit-Reset"] = str(reset_at)
 
 
 def ip_rate_limit(namespace: str, max_requests: int, window_seconds: int = 3600):
@@ -42,6 +55,7 @@ def ip_rate_limit(namespace: str, max_requests: int, window_seconds: int = 3600)
 
     async def dependency(
         request: Request,
+        response: Response,
         redis: Redis = Depends(get_redis),
     ) -> None:
         client_ip = _extract_client_ip(request)
@@ -51,10 +65,26 @@ def ip_rate_limit(namespace: str, max_requests: int, window_seconds: int = 3600)
         if current == 1:
             await redis.expire(key, window_seconds)
 
+        ttl = await redis.ttl(key)
+        # ttl can be -2 (key gone between INCR and TTL) or -1 (no expiry set —
+        # shouldn't happen after the EXPIRE above, but defensive). Both fall
+        # back to the full window as a conservative reset estimate.
+        effective_ttl = ttl if ttl > 0 else window_seconds
+        reset_at = int(time.time()) + effective_ttl
+
         if current > max_requests:
-            ttl = await redis.ttl(key)
-            retry_after = ttl if ttl > 0 else 60
-            raise RateLimitExceeded(retry_after=retry_after)
+            raise RateLimitExceeded(
+                retry_after=effective_ttl,
+                limit=max_requests,
+                reset_at=reset_at,
+            )
+
+        _write_rate_headers(
+            response,
+            limit=max_requests,
+            remaining=max_requests - current,
+            reset_at=reset_at,
+        )
 
     return dependency
 
@@ -85,6 +115,7 @@ def rate_limit(namespace: str, max_requests: int, window_seconds: int = 3600):
     """
 
     async def dependency(
+        response: Response,
         current_user: User = Depends(get_current_user),
         redis: Redis = Depends(get_redis),
     ) -> None:
@@ -97,12 +128,25 @@ def rate_limit(namespace: str, max_requests: int, window_seconds: int = 3600):
         if current == 1:
             await redis.expire(key, window_seconds)
 
+        ttl = await redis.ttl(key)
+        # ttl < 1 = key vanished between INCR and TTL (rare race) or no expiry
+        # was ever set (defensive — EXPIRE above should have handled it).
+        # Fall back to the full window as a conservative reset estimate.
+        effective_ttl = ttl if ttl > 0 else window_seconds
+        reset_at = int(time.time()) + effective_ttl
+
         if current > max_requests:
-            ttl = await redis.ttl(key)
-            # `ttl` is -2 if the key vanished between INCR and TTL (very rare
-            # race — a prior key's EXPIRE fired between our two ops). Fall
-            # back to a conservative minute rather than 0 or a negative number.
-            retry_after = ttl if ttl > 0 else 60
-            raise RateLimitExceeded(retry_after=retry_after)
+            raise RateLimitExceeded(
+                retry_after=effective_ttl,
+                limit=max_requests,
+                reset_at=reset_at,
+            )
+
+        _write_rate_headers(
+            response,
+            limit=max_requests,
+            remaining=max_requests - current,
+            reset_at=reset_at,
+        )
 
     return dependency
