@@ -80,7 +80,11 @@ class Booking(Base):
         Enum(BookingStatus), default=BookingStatus.REQUESTED, index=True
     )
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    doorstep_otp: Mapped[str] = mapped_column(String(4))
+    # Nullable because we zero it out as soon as the transition it protects
+    # (en_route → in_progress) happens — no reason to keep a live plaintext
+    # secret in a row that will outlive its use by weeks. Also cleared on
+    # cancellation. See booking_service.transition_status.
+    doorstep_otp: Mapped[str | None] = mapped_column(String(4), nullable=True)
     service_amount: Mapped[float] = mapped_column(Float, nullable=False)
     platform_commission: Mapped[float] = mapped_column(Float, nullable=False)
     provider_payout: Mapped[float] = mapped_column(Float, nullable=False)
