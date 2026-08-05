@@ -103,3 +103,47 @@ async def test_cors_rejects_unlisted_origin(monkeypatch):
     # Starlette's CORS middleware omits the header for disallowed origins,
     # which the browser interprets as a rejection.
     assert r.headers.get("access-control-allow-origin") is None
+
+
+# ---------------------------------------------------------------------------
+# SVC-159 follow-up — expose rate-limit response headers to browser JS
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_expose_headers_includes_ratelimit_triplet(monkeypatch):
+    """The X-RateLimit-* triplet + Retry-After must be listed in
+    Access-Control-Expose-Headers, or the browser hides them from
+    fetch()/XHR even when the server sends them. Without this the
+    SVC-159 headers are invisible to any client JS."""
+    from app import main as main_mod
+
+    monkeypatch.setattr(
+        main_mod.settings,
+        "CORS_ALLOWED_ORIGINS",
+        "https://app.eazyserv.com",
+    )
+
+    app = create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Any request from an allowed origin picks up the expose-headers
+        # advertisement — using /health because it's un-authed + always up.
+        r = await ac.get(
+            "/health",
+            headers={"Origin": "https://app.eazyserv.com"},
+        )
+
+    exposed = r.headers.get("access-control-expose-headers", "")
+    # Header names in the CORS response are case-insensitive and Starlette
+    # emits them comma-separated with a single space. Split + normalise.
+    exposed_set = {h.strip().lower() for h in exposed.split(",")}
+    for required in (
+        "x-ratelimit-limit",
+        "x-ratelimit-remaining",
+        "x-ratelimit-reset",
+        "retry-after",
+    ):
+        assert required in exposed_set, (
+            f"Access-Control-Expose-Headers missing {required!r}; "
+            f"browser JS can't read the SVC-159 rate-limit headers. Got: {exposed!r}"
+        )

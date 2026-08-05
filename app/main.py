@@ -87,6 +87,18 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # SVC-159: browser JS can only READ response headers that the server
+        # explicitly whitelists via Access-Control-Expose-Headers, and CORS
+        # exempts only a fixed set of simple headers. The rate-limit triplet
+        # + Retry-After are exactly the ones a client would want to read to
+        # back off before hitting 429 — without this list, they're on the
+        # response but the browser hides them from fetch()/XHR.
+        expose_headers=[
+            "X-RateLimit-Limit",
+            "X-RateLimit-Remaining",
+            "X-RateLimit-Reset",
+            "Retry-After",
+        ],
     )
 
     # Rate limiter needs Redis — deferred wiring via dependency, but middleware
