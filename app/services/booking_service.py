@@ -5,7 +5,7 @@ OTP-gated service start, and paginated listing.
 
 import secrets
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -150,13 +150,42 @@ class BookingService:
             ).where(ProviderProfile.user_id == provider_id)
         )
 
+        expires_at, seconds_remaining = self._offer_expiry(booking)
+
         return BookingOfferResponse(
             booking_id=booking.id,
             service_name=service.name,
             service_amount=booking.service_amount,
             full_address=address.full_address,
             distance_km=round(distance.scalar_one(), 2),
+            expires_at=expires_at,
+            seconds_remaining=seconds_remaining,
         )
+
+    @staticmethod
+    def _offer_expiry(booking: Booking) -> tuple[datetime, int]:
+        """When this offer dies, and how long the card has left (SVC-166).
+
+        Derived from ``created_at`` + the configured timeout — the same pair
+        ``expire_stale_bookings`` sweeps on — so changing the timeout moves both
+        the real expiry and what we advertise. Nothing is stored; there is no
+        column and no migration behind this.
+
+        Two deliberate choices:
+
+        * The nominal deadline is reported, not the worst case. The sweep runs
+          every 30s, so a booking can survive up to ``timeout + 30s`` in practice.
+          Advertising that would promise time the server may not honour; the card
+          giving up a little early is the safe direction.
+        * ``seconds_remaining`` is floored at zero. Inside that sweep lag a
+          booking is past its deadline but still REQUESTED, so this endpoint
+          still serves it — a negative countdown would be nonsense, and 0 tells
+          the card to dismiss.
+        """
+        timeout = timedelta(seconds=get_settings().BOOKING_REQUEST_TIMEOUT_SECONDS)
+        expires_at = booking.created_at + timeout
+        remaining = (expires_at - datetime.now(UTC)).total_seconds()
+        return expires_at, max(0, int(remaining))
 
     # ------------------------------------------------------------------
     # State transitions

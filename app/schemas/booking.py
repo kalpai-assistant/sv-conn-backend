@@ -40,6 +40,17 @@ class BookingOfferResponse(BaseModel):
 
     ``service_amount`` is returned as a plain number; the app formats the ₹ string.
     Rupee formatting is not done server-side here — see the ticket's money note.
+
+    ``expires_at`` and ``seconds_remaining`` both describe the same instant and are
+    both returned on purpose (SVC-166). The card's countdown must use
+    ``seconds_remaining``: it is computed server-side, so a device with a wrong
+    clock still counts down correctly, and clock skew is unbounded on a 120-second
+    window. ``expires_at`` is the absolute form, for anything needing a real
+    instant rather than a duration.
+
+    Neither field carries a default — a defaulted field falls out of OpenAPI
+    ``required`` and the generated client types it optional, which invites a
+    ``?? 120`` fallback and reintroduces the bug this exists to fix.
     """
 
     booking_id: UUID
@@ -47,6 +58,8 @@ class BookingOfferResponse(BaseModel):
     service_amount: float
     full_address: str
     distance_km: float
+    expires_at: datetime
+    seconds_remaining: int
 
 
 class StartBookingRequest(BaseModel):
