@@ -1,0 +1,82 @@
+# Deploy backend to beta (App Runner via ECR).
+#
+# Auth via GitHub OIDC → assume `eazyserv-github-deploy` IAM role
+# (created in AWS Setup Part 5.5). No long-lived AWS keys as GH secrets.
+#
+# Manual trigger for now (workflow_dispatch) so I can rebuild without
+# a code push. Auto-deploy on push to main enabled once we're confident
+# the pipeline is stable — pattern: uncomment the `push:` block.
+
+name: Deploy backend to beta
+
+on:
+  workflow_dispatch:  # manual trigger from the Actions tab
+  # push:
+  #   branches: [main]
+  #   paths-ignore:
+  #     - '**.md'
+  #     - '.gitignore'
+  #     - 'docs/**'
+
+concurrency:
+  group: deploy-beta
+  cancel-in-progress: false  # never cancel a deploy mid-flight
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: eazyserv-backend
+  IMAGE_TAG: beta
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # OIDC → assume the ECR-push role. Sub-second, no long-lived creds
+      # sitting in GH secrets.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::018272776203:role/eazyserv-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Buildx gives us layer caching between runs via the GitHub Actions
+      # cache backend — subsequent builds are 30-60s instead of 3-4 min.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64  # App Runner runs on x86; DON'T let buildx
+                                  # pick arm64 from a Mac runner
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # App Runner is configured (in AWS Setup Part 2.6) with
+      # `auto_deployments_enabled = true`, so pushing a new :beta tag
+      # triggers a rolling redeploy within 2-3 min. No API call needed
+      # from here. If the service isn't set up yet (first-time bringup),
+      # this step is skipped and the image just sits in ECR ready for
+      # the manual apprunner:create-service call in the runbook.
+
+      - name: Note next steps
+        run: |
+          echo "Image pushed: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:beta"
+          echo ""
+          echo "If App Runner service exists: auto-deploys in 2-3 min."
+          echo "If not: run the create-service step from AWS_SETUP.md Part 2.6."
