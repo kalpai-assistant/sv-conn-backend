@@ -6,7 +6,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, get_redis
+from app.dependencies import get_current_user, get_redis, require_role
 from app.exceptions import IdempotencyInProgress
 from app.models.booking import BookingStatus, PaymentMethod
 from app.models.user import User
@@ -107,14 +107,28 @@ async def create_booking(
 @router.patch(
     "/{booking_id}/accept",
     response_model=BookingResponse,
+    # SVC-168: gate at the endpoint too. The service-layer eligibility check is
+    # the real defence; this is defence-in-depth against a future refactor that
+    # drops the service check. A consumer or admin hitting /accept must never
+    # reach the service call.
+    dependencies=[Depends(require_role("provider"))],
     # Declared so they reach the generated client — the Incoming Request Card
     # branches on these codes and must never parse the message (SVC-154).
+    #
+    # SVC-167: the lost-race case (someone else took it) now returns 410, not
+    # 403, matching cancelled/expired. All three "the offer is gone" outcomes
+    # share one code the card can key on. 403 stays for "you weren't offered
+    # this booking" (SVC-168) — a distinct outcome the card treats differently.
     responses={
-        403: {"description": "Another provider claimed this booking first"},
+        403: {
+            "description": "You were not offered this booking. Not visible to a "
+            "well-behaved client — the app never sends /accept for a booking it "
+            "hasn't been notified about."
+        },
         404: {"description": "No such booking"},
         410: {
-            "description": "The booking is no longer available — cancelled or "
-            "expired. Dismiss the card."
+            "description": "The offer is over — claimed by another provider, "
+            "cancelled, or expired. Dismiss the card."
         },
     },
 )
