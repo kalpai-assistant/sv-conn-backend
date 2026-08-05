@@ -254,7 +254,13 @@ class BookingService:
             if booking.provider_id is None:
                 booking.provider_id = changed_by
             elif booking.provider_id != changed_by:
-                raise UnauthorizedAction(
+                # 410, matching accept_booking (SVC-167) — same lost race, and the
+                # contract must not depend on which entry point reported it.
+                # Unreachable through the API today: accept_booking rejects this
+                # case before delegating here, and no other caller transitions to
+                # ACCEPTED. Kept as defence in depth, and fixed so that adding
+                # such a caller does not quietly reinstate the 403.
+                raise BookingOfferClosed(
                     "This booking has already been claimed by another provider"
                 )
         elif changed_by not in (booking.provider_id, booking.consumer_id):
