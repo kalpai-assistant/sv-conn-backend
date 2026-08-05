@@ -349,8 +349,16 @@ async def test_idempotent_retry_survives_provider_going_offline(client, db_sessi
     assert first.status_code == 200
 
     # Provider goes offline AFTER acceptance — mirrors what happens in prod
-    # when a network blip resets the client's online-state.
-    profile = await db_session.get(ProviderProfile, provider.id)
+    # when a network blip resets the client's online-state. ProviderProfile's
+    # PK is its own `id`, not `user_id` — provider.id is the user id, so a
+    # keyed `db.get(...)` returns None; query by user_id instead.
+    from sqlalchemy import select
+
+    profile = (
+        await db_session.execute(
+            select(ProviderProfile).where(ProviderProfile.user_id == provider.id)
+        )
+    ).scalar_one()
     profile.is_online = False
     await db_session.flush()
 
