@@ -291,14 +291,45 @@ async def test_get_booking_response_conforms(client, db_session, auth_headers):
 
 @pytest.mark.asyncio
 async def test_accept_booking_response_conforms(client, db_session, auth_headers):
-    """PATCH /bookings/{id}/accept → BookingResponse (200 winner path)."""
-    consumer, _, booking = await _consumer_booking(db_session, status=BookingStatus.REQUESTED)
-    # The booking factory pre-assigns a provider even in REQUESTED state via
-    # our helper — clear it so accept follows the "unclaimed" branch, and
-    # create a fresh provider to accept.
-    booking.provider_id = None
+    """PATCH /bookings/{id}/accept → BookingResponse (200 winner path).
+
+    Needs an eligible provider (SVC-168: verified + online + subscribed + in
+    radius) and a geolocated consumer address. Without those, accept 403s
+    before it even reaches the code path that returns BookingResponse.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
+    svc = await _service(db_session)
+
+    addr = Address(
+        user_id=consumer.id,
+        label="home",
+        full_address="12 MG Road, Indiranagar",
+        location="SRID=4326;POINT(77.6408 12.9784)",
+    )
+    db_session.add(addr)
     await db_session.flush()
+
+    db_session.add(
+        ProviderProfile(
+            user_id=provider.id,
+            kyc_status=KYCStatus.VERIFIED,
+            is_online=True,
+            service_area_center="SRID=4326;POINT(77.6200 12.9700)",
+            service_area_radius_km=10,
+        )
+    )
+    db_session.add(ProviderServiceModel(provider_id=provider.id, service_id=svc.id))
+    await db_session.flush()
+
+    booking = await BookingFactory.create(
+        db_session,
+        consumer_id=consumer.id,
+        provider_id=None,
+        service_id=svc.id,
+        address_id=addr.id,
+        status=BookingStatus.REQUESTED,
+    )
 
     with patch("app.routers.bookings.send_booking_notification") as mock_task:
         mock_task.delay = lambda **kwargs: None

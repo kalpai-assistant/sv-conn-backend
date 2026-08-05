@@ -195,6 +195,31 @@ class BookingService:
         if not booking:
             raise BookingNotFound(booking_id)
 
+        # SVC-168: eligibility check before we reveal anything about the booking.
+        # `get_offer` uses the same shared predicate (`is_eligible_provider_stmt`),
+        # so the set of providers who may accept can never drift from the set who
+        # were offered — the invariant SVC-153 established.
+        #
+        # Skip the check when the caller already owns the booking: they were
+        # eligible when they accepted, and re-checking would refuse a legitimate
+        # idempotent retry from a provider who has since gone offline / had KYC
+        # revoked / unsubscribed from the service.
+        if booking.provider_id != provider_id:
+            address = await self.db.get(Address, booking.consumer_address_id)
+            if address is None or address.location is None:
+                # Address gone / never geocoded → the broadcast bailed too, so
+                # nobody was ever offered this. Refuse like any non-recipient.
+                raise UnauthorizedAction("You were not offered this booking")
+            eligible = await self.db.execute(
+                is_eligible_provider_stmt(booking.service_id, address.location, provider_id)
+            )
+            if eligible.scalar_one_or_none() is None:
+                # 403 here is correct — this is "you should never have been able
+                # to do this" (SVC-168), which is different from "you lost the
+                # race" (410, below) or "the booking's over" (also 410). All
+                # three are distinguishable by status code alone.
+                raise UnauthorizedAction("You were not offered this booking")
+
         if booking.status in (BookingStatus.CANCELLED, BookingStatus.EXPIRED):
             raise BookingOfferClosed()
 
@@ -202,7 +227,12 @@ class BookingService:
             if booking.status is BookingStatus.ACCEPTED:
                 return booking, False
         elif booking.provider_id is not None:
-            raise UnauthorizedAction("This booking has already been claimed by another provider")
+            # SVC-167: another provider won the race. From the card's point of
+            # view this is the same outcome as cancelled/expired — the offer is
+            # gone, dismiss it quietly. Was 403; the code drift with the
+            # cancelled/expired path forced the frontend into
+            # `if (403 || 410) dismiss()`. 410 unifies the vocabulary.
+            raise BookingOfferClosed()
 
         booking = await self.transition_status(
             booking_id=booking_id,
