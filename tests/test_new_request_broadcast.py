@@ -126,9 +126,16 @@ async def _seed_provider(
             service_area_radius_km=radius_km,
         )
     )
+    # Flush the profile BEFORE adding the subscription — provider_services.
+    # provider_id FKs to provider_profiles.user_id, and SQLAlchemy's async
+    # flush doesn't reliably order inserts by that FK path (it does for
+    # PK-referencing FKs). Without this intermediate flush we get:
+    # `provider_services_provider_id_fkey: Key not present in
+    # provider_profiles`.
+    await db.flush()
     if subscribed:
         db.add(ProviderServiceModel(provider_id=user.id, service_id=service.id))
-    await db.flush()
+        await db.flush()
     return user
 
 
@@ -138,10 +145,11 @@ def _run_broadcast(booking_id, db):
     body is sync), so no eager-mode config needed."""
     from app.tasks import notification_tasks
 
-    # The task calls `SyncSessionLocal()` as a context manager. We replace
-    # it with a factory that yields our async-session's sync view — the
-    # test uses async_sessionmaker, which shares the connection, so the
-    # SELECT + UPDATE statements the task issues see the seeded rows.
+    # The task does `from app.database import SyncSessionLocal` INSIDE its
+    # try block — so `SyncSessionLocal` isn't a module attribute of
+    # `notification_tasks` and patch.object(notification_tasks, ...) fails
+    # with "does not have the attribute". Patch at the source instead;
+    # the inner `import` picks up the mock.
     class _FakeSyncSessionCtx:
         def __enter__(self):
             return db
@@ -150,7 +158,7 @@ def _run_broadcast(booking_id, db):
             return False
 
     with (
-        patch.object(notification_tasks, "SyncSessionLocal", lambda: _FakeSyncSessionCtx()),
+        patch("app.database.SyncSessionLocal", lambda: _FakeSyncSessionCtx()),
         patch.object(notification_tasks, "send_push_notification") as mock_push,
     ):
         # Call the task's inner function directly (bypasses Celery serialisation).
