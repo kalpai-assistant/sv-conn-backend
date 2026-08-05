@@ -145,14 +145,23 @@ def _run_broadcast(booking_id, db):
     body is sync), so no eager-mode config needed."""
     from app.tasks import notification_tasks
 
-    # The task does `from app.database import SyncSessionLocal` INSIDE its
-    # try block — so `SyncSessionLocal` isn't a module attribute of
-    # `notification_tasks` and patch.object(notification_tasks, ...) fails
-    # with "does not have the attribute". Patch at the source instead;
-    # the inner `import` picks up the mock.
+    # SQLAlchemy AsyncSession exposes the underlying sync Session via
+    # `.sync_session` — same connection, same transaction. Yielding THAT
+    # lets the task's `db.get(...)` / `db.execute(...)` sync calls work
+    # unchanged against the state seeded by our async test setup. Yielding
+    # the AsyncSession itself would return coroutines from those calls,
+    # which the task's try/except silently swallows into a retry — the
+    # test would see 0 pushes with no signal about why.
+    #
+    # The task also does `from app.database import SyncSessionLocal`
+    # INSIDE its try block — so it isn't a module attribute of
+    # `notification_tasks` and patch.object(notification_tasks, ...)
+    # fails. Patch at the source; the inner import picks up the mock.
+    sync_session = db.sync_session
+
     class _FakeSyncSessionCtx:
         def __enter__(self):
-            return db
+            return sync_session
 
         def __exit__(self, *exc):
             return False
@@ -162,9 +171,8 @@ def _run_broadcast(booking_id, db):
         patch.object(notification_tasks, "send_push_notification") as mock_push,
     ):
         # `.apply()` runs the task synchronously in-process, with `self`
-        # bound correctly. Using `__wrapped__` directly here double-binds
-        # `self` and Celery complains about multiple values for the same
-        # kwarg — apply avoids that whole layer.
+        # bound correctly. Using `__wrapped__` directly double-binds `self`
+        # and Celery complains about multiple values for the same kwarg.
         notification_tasks.send_booking_notification.apply(
             kwargs={"booking_id": str(booking_id), "event": "new_request"}
         )
