@@ -161,11 +161,12 @@ def _run_broadcast(booking_id, db):
         patch("app.database.SyncSessionLocal", lambda: _FakeSyncSessionCtx()),
         patch.object(notification_tasks, "send_push_notification") as mock_push,
     ):
-        # Call the task's inner function directly (bypasses Celery serialisation).
-        # `self` isn't used by the try/except except for retry; irrelevant on
-        # the happy path we're testing.
-        notification_tasks.send_booking_notification.__wrapped__(
-            None, booking_id=str(booking_id), event="new_request"
+        # `.apply()` runs the task synchronously in-process, with `self`
+        # bound correctly. Using `__wrapped__` directly here double-binds
+        # `self` and Celery complains about multiple values for the same
+        # kwarg — apply avoids that whole layer.
+        notification_tasks.send_booking_notification.apply(
+            kwargs={"booking_id": str(booking_id), "event": "new_request"}
         )
     return mock_push
 
