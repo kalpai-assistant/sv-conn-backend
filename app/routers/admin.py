@@ -142,7 +142,10 @@ async def list_all_bookings(
     bookings = list(result.scalars().all())
 
     return BookingListResponse(
-        bookings=[BookingResponse.model_validate(b) for b in bookings],
+        # No viewer identity to compare against — an admin is never the booking's
+        # consumer, so no row here carries its doorstep PIN. This listing spans
+        # every booking in the system, live ones included (SVC-169).
+        bookings=[BookingResponse.for_viewer(b, viewer_id=None) for b in bookings],
         total=total,
         page=page,
         per_page=per_page,

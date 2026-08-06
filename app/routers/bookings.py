@@ -69,7 +69,7 @@ async def create_booking(
             payment_method=request.payment_method,
         )
         send_booking_notification.delay(booking_id=str(booking.id), event="new_request")
-        return booking
+        return BookingResponse.for_viewer(booking, current_user.id)
 
     if not idempotency_key:
         return await do_create()
@@ -93,8 +93,7 @@ async def create_booking(
         raise IdempotencyInProgress()
 
     try:
-        booking = await do_create()
-        response_body = BookingResponse.model_validate(booking).model_dump(mode="json")
+        response_body = (await do_create()).model_dump(mode="json")
         await store.commit(body_hash, status.HTTP_201_CREATED, response_body)
         return JSONResponse(status_code=status.HTTP_201_CREATED, content=response_body)
     except Exception:
@@ -150,7 +149,7 @@ async def accept_booking(
     )
     if newly_accepted:
         send_booking_notification.delay(booking_id=str(booking.id), event="accepted")
-    return booking
+    return BookingResponse.for_viewer(booking, current_user.id)
 
 
 @router.patch("/{booking_id}/en-route", response_model=BookingResponse)
@@ -159,11 +158,14 @@ async def mark_en_route(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    return await BookingService(db).transition_status(
+    booking = await BookingService(db).transition_status(
         booking_id=booking_id,
         new_status=BookingStatus.EN_ROUTE,
         changed_by=current_user.id,
     )
+    # The window SVC-169 is about: ACCEPTED and EN_ROUTE are the two states
+    # where the PIN is still live, and both of these routes are provider-driven.
+    return BookingResponse.for_viewer(booking, current_user.id)
 
 
 @router.patch("/{booking_id}/start", response_model=BookingResponse)
@@ -181,7 +183,7 @@ async def start_booking(
         otp=request.otp,
     )
     send_booking_notification.delay(booking_id=str(booking.id), event="in_progress")
-    return booking
+    return BookingResponse.for_viewer(booking, current_user.id)
 
 
 @router.patch("/{booking_id}/complete", response_model=BookingResponse)
@@ -199,7 +201,7 @@ async def complete_booking(
     # Fix #4: Trigger cash payment recording if applicable
     if booking.payment_method == PaymentMethod.CASH:
         process_cash_payment.delay(booking_id=str(booking.id))
-    return booking
+    return BookingResponse.for_viewer(booking, current_user.id)
 
 
 @router.patch("/{booking_id}/cancel", response_model=BookingResponse)
@@ -209,12 +211,13 @@ async def cancel_booking(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    return await BookingService(db).transition_status(
+    booking = await BookingService(db).transition_status(
         booking_id=booking_id,
         new_status=BookingStatus.CANCELLED,
         changed_by=current_user.id,
         cancellation_reason=request.reason,
     )
+    return BookingResponse.for_viewer(booking, current_user.id)
 
 
 @router.get("/", response_model=BookingListResponse)
@@ -274,5 +277,11 @@ async def get_booking(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Fetch a single booking by ID. Only consumer or assigned provider may access."""
-    return await BookingService(db).get_booking(booking_id=booking_id, user_id=current_user.id)
+    """Fetch a single booking by ID. Only consumer or assigned provider may access.
+
+    Both parties get the same schema, so the response is built per-caller rather
+    than split by ``response_model``: the assigned provider sees the booking
+    without ``doorstep_otp`` (SVC-169).
+    """
+    booking = await BookingService(db).get_booking(booking_id=booking_id, user_id=current_user.id)
+    return BookingResponse.for_viewer(booking, current_user.id)
