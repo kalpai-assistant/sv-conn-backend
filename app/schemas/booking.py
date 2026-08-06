@@ -1,7 +1,11 @@
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from app.models.booking import Booking
 
 
 class CreateBookingRequest(BaseModel):
@@ -22,11 +26,48 @@ class BookingResponse(BaseModel):
     provider_payout: float
     payment_method: str | None
     payment_status: str
-    doorstep_otp: str | None = None  # Only visible to consumer
+    # Only visible to the consumer — and, unlike before SVC-169, actually
+    # enforced. Build this schema with `for_viewer`, never `model_validate`,
+    # on any path that can be reached by someone other than the consumer.
+    doorstep_otp: str | None = None
     scheduled_at: datetime | None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def for_viewer(cls, booking: "Booking", viewer_id: UUID | None) -> "BookingResponse":
+        """Serialise a booking for one caller, blanking what they may not see.
+
+        ``doorstep_otp`` gates en_route → in_progress, so it has to reach the
+        provider from the consumer at the door rather than from this API — the
+        rule ``BookingOfferResponse`` already documents (SVC-153) and which
+        ``BookingResponse`` was declaring in a comment but never applying
+        (SVC-169). Serving it to the assigned provider made the doorstep check
+        ceremonial: they could read their own booking and skip the door.
+
+        Anyone who is not the consumer gets ``None``, including a ``viewer_id``
+        of ``None`` (admin listings, which have no booking-party identity).
+
+        The blanking happens on this validated *copy*, deliberately. The
+        assignment must never be made against the ORM object on a read path::
+
+            booking = await self.get_booking(booking_id, user_id)
+            booking.doorstep_otp = None   # persists — do not do this
+
+        ``get_booking`` returns a session-attached ``Booking`` and ``get_db``
+        commits at the end of every successful request (``app/database.py:65``),
+        so that would erase the PIN from the row instead of hiding it from the
+        response, and ``/start`` would then have nothing left to match. The
+        column is nullable since PR #59, so no IntegrityError would catch it —
+        the read would quietly wipe the row and return 200. The one place that
+        assignment belongs is ``transition_status``, which wipes the OTP on
+        IN_PROGRESS / COMPLETED / CANCELLED because it is spent by then.
+        """
+        response = cls.model_validate(booking)
+        if viewer_id is None or viewer_id != booking.consumer_id:
+            response.doorstep_otp = None
+        return response
 
 
 class BookingOfferResponse(BaseModel):

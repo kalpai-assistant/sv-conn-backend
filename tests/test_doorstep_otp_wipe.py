@@ -118,10 +118,18 @@ async def test_otp_wiped_on_cancellation(client, auth_headers, db_session):
 
 @pytest.mark.asyncio
 async def test_otp_still_present_on_en_route_transition(client, auth_headers, db_session):
-    """Sanity check: the OTP must still be readable up to and including
-    the en_route state, or the provider can't verify it at the doorstep.
-    Only transitions PAST that point wipe it."""
-    _, provider, booking = await _make_booking(db_session, BookingStatus.ACCEPTED, "7777")
+    """Sanity check: the OTP must survive up to and including the en_route
+    state, or `/start` has nothing left to match. Only transitions PAST that
+    point wipe it.
+
+    Asserted on the row rather than the response body: this request is the
+    provider's, and since SVC-169 a provider never receives the PIN in a
+    response. That redaction is what the body assertion here used to catch —
+    it read `body["doorstep_otp"] == "7777"`, which was the leak, not the
+    behaviour. Survival and visibility are separate questions, and only the
+    row answers the first one.
+    """
+    consumer, provider, booking = await _make_booking(db_session, BookingStatus.ACCEPTED, "7777")
 
     response = await client.patch(
         f"/api/v1/bookings/{booking.id}/en-route",
@@ -129,6 +137,18 @@ async def test_otp_still_present_on_en_route_transition(client, auth_headers, db
     )
 
     assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["status"] == "en_route"
-    assert body["doorstep_otp"] == "7777"
+    assert response.json()["status"] == "en_route"
+
+    # flush before refresh: the conftest `get_db` override never commits, so
+    # without it the refresh re-reads a row the request could not have changed
+    # and proves nothing. See `_row_otp` in test_doorstep_otp_visibility.py.
+    await db_session.flush()
+    await db_session.refresh(booking)
+    assert booking.doorstep_otp == "7777"
+
+    # And the consumer can still read it out at the door.
+    consumer_view = await client.get(
+        f"/api/v1/bookings/{booking.id}",
+        headers=auth_headers(str(consumer.id), "consumer"),
+    )
+    assert consumer_view.json()["doorstep_otp"] == "7777"

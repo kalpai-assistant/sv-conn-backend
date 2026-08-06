@@ -383,7 +383,12 @@ class BookingService:
         bookings = list(result.scalars().all())
 
         return BookingListResponse(
-            bookings=[BookingResponse.model_validate(b) for b in bookings],
+            # Per-row redaction, not a role check: `role` says what kind of user
+            # is asking, `for_viewer` asks whether *this* caller owns the booking
+            # they're being shown. A provider's page is filtered to their own
+            # jobs, so every row here is one where they are not the consumer and
+            # the PIN must be blanked (SVC-169).
+            bookings=[BookingResponse.for_viewer(b, user_id) for b in bookings],
             total=total,
             page=page,
             per_page=per_page,
