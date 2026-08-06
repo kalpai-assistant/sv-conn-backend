@@ -17,6 +17,7 @@ from app.models.user import User
 from app.schemas.booking import BookingListResponse, BookingResponse
 from app.schemas.provider import KYCDocsResponse, KYCRejectionRequest, KYCReviewResponse
 from app.schemas.user import UserResponse
+from app.services.booking_service import BookingService
 from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -141,10 +142,21 @@ async def list_all_bookings(
     result = await db.execute(stmt)
     bookings = list(result.scalars().all())
 
+    # Hydrated even though `for_viewer(viewer_id=None)` then drops it: the schema
+    # reads `Booking.consumer_address` while validating, and that relationship is
+    # `lazy="raise_on_sql"` (SVC-170). Withholding by simply not loading would
+    # work today and break the moment the redaction rule changes — who may see an
+    # address is one decision, and it lives next to the doorstep-PIN rule it sits
+    # beside, not in the shape of this query.
+    await BookingService(db).attach_addresses(bookings)
+
     return BookingListResponse(
         # No viewer identity to compare against — an admin is never the booking's
         # consumer, so no row here carries its doorstep PIN. This listing spans
-        # every booking in the system, live ones included (SVC-169).
+        # every booking in the system, live ones included (SVC-169). For the same
+        # reason no row carries a consumer address either, though the reasoning
+        # differs — bulk PII minimisation rather than secrecy. Both rules live in
+        # `for_viewer`; see its docstring (SVC-170).
         bookings=[BookingResponse.for_viewer(b, viewer_id=None) for b in bookings],
         total=total,
         page=page,

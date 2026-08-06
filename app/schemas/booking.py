@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 if TYPE_CHECKING:
     from app.models.booking import Booking
@@ -13,6 +13,38 @@ class CreateBookingRequest(BaseModel):
     address_id: UUID
     scheduled_at: datetime | None = None  # None = instant booking
     payment_method: str = Field(default="online", pattern=r"^(cash|online)$")
+
+
+class BookingAddress(BaseModel):
+    """Where the job is, as the booking's two parties see it (SVC-170).
+
+    Its own schema rather than a reuse of ``AddressResponse``, which backs the
+    consumer's own address book: that one carries ``is_default``, a detail of how
+    the consumer manages their saved addresses and nothing a provider standing
+    outside the building has any use for. Same principle that gave
+    ``BookingOfferResponse`` its own shape (SVC-153) — serve each audience the
+    fields its screen actually renders.
+
+    ``lat``/``lng`` are the point of this being a nested object rather than a bare
+    ``full_address`` string. The job to be done is *navigate there*: with
+    coordinates the app can hand off to the device maps app, without them the
+    provider retypes a free-text Indian address into Google Maps and trusts its
+    geocoder — the failure mode this ticket exists to remove. ``get_offer``
+    already reads the same geography to derive ``distance_km``.
+
+    Both are optional because ``location`` is nullable: ``CreateAddressRequest``
+    accepts an address with no coordinates, and older rows have none. Clients must
+    treat text as the source of truth and coordinates as the enhancement, never
+    the reverse.
+    """
+
+    id: UUID
+    label: str
+    full_address: str
+    lat: float | None
+    lng: float | None
+
+    model_config = {"from_attributes": True}
 
 
 class BookingResponse(BaseModel):
@@ -30,6 +62,20 @@ class BookingResponse(BaseModel):
     # enforced. Build this schema with `for_viewer`, never `model_validate`,
     # on any path that can be reached by someone other than the consumer.
     doorstep_otp: str | None = None
+    # Where the job is (SVC-170). Visible to the booking's two parties and nobody
+    # else — see `for_viewer`. Read from the `consumer_address` relationship,
+    # which must already be loaded: it is declared `lazy="raise_on_sql"`, so a
+    # caller who forgets to eager-load gets a loud error here rather than an
+    # implicit query (which under AsyncSession is a MissingGreenlet, and on the
+    # list route would be one query per row).
+    #
+    # Nullable but *required* — no default, so it stays in the OpenAPI `required`
+    # set and the generated client types it `BookingAddress | null` rather than
+    # optional. `null` is a real answer here (admin listings), and a client that
+    # must handle null is a client that will not silently render a blank card.
+    address: BookingAddress | None = Field(
+        validation_alias=AliasChoices("address", "consumer_address")
+    )
     scheduled_at: datetime | None
     created_at: datetime
 
@@ -38,6 +84,31 @@ class BookingResponse(BaseModel):
     @classmethod
     def for_viewer(cls, booking: "Booking", viewer_id: UUID | None) -> "BookingResponse":
         """Serialise a booking for one caller, blanking what they may not see.
+
+        Two fields are gated, by two different rules, and the difference is the
+        whole point of them being separate rules:
+
+        ``address`` goes to the booking's **two parties** — the consumer, and the
+        provider once assigned. The provider needs it precisely because they have
+        accepted: the job is to travel to that door (SVC-170). Before assignment
+        they get the pre-accept subset via ``BookingOfferResponse`` instead, and
+        anyone who is not a party gets ``None``. That last case is unreachable
+        through the routes today — ``get_booking`` raises ``UnauthorizedAction``
+        for a non-party and ``list_bookings`` filters to the caller's own rows —
+        and it is enforced here anyway, so the guarantee survives a future route
+        that forgets. Deliberately *not* keyed on role: what matters is whether
+        this caller is on this booking.
+
+        ``viewer_id=None`` (the admin listing) gets no address. Not because an
+        address is a secret an admin may not hold — an admin can already reach it
+        in the addresses table — but because ``GET /admin/bookings`` is a bulk
+        listing of up to 200 rows across every consumer on the platform, and a
+        page of home addresses is a wholesale PII surface that no current admin
+        screen renders. If admin support work turns out to need it, the shape to
+        add is a single-booking ``GET /admin/bookings/{id}``, which is targeted
+        and auditable in a way a 200-row page is not. Populating a field later is
+        a compatible change; withdrawing one that ops has come to depend on is
+        not — so this errs toward not sending it.
 
         ``doorstep_otp`` gates en_route → in_progress, so it has to reach the
         provider from the consumer at the door rather than from this API — the
@@ -67,6 +138,8 @@ class BookingResponse(BaseModel):
         response = cls.model_validate(booking)
         if viewer_id is None or viewer_id != booking.consumer_id:
             response.doorstep_otp = None
+        if viewer_id is None or viewer_id not in (booking.consumer_id, booking.provider_id):
+            response.address = None
         return response
 
 

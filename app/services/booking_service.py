@@ -5,10 +5,12 @@ OTP-gated service start, and paginated listing.
 
 import secrets
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.config import get_settings
 from app.exceptions import (
@@ -45,6 +47,45 @@ class BookingService:
 
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    # ------------------------------------------------------------------
+    # Address hydration
+    # ------------------------------------------------------------------
+
+    async def attach_addresses(self, bookings: Iterable[Booking]) -> None:
+        """Load each booking's consumer address onto it, ready for serialisation.
+
+        Every path that returns a ``BookingResponse`` has to call this first:
+        ``BookingResponse.address`` reads ``Booking.consumer_address`` (SVC-170),
+        and that relationship is declared ``lazy="raise_on_sql"`` so a path that
+        forgets fails by name here instead of by ``MissingGreenlet`` inside
+        pydantic.
+
+        Fetching explicitly rather than with ``selectinload`` on the query is
+        deliberate, and the two are not interchangeable at these call sites.
+        ``Session.get`` answers from the identity map when it can, and a load that
+        emits no SQL applies no loader options — so ``get(Booking, id,
+        options=[selectinload(...)])`` silently leaves the relationship unloaded
+        for any booking already in the session, which is every booking in a test
+        and any booking read twice in one request. This module's existing habit of
+        an explicit ``db.get(Address, ...)`` does not have that failure mode, and
+        this is the batched form of it.
+
+        One query regardless of page size, so the 50-row list route does not turn
+        into 50 round-trips. ``set_committed_value`` marks the relationship
+        *already loaded* rather than *changed*, which is what keeps this read-path
+        hydration out of the unit of work — plain assignment would enrol every
+        serialised booking in the next flush.
+        """
+        bookings = list(bookings)
+        address_ids = {b.consumer_address_id for b in bookings if b.consumer_address_id}
+        if not address_ids:
+            return
+
+        rows = await self.db.execute(select(Address).where(Address.id.in_(address_ids)))
+        by_id = {address.id: address for address in rows.scalars()}
+        for booking in bookings:
+            set_committed_value(booking, "consumer_address", by_id.get(booking.consumer_address_id))
 
     # ------------------------------------------------------------------
     # Create
@@ -84,6 +125,9 @@ class BookingService:
         self.db.add(booking)
         await self.db.flush()
 
+        # The 201 carries the address like every other booking response (SVC-170).
+        await self.attach_addresses([booking])
+
         await self._log_transition(
             booking_id=booking.id,
             from_status="none",
@@ -104,6 +148,9 @@ class BookingService:
             raise BookingNotFound(booking_id)
         if user_id not in (booking.consumer_id, booking.provider_id):
             raise UnauthorizedAction("You do not have access to this booking")
+        # After the access check, not before: a caller who is refused never
+        # causes a lookup of the address they were refused.
+        await self.attach_addresses([booking])
         return booking
 
     async def get_offer(
@@ -254,6 +301,9 @@ class BookingService:
 
         if booking.provider_id == provider_id:
             if booking.status is BookingStatus.ACCEPTED:
+                # Idempotent retry: returns without reaching `transition_status`,
+                # so this is the one accept path that has to hydrate for itself.
+                await self.attach_addresses([booking])
                 return booking, False
         elif booking.provider_id is not None:
             # SVC-167: another provider won the race. From the card's point of
@@ -346,6 +396,9 @@ class BookingService:
             metadata=metadata,
         )
 
+        # Every transition route answers with a BookingResponse (SVC-170).
+        await self.attach_addresses([booking])
+
         return booking
 
     # ------------------------------------------------------------------
@@ -381,6 +434,10 @@ class BookingService:
         stmt = stmt.offset((page - 1) * per_page).limit(per_page)
         result = await self.db.execute(stmt)
         bookings = list(result.scalars().all())
+
+        # One query for the whole page, not one per row — the address is on every
+        # row of a provider's job list, and this route serves up to 50 (SVC-170).
+        await self.attach_addresses(bookings)
 
         return BookingListResponse(
             # Per-row redaction, not a role check: `role` says what kind of user

@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.utils.geo import point_lat_lng
 
 if TYPE_CHECKING:
     from app.models.user import User
@@ -36,3 +37,22 @@ class Address(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="addresses")
+
+    # Readable coordinates, for callers that hand the address to a maps app
+    # rather than measure with it (SVC-170). Plain Python properties decoding the
+    # `location` value already in memory: no SQL, so no lazy load to trip over on
+    # an async session, and they work the same on a row loaded from the database
+    # and on one created in this session. `None` whenever the address has no
+    # location — `CreateAddressRequest` accepts an address without coordinates.
+    #
+    # Not `column_property(ST_Y(...))`: an INSERT does not populate a computed
+    # column, so reading it on an address created earlier in the same session
+    # would emit a query — a MissingGreenlet under AsyncSession, and exactly what
+    # the test suite does. See `point_lat_lng` for the full reasoning.
+    @property
+    def lat(self) -> float | None:
+        return point_lat_lng(self.location)[0]
+
+    @property
+    def lng(self) -> float | None:
+        return point_lat_lng(self.location)[1]
