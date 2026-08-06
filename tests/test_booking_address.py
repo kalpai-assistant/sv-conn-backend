@@ -328,10 +328,10 @@ async def test_admin_listing_carries_no_addresses(client, auth_headers, db_sessi
     """A deliberate call, not an oversight — see ``for_viewer``'s docstring.
 
     ``GET /admin/bookings`` is a bulk page of up to 200 rows spanning every
-    consumer on the platform, and no admin screen renders an address today. The
-    reasoning differs from the doorstep PIN next to it: minimising a wholesale
-    PII surface, not keeping a secret. If support work needs it, the shape to add
-    is a single-booking admin route.
+    consumer on the platform, and a table of bookings does not need one address
+    to render, let alone 200. The reasoning differs from the doorstep PIN next to
+    it: minimising a wholesale PII surface, not keeping a secret. The targeted
+    form of the question is served — see the two tests below.
     """
     _, _, booking, _ = await _booking_with_address(db_session)
     admin = await UserFactory.create(db_session, role="admin")
@@ -345,6 +345,54 @@ async def test_admin_listing_carries_no_addresses(client, auth_headers, db_sessi
     rows = response.json()["bookings"]
     assert str(booking.id) in {row["id"] for row in rows}
     assert all(row["address"] is None for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_admin_detail_route_does_carry_the_address(client, auth_headers, db_session):
+    """The other half of that decision, and the reason it is defensible.
+
+    Withholding on the listing is about *bulk*, not about admins: one booking
+    asked for by id is a support question about a specific job. If this returned
+    nothing either, an admin fielding "the provider can't find the address" would
+    have to go query the database by hand — which is strictly worse for privacy,
+    being unaudited and unscoped.
+    """
+    _, _, booking, address = await _booking_with_address(db_session)
+    admin = await UserFactory.create(db_session, role="admin")
+
+    response = await client.get(
+        f"/api/v1/admin/bookings/{booking.id}",
+        headers=auth_headers(str(admin.id), "admin"),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["address"]
+    assert body["id"] == str(address.id)
+    assert body["full_address"] == "42 Residency Road, Bengaluru 560025"
+    assert (body["lat"], body["lng"]) == (LAT, LNG)
+
+
+@pytest.mark.asyncio
+async def test_admin_detail_route_still_withholds_the_doorstep_pin(
+    client, auth_headers, db_session
+):
+    """The asymmetry that makes `for_admin` narrower than "admins see all".
+
+    The PIN's whole value is that the provider cannot obtain it except from the
+    customer at the door (SVC-169), so an admin holding it could start a job
+    remotely. Widening the address must not quietly widen that too — this is the
+    test that fails if `for_admin` ever stops being built on `for_viewer`.
+    """
+    _, _, booking, _ = await _booking_with_address(db_session, status=BookingStatus.EN_ROUTE)
+    admin = await UserFactory.create(db_session, role="admin")
+
+    response = await client.get(
+        f"/api/v1/admin/bookings/{booking.id}",
+        headers=auth_headers(str(admin.id), "admin"),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["doorstep_otp"] is None
 
 
 # ------------------------------------------------------------------

@@ -103,12 +103,10 @@ class BookingResponse(BaseModel):
         address is a secret an admin may not hold — an admin can already reach it
         in the addresses table — but because ``GET /admin/bookings`` is a bulk
         listing of up to 200 rows across every consumer on the platform, and a
-        page of home addresses is a wholesale PII surface that no current admin
-        screen renders. If admin support work turns out to need it, the shape to
-        add is a single-booking ``GET /admin/bookings/{id}``, which is targeted
-        and auditable in a way a 200-row page is not. Populating a field later is
-        a compatible change; withdrawing one that ops has come to depend on is
-        not — so this errs toward not sending it.
+        page of home addresses is a wholesale PII surface that no admin screen
+        needs in order to show a table of bookings. The targeted form of the same
+        question is ``GET /admin/bookings/{id}``, which does answer it — see
+        ``for_admin``.
 
         ``doorstep_otp`` gates en_route → in_progress, so it has to reach the
         provider from the consumer at the door rather than from this API — the
@@ -140,6 +138,35 @@ class BookingResponse(BaseModel):
             response.doorstep_otp = None
         if viewer_id is None or viewer_id not in (booking.consumer_id, booking.provider_id):
             response.address = None
+        return response
+
+    @classmethod
+    def for_admin(cls, booking: "Booking") -> "BookingResponse":
+        """Serialise one booking an admin asked for by id (SVC-170).
+
+        The counterpart to ``for_viewer(booking, viewer_id=None)``, and the reason
+        that one withholds the address. The objection was never that an admin may
+        not know where a job is — it is that the bulk listing hands back a page of
+        consumers' home addresses whether or not anyone needed one. A request for
+        a single booking by id is the targeted, auditable form of the same
+        question, so this answers it.
+
+        The doorstep PIN is deliberately *not* reinstated, and the asymmetry is
+        the point. It is a proof-of-arrival secret whose entire value is that the
+        provider cannot obtain it except from the customer at the door (SVC-169);
+        an admin holding it could start a job remotely, and no support workflow
+        needs it to answer "where is this provider meant to be going".
+
+        Built on top of ``for_viewer`` rather than beside it so the PIN rule has
+        one implementation and cannot drift — this method can only ever *widen*
+        what that returns, and it widens by exactly one field.
+
+        Requires ``consumer_address`` to be loaded, like every other path that
+        serialises an address: call ``BookingService.attach_addresses`` first.
+        """
+        response = cls.for_viewer(booking, viewer_id=None)
+        if booking.consumer_address is not None:
+            response.address = BookingAddress.model_validate(booking.consumer_address)
         return response
 
 
