@@ -74,3 +74,4 @@ svc_connect.json
 
 # Note: alembic/versions/ is intentionally NOT ignored.
 # You SHOULD commit your database migration scripts!
+docker-compose.override.yml
