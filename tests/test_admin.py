@@ -6,11 +6,14 @@ This file pins the rest of admin.py:
 - GET /admin/users            (list, pagination, RBAC)
 - PATCH /admin/users/{id}/deactivate  (happy path, 204, silent-no-op-if-missing, RBAC)
 - GET /admin/bookings         (list, status filter, RBAC)
+- GET /admin/bookings/{id}    (happy path, 404, RBAC)
 
 Every endpoint gets an explicit non-admin 403 test — RBAC is only useful
 if we're sure it fires. Cheap insurance against a future refactor that
 drops the `require_role` dependency by accident.
 """
+
+import uuid
 
 import pytest
 
@@ -273,4 +276,89 @@ async def test_list_bookings_rejects_non_admin(client, auth_headers, db_session)
         headers=auth_headers(str(provider.id), "provider"),
     )
 
+    assert response.status_code == 403, response.text
+
+
+# ---------------------------------------------------------------------------
+# GET /admin/bookings/{booking_id}
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_any_booking_returns_a_booking_the_admin_is_not_party_to(
+    client, auth_headers, db_session
+):
+    """The point of the route: `GET /bookings/{id}` refuses an admin, because
+    they are neither the consumer nor the assigned provider."""
+    from app.models.address import Address
+    from app.models.booking import BookingStatus
+    from app.models.category import Category
+    from app.models.service import Service
+    from tests.factories.booking_factory import BookingFactory
+
+    admin = await UserFactory.create(db_session, role="admin")
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+
+    cat = Category(name="Plumbing", slug="plumbing", is_active=True, sort_order=1)
+    db_session.add(cat)
+    await db_session.flush()
+    svc = Service(
+        category_id=cat.id,
+        name="Leak Fix",
+        base_price=150.0,
+        duration_minutes=30,
+        is_active=True,
+    )
+    db_session.add(svc)
+    addr = Address(user_id=consumer.id, label="home", full_address="3 Test St")
+    db_session.add(addr)
+    await db_session.flush()
+    booking = await BookingFactory.create(
+        db_session,
+        consumer_id=consumer.id,
+        provider_id=provider.id,
+        service_id=svc.id,
+        address_id=addr.id,
+        status=BookingStatus.EN_ROUTE,
+    )
+
+    admin_headers = auth_headers(str(admin.id), "admin")
+    response = await client.get(f"/api/v1/admin/bookings/{booking.id}", headers=admin_headers)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == str(booking.id)
+
+    # The user-facing route still refuses the same admin for the same booking —
+    # this route exists precisely because that one cannot serve them.
+    user_route = await client.get(f"/api/v1/bookings/{booking.id}", headers=admin_headers)
+    assert user_route.status_code == 403, user_route.text
+
+
+@pytest.mark.asyncio
+async def test_get_any_booking_404s_for_an_unknown_id(client, auth_headers, db_session):
+    admin = await UserFactory.create(db_session, role="admin")
+
+    response = await client.get(
+        f"/api/v1/admin/bookings/{uuid.uuid4()}",
+        headers=auth_headers(str(admin.id), "admin"),
+    )
+
+    assert response.status_code == 404, response.text
+
+
+@pytest.mark.asyncio
+async def test_get_any_booking_rejects_non_admin(client, auth_headers, db_session):
+    """Ungated, this route would hand any provider any consumer's home address
+    for a booking they have nothing to do with — a worse leak than the listing,
+    because it takes only a booking id to aim it."""
+    provider = await UserFactory.create(db_session, role="provider")
+
+    response = await client.get(
+        f"/api/v1/admin/bookings/{uuid.uuid4()}",
+        headers=auth_headers(str(provider.id), "provider"),
+    )
+
+    # 403 before 404 — a non-admin must not be able to probe which booking ids
+    # exist by watching the status code change.
     assert response.status_code == 403, response.text

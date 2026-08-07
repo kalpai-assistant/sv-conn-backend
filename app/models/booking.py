@@ -107,7 +107,15 @@ class Booking(Base):
         "User", back_populates="bookings_as_provider", foreign_keys=[provider_id]
     )
     service: Mapped["Service"] = relationship("Service")
-    consumer_address: Mapped["Address"] = relationship("Address")
+    # Read on a response path (SVC-170: `BookingResponse.address`), and every one
+    # of those runs under AsyncSession — where an implicit lazy load is not a slow
+    # query but a MissingGreenlet 500, and on `GET /bookings/` would be one per
+    # row. `raise_on_sql` turns "nobody loaded this" into a named error at the
+    # point of the mistake instead. Paths that need it call
+    # `BookingService.attach_addresses`, which populates it in one query for any
+    # number of bookings; there is deliberately no lazy fallback to paper over a
+    # path that forgets.
+    consumer_address: Mapped["Address"] = relationship("Address", lazy="raise_on_sql")
     status_logs: Mapped[list["BookingStatusLog"]] = relationship(
         "BookingStatusLog", back_populates="booking"
     )
