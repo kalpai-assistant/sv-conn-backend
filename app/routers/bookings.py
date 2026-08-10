@@ -17,6 +17,7 @@ from app.schemas.booking import (
     CancelBookingRequest,
     CreateBookingRequest,
     StartBookingRequest,
+    TipBookingRequest,
 )
 from app.services.booking_service import BookingService
 from app.tasks.notification_tasks import send_booking_notification
@@ -63,10 +64,15 @@ async def create_booking(
     async def do_create() -> BookingResponse:
         booking = await BookingService(db).create_booking(
             consumer_id=current_user.id,
-            service_id=request.service_id,
+            # The schema's model_validator normalises legacy single-service
+            # requests (`service_id` only) into a 1-item `items` list, so
+            # the service layer only ever sees the cart shape. `items` is
+            # guaranteed non-None after validation.
+            items=request.items,  # type: ignore[arg-type]
             address_id=request.address_id,
             scheduled_at=request.scheduled_at,
             payment_method=request.payment_method,
+            coupon_code=request.coupon_code,
         )
         send_booking_notification.delay(booking_id=str(booking.id), event="new_request")
         return BookingResponse.for_viewer(booking, current_user.id)
@@ -216,6 +222,37 @@ async def cancel_booking(
         new_status=BookingStatus.CANCELLED,
         changed_by=current_user.id,
         cancellation_reason=request.reason,
+    )
+    return BookingResponse.for_viewer(booking, current_user.id)
+
+
+@router.post(
+    "/{booking_id}/tip",
+    response_model=BookingResponse,
+    responses={
+        403: {"description": "Only the booking's own consumer can add a tip"},
+        404: {"description": "No such booking"},
+        409: {
+            "description": "Booking is not in a state where a tip is accepted "
+            "(only after COMPLETED, and not after refund)."
+        },
+    },
+)
+async def tip_booking(
+    booking_id: UUID,
+    request: TipBookingRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Consumer adds (or updates) a gratuity on a completed booking.
+
+    100% of the tip flows to the provider — added on top of provider_payout
+    at payout time. A subsequent call with a different amount replaces
+    rather than accumulates; ``amount=0`` removes the tip. Bounds live in
+    the request schema; state + access checks live in the service layer.
+    """
+    booking = await BookingService(db).set_tip(
+        booking_id=booking_id, consumer_id=current_user.id, amount=request.amount
     )
     return BookingResponse.for_viewer(booking, current_user.id)
 

@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.config import get_settings
@@ -27,6 +28,7 @@ from app.models.booking import (
     BookingStatus,
     PaymentStatus,
 )
+from app.models.booking_item import BookingItem
 from app.models.booking_status_log import BookingStatusLog
 from app.models.provider_profile import ProviderProfile
 from app.models.service import Service
@@ -35,8 +37,11 @@ from app.schemas.booking import (
     BookingListResponse,
     BookingOfferResponse,
     BookingResponse,
+    CreateBookingItemRequest,
 )
-from app.services.provider_matching import is_eligible_provider_stmt
+from app.services.provider_matching import (
+    is_eligible_provider_multi_stmt,
+)
 from app.utils.geo import distance_km_to_point
 
 settings = get_settings()
@@ -88,42 +93,182 @@ class BookingService:
             set_committed_value(booking, "consumer_address", by_id.get(booking.consumer_address_id))
 
     # ------------------------------------------------------------------
+    # Items hydration
+    # ------------------------------------------------------------------
+
+    async def attach_items(self, bookings: Iterable[Booking]) -> None:
+        """Load each booking's items (with their services) ready for serialisation.
+
+        Companion to ``attach_addresses``, and for the same reason: every path
+        that returns a ``BookingResponse`` reads ``booking.items`` and each
+        item reads ``item.service.name``, and both relationships are declared
+        ``lazy="raise_on_sql"``. A caller who forgets fails by name here
+        instead of by MissingGreenlet inside pydantic — and on the list route
+        would otherwise fire one query per booking (for items) times one per
+        item (for the service), a classic N+1.
+
+        Two queries: one selectinload-style fetch for items with their
+        services eager-loaded, plus one identity-map assignment per booking.
+        ``set_committed_value`` marks the ``items`` relationship *already
+        loaded* rather than *changed* — same trick ``attach_addresses`` uses
+        to keep the read-path hydration out of the unit of work.
+        """
+        bookings = list(bookings)
+        booking_ids = [b.id for b in bookings]
+        if not booking_ids:
+            return
+
+        rows = await self.db.execute(
+            select(BookingItem)
+            .options(selectinload(BookingItem.service))
+            .where(BookingItem.booking_id.in_(booking_ids))
+        )
+        by_booking: dict[uuid.UUID, list[BookingItem]] = {}
+        for item in rows.scalars():
+            by_booking.setdefault(item.booking_id, []).append(item)
+        for booking in bookings:
+            set_committed_value(booking, "items", by_booking.get(booking.id, []))
+
+    # ------------------------------------------------------------------
     # Create
     # ------------------------------------------------------------------
 
     async def create_booking(
         self,
         consumer_id: uuid.UUID,
-        service_id: uuid.UUID,
+        items: list[CreateBookingItemRequest],
         address_id: uuid.UUID,
         scheduled_at: datetime | None = None,
         payment_method: str = "online",
+        coupon_code: str | None = None,
     ) -> Booking:
-        """Create a new booking and compute the 80/20 commission split."""
-        service = await self.db.get(Service, service_id)
-        if not service or not service.is_active:
-            raise ValueError("Service not found or inactive")
+        """Create a booking from a cart of one or more services.
+
+        Matching-policy (i) — one booking, one provider, must cover *all*
+        services in the cart — implies the whole cart is dispatched as one
+        unit. That has two knock-on effects the caller usually doesn't think
+        about but this method enforces:
+
+        1. Every service in the cart must be active. A single inactive item
+           refuses the whole cart, not just its own line — dispatching a
+           booking whose second item can never be delivered would either
+           strand the customer at completion time or force us to auto-cancel
+           mid-lifecycle, both worse than a clean 404 upfront.
+        2. The pool of providers that could ever take this booking is the
+           intersection of pools that could take each service. We deliberately
+           *don't* validate that intersection is non-empty here; the broadcast
+           does that in ``notification_tasks``, and refusing a legally-valid
+           cart at creation because no provider is currently online would
+           surface "no pros nearby" as a POST failure instead of the
+           tracking-screen state the frontend already handles (5.7).
+        """
+        if not items:
+            raise ValueError("Booking must have at least one service")
+
+        # Load every service in one query — n round-trips on ``db.get`` would
+        # be silly for a two- or three-item cart, and orders of magnitude
+        # worse if a client ever pushes to the ``quantity <= 10`` limit
+        # across ten distinct services.
+        service_ids = [i.service_id for i in items]
+        rows = await self.db.execute(select(Service).where(Service.id.in_(service_ids)))
+        services_by_id = {s.id: s for s in rows.scalars()}
+
+        for item in items:
+            svc = services_by_id.get(item.service_id)
+            if svc is None or not svc.is_active:
+                # 400 rather than 404 — the caller sent a cart the platform
+                # can't fulfil, which is a request problem, not a resource one.
+                raise ValueError(f"Service {item.service_id} not found or inactive")
 
         commission_rate = settings.PLATFORM_COMMISSION_PERCENT / 100
-        service_amount = service.base_price
-        platform_commission = round(service_amount * commission_rate, 2)
-        provider_payout = round(service_amount - platform_commission, 2)
+
+        # First pass: compute totals so we can seed the Booking row with the
+        # aggregates. Second pass (after flush) creates the item rows keyed
+        # to the booking id.
+        item_lines: list[tuple[CreateBookingItemRequest, Service, float, float, float]] = []
+        for item in items:
+            svc = services_by_id[item.service_id]
+            unit_price = svc.base_price
+            total_price = round(unit_price * item.quantity, 2)
+            platform_commission = round(total_price * commission_rate, 2)
+            provider_payout = round(total_price - platform_commission, 2)
+            item_lines.append((item, svc, total_price, platform_commission, provider_payout))
+
+        total_service_amount = round(sum(line[2] for line in item_lines), 2)
+        total_platform_commission = round(sum(line[3] for line in item_lines), 2)
+        total_provider_payout = round(sum(line[4] for line in item_lines), 2)
+
+        # Coupon application. Validated with the cart total *before* the
+        # booking row is added so an invalid code refuses the request cleanly
+        # (no orphan Booking rolled back). CouponInvalid propagates as 400.
+        discount_amount = 0.0
+        redeemed_coupon = None
+        if coupon_code:
+            from app.services.coupon_service import CouponService
+
+            redeemed_coupon, discount_amount = await CouponService(self.db).validate(
+                code=coupon_code,
+                user_id=consumer_id,
+                cart_amount=total_service_amount,
+            )
 
         booking = Booking(
             consumer_id=consumer_id,
             provider_id=None,  # Unassigned until a provider accepts the broadcast
-            service_id=service_id,
             consumer_address_id=address_id,
             status=BookingStatus.REQUESTED,
             scheduled_at=scheduled_at,
             doorstep_otp=self._generate_doorstep_otp(),
-            service_amount=service_amount,
-            platform_commission=platform_commission,
-            provider_payout=provider_payout,
+            service_amount=total_service_amount,
+            platform_commission=total_platform_commission,
+            provider_payout=total_provider_payout,
+            discount_amount=discount_amount,
             payment_method=payment_method,
         )
         self.db.add(booking)
         await self.db.flush()
+
+        # Redemption written inside the same transaction as the Booking, so
+        # a rollback anywhere below (item insert failure, transaction abort)
+        # takes the redemption with it — see the note in
+        # coupon_service.apply_to_booking.
+        if redeemed_coupon is not None:
+            from app.services.coupon_service import CouponService
+
+            await CouponService(self.db).apply_to_booking(
+                coupon=redeemed_coupon,
+                booking_id=booking.id,
+                user_id=consumer_id,
+                discount_amount=discount_amount,
+            )
+            await self.db.flush()
+
+        # Create items in one flush after the booking id is materialised.
+        # We deliberately don't rely on the ORM cascade-through-relationship
+        # here — the parent doesn't have ``items`` populated yet, and setting
+        # it now would count as a mutation rather than a load, tripping the
+        # ``raise_on_sql`` sentinel we depend on for read-path hygiene.
+        item_rows: list[BookingItem] = []
+        for req, svc, total_price, platform_commission, provider_payout in item_lines:
+            item_row = BookingItem(
+                booking_id=booking.id,
+                service_id=svc.id,
+                quantity=req.quantity,
+                unit_price=svc.base_price,
+                total_price=total_price,
+                platform_commission=platform_commission,
+                provider_payout=provider_payout,
+            )
+            self.db.add(item_row)
+            item_rows.append(item_row)
+        await self.db.flush()
+
+        # Hand the items to the relationship as *loaded* (matching how
+        # attach_items would populate them), so the response builder that
+        # runs immediately after doesn't fault on raise_on_sql. Bypasses the
+        # unit-of-work — plain assignment would enrol them for a second
+        # INSERT on the next flush.
+        set_committed_value(booking, "items", item_rows)
 
         # The 201 carries the address like every other booking response (SVC-170).
         await self.attach_addresses([booking])
@@ -149,8 +294,9 @@ class BookingService:
         if user_id not in (booking.consumer_id, booking.provider_id):
             raise UnauthorizedAction("You do not have access to this booking")
         # After the access check, not before: a caller who is refused never
-        # causes a lookup of the address they were refused.
+        # causes a lookup of the address (or items) they were refused.
         await self.attach_addresses([booking])
+        await self.attach_items([booking])
         return booking
 
     async def get_offer(
@@ -167,10 +313,19 @@ class BookingService:
         reverse order would tell any caller whether a given booking exists and has
         been taken; this way a provider who was never a recipient learns nothing
         beyond 403.
+
+        With multi-service carts the eligibility check applies matching-policy
+        (i): this provider must be subscribed to *every* service on the
+        booking. The intersection lives in ``is_eligible_provider_multi_stmt``
+        so ``notification_tasks`` (which decides who to broadcast to) and this
+        endpoint (which decides who may resolve the offer) share one rule.
         """
         booking = await self.db.get(Booking, booking_id)
         if not booking:
             raise BookingNotFound(booking_id)
+
+        # Load items now — needed for the eligibility check and the summary.
+        await self.attach_items([booking])
 
         address = await self.db.get(Address, booking.consumer_address_id)
         if address is None or address.location is None:
@@ -178,8 +333,9 @@ class BookingService:
             # offered this booking — answer as we would to any non-recipient.
             raise UnauthorizedAction("You were not offered this booking")
 
+        service_ids = [item.service_id for item in booking.items]
         eligible = await self.db.execute(
-            is_eligible_provider_stmt(booking.service_id, address.location, provider_id)
+            is_eligible_provider_multi_stmt(service_ids, address.location, provider_id)
         )
         if eligible.scalar_one_or_none() is None:
             raise UnauthorizedAction("You were not offered this booking")
@@ -188,8 +344,6 @@ class BookingService:
         # Anything else (claimed, cancelled, expired) ends the offer.
         if booking.status is not BookingStatus.REQUESTED:
             raise BookingOfferClosed()
-
-        service = await self.db.get(Service, booking.service_id)
 
         distance = await self.db.execute(
             select(
@@ -201,7 +355,7 @@ class BookingService:
 
         return BookingOfferResponse(
             booking_id=booking.id,
-            service_name=service.name,
+            service_name=_summarise_service_names(booking.items),
             service_amount=booking.service_amount,
             full_address=address.full_address,
             distance_km=round(distance.scalar_one(), 2),
@@ -272,9 +426,11 @@ class BookingService:
             raise BookingNotFound(booking_id)
 
         # SVC-168: eligibility check before we reveal anything about the booking.
-        # `get_offer` uses the same shared predicate (`is_eligible_provider_stmt`),
-        # so the set of providers who may accept can never drift from the set who
-        # were offered — the invariant SVC-153 established.
+        # `get_offer` uses the same shared predicate
+        # (``is_eligible_provider_multi_stmt``), so the set of providers who
+        # may accept can never drift from the set who were offered — the
+        # invariant SVC-153 established. For a multi-service cart the
+        # provider must cover *every* item (matching-policy (i)).
         #
         # Skip the check when the caller already owns the booking: they were
         # eligible when they accepted, and re-checking would refuse a legitimate
@@ -286,8 +442,11 @@ class BookingService:
                 # Address gone / never geocoded → the broadcast bailed too, so
                 # nobody was ever offered this. Refuse like any non-recipient.
                 raise UnauthorizedAction("You were not offered this booking")
+            # Load items — the eligibility check needs the full set.
+            await self.attach_items([booking])
+            service_ids = [item.service_id for item in booking.items]
             eligible = await self.db.execute(
-                is_eligible_provider_stmt(booking.service_id, address.location, provider_id)
+                is_eligible_provider_multi_stmt(service_ids, address.location, provider_id)
             )
             if eligible.scalar_one_or_none() is None:
                 # 403 here is correct — this is "you should never have been able
@@ -304,6 +463,7 @@ class BookingService:
                 # Idempotent retry: returns without reaching `transition_status`,
                 # so this is the one accept path that has to hydrate for itself.
                 await self.attach_addresses([booking])
+                await self.attach_items([booking])
                 return booking, False
         elif booking.provider_id is not None:
             # SVC-167: another provider won the race. From the card's point of
@@ -396,8 +556,10 @@ class BookingService:
             metadata=metadata,
         )
 
-        # Every transition route answers with a BookingResponse (SVC-170).
+        # Every transition route answers with a BookingResponse, which now
+        # renders both `address` (SVC-170) and `items`.
         await self.attach_addresses([booking])
+        await self.attach_items([booking])
 
         return booking
 
@@ -435,9 +597,13 @@ class BookingService:
         result = await self.db.execute(stmt)
         bookings = list(result.scalars().all())
 
-        # One query for the whole page, not one per row — the address is on every
-        # row of a provider's job list, and this route serves up to 50 (SVC-170).
+        # One query for the whole page for each relationship, not one per row —
+        # the address AND the items list both render on every row of the
+        # bookings tab, and this route serves up to 50. Each of these was N+1
+        # waiting to happen; SVC-170 introduced the address helper for the
+        # same reason and the item helper follows the pattern.
         await self.attach_addresses(bookings)
+        await self.attach_items(bookings)
 
         return BookingListResponse(
             # Per-row redaction, not a role check: `role` says what kind of user
@@ -450,6 +616,44 @@ class BookingService:
             page=page,
             per_page=per_page,
         )
+
+    # ------------------------------------------------------------------
+    # Tip
+    # ------------------------------------------------------------------
+
+    async def set_tip(
+        self, booking_id: uuid.UUID, consumer_id: uuid.UUID, amount: float
+    ) -> Booking:
+        """Set the tip on a completed booking.
+
+        Only the booking's own consumer may set a tip, and only after
+        completion — before that the provider is still on the way (or
+        working) and the tip amount would be a moving guarantee we can't
+        enforce. A tip is settable more than once as long as the payout
+        hasn't fired yet: consumers change their minds, and re-submitting
+        replaces rather than accumulates.
+
+        Bounds and non-negativity live in the request schema; here we only
+        enforce access + state.
+        """
+        booking = await self.db.get(Booking, booking_id, with_for_update=True)
+        if not booking:
+            raise BookingNotFound(booking_id)
+        if booking.consumer_id != consumer_id:
+            raise UnauthorizedAction("Only the booking's consumer can add a tip")
+        if booking.status is not BookingStatus.COMPLETED:
+            raise InvalidStateTransition("Tips are accepted only after the booking is completed")
+        # Once payout has fired the tip is gone from us — the money has
+        # left the platform's control. Refuse further edits.
+        if booking.payment_status is PaymentStatus.REFUNDED:
+            raise InvalidStateTransition("Cannot tip a refunded booking")
+
+        booking.tip_amount = round(amount, 2)
+        await self.db.flush()
+
+        await self.attach_addresses([booking])
+        await self.attach_items([booking])
+        return booking
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -485,3 +689,22 @@ class BookingService:
     @staticmethod
     def _generate_doorstep_otp() -> str:
         return "".join(str(secrets.randbelow(10)) for _ in range(4))
+
+
+def _summarise_service_names(items: Iterable) -> str:
+    """One-line summary of a cart for a push body or offer card.
+
+    "Deep Clean" for a single-item booking; "Deep Clean + 2 more" once the
+    cart grows. Kept as a module-level helper (not a BookingItem method) so
+    both the offer response and the notification body can call it without
+    the notification worker needing to touch the ORM instance methods —
+    the worker runs sync against ``SyncSessionLocal`` and imports as little
+    ORM surface as possible.
+    """
+    items = list(items)
+    if not items:
+        return "Service"
+    first_name = items[0].service.name
+    if len(items) == 1:
+        return first_name
+    return f"{first_name} + {len(items) - 1} more"

@@ -77,23 +77,43 @@ def send_booking_notification(self, booking_id: str, event: str):
             body = template["body"]
 
             if event == "new_request":
+                from sqlalchemy.orm import selectinload
+
                 from app.models.address import Address
-                from app.models.service import Service
-                from app.services.provider_matching import eligible_providers_stmt
+                from app.models.booking_item import BookingItem
+                from app.services.booking_service import _summarise_service_names
+                from app.services.provider_matching import eligible_providers_multi_stmt
 
                 # Get the booking address location directly
                 address = db.get(Address, booking.consumer_address_id)
                 if not address or not address.location:
                     return
 
-                service = db.get(Service, booking.service_id)
-                body = build_new_request_body(service.name if service else None)
+                # Load the cart items (with each item's service) so the summary
+                # can name the first service. Explicit fetch — booking.items on
+                # the ORM object is ``raise_on_sql``, and even if it weren't,
+                # the sync worker doesn't get the async ``attach_items`` helper.
+                from sqlalchemy import select as sync_select
 
-                # PostGIS broadcast: verified, online, subscribed providers whose own
-                # service radius covers the address. The predicate lives in
-                # provider_matching so the endpoint serving the offer behind this push
-                # applies the identical rule — see that module's docstring (SVC-153).
-                stmt = eligible_providers_stmt(booking.service_id, address.location)
+                items = (
+                    db.execute(
+                        sync_select(BookingItem)
+                        .options(selectinload(BookingItem.service))
+                        .where(BookingItem.booking_id == booking.id)
+                    )
+                    .scalars()
+                    .all()
+                )
+                body = build_new_request_body(_summarise_service_names(items))
+
+                # Matching-policy (i): a provider must cover every service in
+                # the cart to receive the push. Same predicate the async
+                # ``get_offer`` uses to decide who may resolve it — SVC-153
+                # keeps the broadcast set and accept set aligned.
+                service_ids = [item.service_id for item in items]
+                if not service_ids:
+                    return
+                stmt = eligible_providers_multi_stmt(service_ids, address.location)
                 recipients = db.execute(stmt).scalars().all()
             else:
                 recipients = [booking.provider if event == "accepted" else booking.consumer]

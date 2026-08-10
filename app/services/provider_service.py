@@ -9,7 +9,7 @@ import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import (
@@ -446,11 +446,37 @@ class ProviderService:
         """
         start_utc = _earnings_window_start_utc(range_)
 
+        # ``Booking.service_id`` was the single-service pointer that a booking
+        # used to carry; a booking now holds a cart via ``booking_items``.
+        # The earnings dashboard shows one line per booking, so this
+        # aggregates the service names into a single comma-joined string
+        # ("Deep Clean, Sofa Clean") using Postgres' string_agg. A separate
+        # per-item earnings breakdown is a followup — for now the provider
+        # sees the same view as before, just with multi-service carts
+        # rendered as "svc1, svc2" instead of losing the second name.
+        from app.models.booking_item import BookingItem
+
+        service_names_subq = (
+            select(func.string_agg(Service.name, ", "))
+            .select_from(BookingItem)
+            .join(Service, Service.id == BookingItem.service_id)
+            .where(BookingItem.booking_id == Booking.id)
+            .correlate(Booking)
+            .scalar_subquery()
+        )
+
+        # Payout to the provider is the base commission split PLUS any
+        # consumer tip — tips are 100% pro-side (see Booking.tip_amount).
+        # Selected as an expression so both the per-row and total sums stay
+        # consistent without a Python re-derive.
+        effective_payout = (Booking.provider_payout + Booking.tip_amount).label("payout")
+
         stmt = (
             select(
                 Booking.id,
-                Booking.provider_payout,
-                Service.name.label("service_name"),
+                effective_payout,
+                Booking.tip_amount,
+                service_names_subq.label("service_name"),
                 BookingStatusLog.created_at.label("completed_at"),
             )
             .join(
@@ -458,7 +484,6 @@ class ProviderService:
                 (BookingStatusLog.booking_id == Booking.id)
                 & (BookingStatusLog.to_status == BookingStatus.COMPLETED.value),
             )
-            .join(Service, Service.id == Booking.service_id)
             .where(Booking.provider_id == provider_user_id)
             .where(Booking.status == BookingStatus.COMPLETED)
             .where(Booking.payment_status != PaymentStatus.REFUNDED)
@@ -473,13 +498,14 @@ class ProviderService:
                 "booking_id": row.id,
                 "service_name": row.service_name,
                 "completed_at": row.completed_at,
-                "payout_amount": row.provider_payout,
+                "payout_amount": row.payout,
+                "tip_amount": row.tip_amount,
             }
             for row in rows
         ]
         return {
             "range": range_,
-            "total_payout": round(sum(row.provider_payout for row in rows), 2),
+            "total_payout": round(sum(row.payout for row in rows), 2),
             "completed_count": len(rows),
             "bookings": bookings,
         }

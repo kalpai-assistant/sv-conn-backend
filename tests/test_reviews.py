@@ -167,7 +167,7 @@ async def test_list_provider_reviews_returns_them_with_avg(client, auth_headers,
         db_session,
         consumer_id=consumer_b.id,
         provider_id=provider.id,
-        service_id=booking_a.service_id,
+        service_id=booking_a.items[0].service_id,
         address_id=addr.id,
         status=BookingStatus.COMPLETED,
     )

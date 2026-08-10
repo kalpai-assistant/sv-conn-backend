@@ -131,7 +131,12 @@ class EarningsBookingItem(BaseModel):
     booking_id: UUID
     service_name: str
     completed_at: datetime
+    # Base commission split + any consumer tip. Rendered as one line on
+    # the earnings dashboard.
     payout_amount: float
+    # Broken out separately so the app can show "₹800 + ₹50 tip" when
+    # tips exist without doing the subtraction itself.
+    tip_amount: float = 0.0
 
     model_config = {"from_attributes": True}
 

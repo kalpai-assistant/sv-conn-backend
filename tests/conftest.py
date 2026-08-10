@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis
@@ -9,7 +11,14 @@ from app.dependencies import get_redis
 from app.main import create_app
 from app.utils.security import create_access_token
 
-TEST_DATABASE_URL = "postgresql+asyncpg://sc_user:sc_password@localhost:5432/sc_test"
+# Env-overridable so a machine with a native postgres on 5432 (and Docker's
+# postgres bound to a different port via docker-compose.override.yml) can
+# point the suite at the right instance without editing this file. CI leaves
+# it unset and gets the default.
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://sc_user:sc_password@localhost:5432/sc_test",
+)
 
 
 @pytest.fixture
