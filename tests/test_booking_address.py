@@ -178,7 +178,7 @@ async def test_provider_list_carries_the_address_on_every_row(client, auth_heade
         db_session,
         consumer_id=consumer.id,
         provider_id=provider.id,
-        service_id=first.service_id,
+        service_id=first.items[0].service_id,
         address_id=address.id,
         status=BookingStatus.EN_ROUTE,
     )
@@ -223,7 +223,7 @@ async def test_list_route_loads_addresses_in_one_query(client, auth_headers, db_
             db_session,
             consumer_id=consumer.id,
             provider_id=provider.id,
-            service_id=first.service_id,
+            service_id=first.items[0].service_id,
             address_id=address.id,
             status=BookingStatus.ACCEPTED,
         )

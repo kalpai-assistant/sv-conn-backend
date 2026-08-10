@@ -2,17 +2,99 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 if TYPE_CHECKING:
     from app.models.booking import Booking
 
 
-class CreateBookingRequest(BaseModel):
+class CreateBookingItemRequest(BaseModel):
+    """One line item on a booking-creation request."""
+
     service_id: UUID
+    # Same-service duplicates express "two of this" (e.g. two haircuts). At
+    # the DB level a booking can't have two rows with the same service_id
+    # (uix_booking_item_service), so the API forces the caller to consolidate
+    # here rather than silently deduping later and losing money on the second
+    # copy.
+    quantity: int = Field(default=1, ge=1, le=10)
+
+
+class CreateBookingRequest(BaseModel):
+    """Create a booking as either a multi-item cart (``items``) or a single
+    service (``service_id``).
+
+    ``service_id`` is the legacy single-service shape retained for the mobile
+    app while the cart UI is rolling out (PR 2c). It is normalised to a
+    1-item ``items`` list inside the validator so the service layer sees one
+    shape. Once the cart UI has shipped everywhere the ``service_id`` field
+    can be removed and callers forced onto ``items``.
+    """
+
+    # Nullable + validator-checked rather than a discriminated union because
+    # each shape carries the SAME other fields (address, scheduled_at, payment
+    # method) — using a Union would push those into two duplicated schemas
+    # and, more importantly, wouldn't help the mobile clients that are already
+    # sending the flat legacy shape.
+    items: list[CreateBookingItemRequest] | None = None
+    service_id: UUID | None = None
     address_id: UUID
     scheduled_at: datetime | None = None  # None = instant booking
     payment_method: str = Field(default="online", pattern=r"^(cash|online)$")
+
+    @model_validator(mode="after")
+    def _normalise_items(self) -> "CreateBookingRequest":
+        """Force one canonical shape (``items``) after validation.
+
+        The service layer only ever sees ``self.items``; ``service_id`` is a
+        wire-format convenience, not a domain concept.
+        """
+        if self.items and self.service_id:
+            raise ValueError("Pass either 'items' or 'service_id', not both")
+        if not self.items and not self.service_id:
+            raise ValueError("Booking must have at least one service")
+        if self.service_id and not self.items:
+            self.items = [CreateBookingItemRequest(service_id=self.service_id, quantity=1)]
+        return self
+
+
+class BookingItemResponse(BaseModel):
+    """One line on a booking response.
+
+    ``service_name`` is denormalised into the response so the mobile app
+    doesn't have to cross-reference against /services for every booking it
+    displays — the list route already returns dozens of items and doing that
+    lookup client-side is exactly the sort of N+1 pattern the frontend keeps
+    hitting. Read from the loaded ``BookingItem.service`` relationship, which
+    must be eager-loaded (see ``BookingItem.service`` — ``raise_on_sql``).
+    """
+
+    id: UUID
+    service_id: UUID
+    service_name: str
+    quantity: int
+    unit_price: float
+    total_price: float
+
+    model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_item(cls, item) -> "BookingItemResponse":
+        """Adapter that reads ``service.name`` off the loaded relationship.
+
+        Written as a classmethod (rather than a plain ``model_validate``) so
+        the pydantic model itself doesn't need to know about the ORM
+        relationship — keeping schemas free of ORM lookups keeps them
+        serialisable in isolation and testable without a session.
+        """
+        return cls(
+            id=item.id,
+            service_id=item.service_id,
+            service_name=item.service.name,
+            quantity=item.quantity,
+            unit_price=item.unit_price,
+            total_price=item.total_price,
+        )
 
 
 class BookingAddress(BaseModel):
@@ -51,8 +133,14 @@ class BookingResponse(BaseModel):
     id: UUID
     consumer_id: UUID
     provider_id: UUID | None
-    service_id: UUID
+    # `items` replaces the old single `service_id` field — a booking is now
+    # a cart. Required and non-defaulted so it stays in OpenAPI `required`
+    # and generated clients don't type it optional (same reason
+    # `BookingOfferResponse` fields have no defaults).
+    items: list[BookingItemResponse]
     status: str
+    # Sum of items' total_price / platform_commission / provider_payout at
+    # booking time. Snapshotted on Booking; see the model's field comment.
     service_amount: float
     platform_commission: float
     provider_payout: float
@@ -133,7 +221,40 @@ class BookingResponse(BaseModel):
         assignment belongs is ``transition_status``, which wipes the OTP on
         IN_PROGRESS / COMPLETED / CANCELLED because it is spent by then.
         """
-        response = cls.model_validate(booking)
+        # ``items`` needs each element flattened with the loaded
+        # ``service.name`` — a two-hop lookup that pydantic's default
+        # ``from_attributes`` traversal doesn't do. Build the item list
+        # explicitly, and hand pydantic a dict for everything else so it
+        # never tries to auto-convert booking.items and fail on the missing
+        # ``service_name`` attribute.
+        response = cls(
+            id=booking.id,
+            consumer_id=booking.consumer_id,
+            provider_id=booking.provider_id,
+            items=[BookingItemResponse.from_item(i) for i in booking.items],
+            status=booking.status.value if hasattr(booking.status, "value") else booking.status,
+            service_amount=booking.service_amount,
+            platform_commission=booking.platform_commission,
+            provider_payout=booking.provider_payout,
+            payment_method=(
+                booking.payment_method.value
+                if hasattr(booking.payment_method, "value")
+                else booking.payment_method
+            ),
+            payment_status=(
+                booking.payment_status.value
+                if hasattr(booking.payment_status, "value")
+                else booking.payment_status
+            ),
+            doorstep_otp=booking.doorstep_otp,
+            address=(
+                BookingAddress.model_validate(booking.consumer_address)
+                if booking.consumer_address is not None
+                else None
+            ),
+            scheduled_at=booking.scheduled_at,
+            created_at=booking.created_at,
+        )
         if viewer_id is None or viewer_id != booking.consumer_id:
             response.doorstep_otp = None
         if viewer_id is None or viewer_id not in (booking.consumer_id, booking.provider_id):

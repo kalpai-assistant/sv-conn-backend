@@ -72,7 +72,14 @@ class Booking(Base):
     provider_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True
     )
-    service_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("services.id"))
+    # The catalogue used to live directly on this row via `service_id`. It's
+    # in `booking_items` now (one row per service in the cart) — a single
+    # booking can carry more than one service, dispatched to one provider who
+    # covers all of them (matching-policy (i); see BookingItem module docstring
+    # for the alternatives that were rejected). All existing consumers of
+    # `booking.service_id` were updated to read via `booking.items`; see the
+    # migration for the backfill that moved every pre-existing booking into a
+    # 1-item cart.
     consumer_address_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("addresses.id")
     )
@@ -85,6 +92,10 @@ class Booking(Base):
     # secret in a row that will outlive its use by weeks. Also cleared on
     # cancellation. See booking_service.transition_status.
     doorstep_otp: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    # These three are sums over `items` — snapshotted here rather than derived
+    # on read because payments/payouts/earnings read them from long-lived rows
+    # (a payment row is retained years after the booking) and a per-read
+    # subquery on the item table would show up on every listing.
     service_amount: Mapped[float] = mapped_column(Float, nullable=False)
     platform_commission: Mapped[float] = mapped_column(Float, nullable=False)
     provider_payout: Mapped[float] = mapped_column(Float, nullable=False)
@@ -106,7 +117,17 @@ class Booking(Base):
     provider: Mapped["User"] = relationship(
         "User", back_populates="bookings_as_provider", foreign_keys=[provider_id]
     )
-    service: Mapped["Service"] = relationship("Service")
+    # `lazy="raise_on_sql"` — every response path that renders items calls
+    # BookingService.attach_items() explicitly (mirroring the attach_addresses
+    # convention SVC-170 established). Caller who forgets fails loudly here
+    # rather than triggering MissingGreenlet inside pydantic serialisation, or
+    # — worse — one implicit lookup per row on the list endpoint.
+    items: Mapped[list["BookingItem"]] = relationship(
+        "BookingItem",
+        back_populates="booking",
+        cascade="all, delete-orphan",
+        lazy="raise_on_sql",
+    )
     # Read on a response path (SVC-170: `BookingResponse.address`), and every one
     # of those runs under AsyncSession — where an implicit lazy load is not a slow
     # query but a MissingGreenlet 500, and on `GET /bookings/` would be one per

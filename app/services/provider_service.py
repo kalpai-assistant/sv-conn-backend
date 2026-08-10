@@ -9,7 +9,7 @@ import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import (
@@ -446,11 +446,30 @@ class ProviderService:
         """
         start_utc = _earnings_window_start_utc(range_)
 
+        # ``Booking.service_id`` was the single-service pointer that a booking
+        # used to carry; a booking now holds a cart via ``booking_items``.
+        # The earnings dashboard shows one line per booking, so this
+        # aggregates the service names into a single comma-joined string
+        # ("Deep Clean, Sofa Clean") using Postgres' string_agg. A separate
+        # per-item earnings breakdown is a followup — for now the provider
+        # sees the same view as before, just with multi-service carts
+        # rendered as "svc1, svc2" instead of losing the second name.
+        from app.models.booking_item import BookingItem
+
+        service_names_subq = (
+            select(func.string_agg(Service.name, ", "))
+            .select_from(BookingItem)
+            .join(Service, Service.id == BookingItem.service_id)
+            .where(BookingItem.booking_id == Booking.id)
+            .correlate(Booking)
+            .scalar_subquery()
+        )
+
         stmt = (
             select(
                 Booking.id,
                 Booking.provider_payout,
-                Service.name.label("service_name"),
+                service_names_subq.label("service_name"),
                 BookingStatusLog.created_at.label("completed_at"),
             )
             .join(
@@ -458,7 +477,6 @@ class ProviderService:
                 (BookingStatusLog.booking_id == Booking.id)
                 & (BookingStatusLog.to_status == BookingStatus.COMPLETED.value),
             )
-            .join(Service, Service.id == Booking.service_id)
             .where(Booking.provider_id == provider_user_id)
             .where(Booking.status == BookingStatus.COMPLETED)
             .where(Booking.payment_status != PaymentStatus.REFUNDED)

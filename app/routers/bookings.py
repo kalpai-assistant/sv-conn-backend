@@ -63,7 +63,11 @@ async def create_booking(
     async def do_create() -> BookingResponse:
         booking = await BookingService(db).create_booking(
             consumer_id=current_user.id,
-            service_id=request.service_id,
+            # The schema's model_validator normalises legacy single-service
+            # requests (`service_id` only) into a 1-item `items` list, so
+            # the service layer only ever sees the cart shape. `items` is
+            # guaranteed non-None after validation.
+            items=request.items,  # type: ignore[arg-type]
             address_id=request.address_id,
             scheduled_at=request.scheduled_at,
             payment_method=request.payment_method,

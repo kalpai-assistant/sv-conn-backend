@@ -406,20 +406,51 @@ async def test_unknown_booking_returns_404(client, db_session, auth_headers):
 
 
 def _fake_session(booking, address, service, recipients):
-    """Stand-in for SyncSessionLocal: dispatches db.get by model class."""
+    """Stand-in for SyncSessionLocal: dispatches db.get by model class.
+
+    Since PR #(this) the broadcast reads booking items (with each item's
+    service preloaded) via ``db.execute(select(BookingItem)...)`` rather
+    than ``db.get(Service, booking.service_id)``. This helper answers the
+    two db.execute calls in order:
+
+      1. items fetch → a one-element list whose service points at ``service``
+      2. eligible-providers fetch → the ``recipients`` list
+
+    ``service=None`` models the "service was deleted since the booking" case
+    the last test in this section exercises: the items list is returned empty,
+    the code path bails on the "no service_ids" guard.
+    """
     from unittest.mock import MagicMock
 
     from app.models.address import Address as AddressModel
     from app.models.booking import Booking as BookingModel
-    from app.models.service import Service as ServiceModel
 
     db = MagicMock()
     db.get.side_effect = lambda model, _id: {
         BookingModel: booking,
         AddressModel: address,
-        ServiceModel: service,
     }.get(model)
-    db.execute.return_value.scalars.return_value.all.return_value = recipients
+
+    # Two execute calls; two sequential answers. Wrap each in the
+    # `.scalars().all()` chain the caller reads through.
+    def _items_result():
+        if service is None:
+            items = []
+        else:
+            item = MagicMock()
+            item.service = service
+            item.service_id = getattr(service, "id", uuid.uuid4())
+            items = [item]
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = items
+        return result
+
+    def _providers_result():
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = recipients
+        return result
+
+    db.execute.side_effect = [_items_result(), _providers_result()]
     db.__enter__.return_value = db
     db.__exit__.return_value = False
     return db
@@ -491,18 +522,41 @@ def test_broadcast_push_leaks_neither_address_nor_amount():
     assert "1499" not in blob
 
 
-def test_broadcast_push_falls_back_when_the_service_is_missing():
-    """Unreachable via the FK today, but a literal "{service}" would be worse."""
-    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(), service_id=uuid.uuid4())
-    sent = _run_broadcast(
-        booking,
-        _stub(location=ADDRESS_POINT, full_address=FULL_ADDRESS),
-        None,
-        [_stub(fcm_token="tok_1")],
-    )
+def test_broadcast_bails_when_the_cart_is_empty():
+    """The FK guarantees this can't happen — a booking always has items — but
+    if it ever did we must not send a push that reads "{service} — accept
+    within 2 minutes." with an unrendered placeholder, or worse, one that
+    reaches every eligible provider offering nothing.
 
-    assert "{service}" not in sent[0]["body"]
-    assert "accept within 2 minutes" in sent[0]["body"].lower()
+    Was ``test_broadcast_push_falls_back_when_the_service_is_missing`` in
+    the single-service era, when a deleted-service edge case could reach
+    this branch; the new model puts the summary behind a list of items, and
+    an empty list is now the only degenerate case worth guarding.
+    """
+    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4())
+    from unittest.mock import patch
+
+    from app.tasks import notification_tasks
+
+    with (
+        patch(
+            "app.database.SyncSessionLocal",
+            return_value=_fake_session(
+                booking,
+                _stub(location=ADDRESS_POINT, full_address=FULL_ADDRESS),
+                None,  # service=None → items list is empty
+                [_stub(fcm_token="tok_1")],
+            ),
+        ),
+        patch.object(notification_tasks, "send_push_notification") as push,
+    ):
+        notification_tasks.send_booking_notification(
+            booking_id=str(booking.id), event="new_request"
+        )
+
+    # No push at all — the alternative is a garbled body or a push for
+    # nobody's job, both worse than silence.
+    assert push.call_count == 0
 
 
 def test_broadcast_skips_providers_without_a_token():
@@ -549,7 +603,15 @@ def test_offer_and_broadcast_use_one_eligibility_definition():
     from app.tasks import notification_tasks
 
     source = inspect.getsource(notification_tasks)
-    assert "eligible_providers_stmt" in source, "the broadcast no longer calls the shared predicate"
+    # Multi-service carts made this ``eligible_providers_multi_stmt``, which
+    # itself delegates to the single-service form when the cart has one
+    # item — same rule, one predicate. Naming the multi form is what the
+    # broadcast now imports; either name would prove the invariant, but
+    # naming both keeps the assertion resilient to a follow-up that folds
+    # the two entry points back into one.
+    assert (
+        "eligible_providers_multi_stmt" in source or "eligible_providers_stmt" in source
+    ), "the broadcast no longer calls the shared predicate"
     for reimplemented in ("ST_DWithin", "kyc_status ==", "is_online"):
         assert (
             reimplemented not in source

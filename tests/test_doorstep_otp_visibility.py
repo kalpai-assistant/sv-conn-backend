@@ -146,7 +146,7 @@ async def test_provider_list_bookings_omits_otp_on_every_row(client, auth_header
         db_session,
         consumer_id=consumer.id,
         provider_id=provider.id,
-        service_id=first.service_id,
+        service_id=first.items[0].service_id,
         address_id=first.consumer_address_id,
         status=BookingStatus.EN_ROUTE,
         doorstep_otp="8888",

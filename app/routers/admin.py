@@ -149,8 +149,12 @@ async def list_all_bookings(
     # work today and break the moment the redaction rule changes — who may see an
     # address is one decision, and it lives next to the doorstep-PIN rule it sits
     # beside, not in the shape of this query. The single-booking route below is
-    # the one that serves it.
-    await BookingService(db).attach_addresses(bookings)
+    # the one that serves it. Same principle for items: attached because the
+    # response schema is going to look for them, not because an admin needs the
+    # per-item breakdown right now.
+    svc = BookingService(db)
+    await svc.attach_addresses(bookings)
+    await svc.attach_items(bookings)
 
     return BookingListResponse(
         # No viewer identity to compare against — an admin is never the booking's
@@ -190,5 +194,7 @@ async def get_any_booking(booking_id: UUID, db: AsyncSession = Depends(get_db)):
     if booking is None:
         raise BookingNotFound(booking_id)
 
-    await BookingService(db).attach_addresses([booking])
+    svc = BookingService(db)
+    await svc.attach_addresses([booking])
+    await svc.attach_items([booking])
     return BookingResponse.for_admin(booking)
