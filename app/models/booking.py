@@ -99,6 +99,15 @@ class Booking(Base):
     service_amount: Mapped[float] = mapped_column(Float, nullable=False)
     platform_commission: Mapped[float] = mapped_column(Float, nullable=False)
     provider_payout: Mapped[float] = mapped_column(Float, nullable=False)
+    # Coupon reduction applied at booking creation. Comes out of the
+    # platform side — provider_payout stays anchored to service_amount.
+    # See coupon module docstring for the money split.
+    discount_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Optional gratuity added by the consumer after completion. 100% flows
+    # to the provider — added on top of provider_payout at payout time.
+    # Kept on the booking row (rather than the review row) so a consumer
+    # who tips but skips leaving a review is still tipping.
+    tip_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     payment_method: Mapped[PaymentMethod | None] = mapped_column(Enum(PaymentMethod))
     payment_status: Mapped[PaymentStatus] = mapped_column(
         Enum(PaymentStatus), default=PaymentStatus.PENDING

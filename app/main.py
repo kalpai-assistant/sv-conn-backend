@@ -20,6 +20,7 @@ from app.routers import (
     admin,
     auth,
     bookings,
+    coupons,
     downloads,
     health,
     payments,
@@ -132,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(bookings.router, prefix=prefix)
     app.include_router(payments.router, prefix=prefix)
     app.include_router(reviews.router, prefix=prefix)
+    app.include_router(coupons.router, prefix=prefix)
     app.include_router(tracking.router, prefix=prefix)
     app.include_router(admin.router, prefix=prefix)
     app.include_router(downloads.router, prefix=prefix)

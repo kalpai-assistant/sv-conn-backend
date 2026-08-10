@@ -41,6 +41,11 @@ class CreateBookingRequest(BaseModel):
     address_id: UUID
     scheduled_at: datetime | None = None  # None = instant booking
     payment_method: str = Field(default="online", pattern=r"^(cash|online)$")
+    # Optional coupon code the consumer applied on the Cart screen. Revalidated
+    # server-side inside the booking transaction (see BookingService); a
+    # stale/invalid code fails the whole request rather than silently placing
+    # a booking at the un-discounted price the app didn't render.
+    coupon_code: str | None = Field(default=None, max_length=32)
 
     @model_validator(mode="after")
     def _normalise_items(self) -> "CreateBookingRequest":
@@ -144,6 +149,11 @@ class BookingResponse(BaseModel):
     service_amount: float
     platform_commission: float
     provider_payout: float
+    # Coupon reduction (rupees, 0 when none applied). Client renders the
+    # line item and computes total = service_amount - discount + tip.
+    discount_amount: float
+    # Consumer tip (rupees, 0 when none). 100% goes to provider on payout.
+    tip_amount: float
     payment_method: str | None
     payment_status: str
     # Only visible to the consumer — and, unlike before SVC-169, actually
@@ -236,6 +246,8 @@ class BookingResponse(BaseModel):
             service_amount=booking.service_amount,
             platform_commission=booking.platform_commission,
             provider_payout=booking.provider_payout,
+            discount_amount=booking.discount_amount,
+            tip_amount=booking.tip_amount,
             payment_method=(
                 booking.payment_method.value
                 if hasattr(booking.payment_method, "value")
@@ -326,6 +338,18 @@ class BookingOfferResponse(BaseModel):
 
 class StartBookingRequest(BaseModel):
     otp: str = Field(..., min_length=4, max_length=4)
+
+
+class TipBookingRequest(BaseModel):
+    """Consumer adds (or updates) a gratuity on a completed booking.
+
+    Zero is a valid amount — the client uses this to *remove* a tip the
+    consumer changed their mind about before payout has flowed. Bounded
+    at ₹10,000 so a fat-finger doesn't move real money by accident;
+    higher values need to route through support.
+    """
+
+    amount: float = Field(..., ge=0, le=10_000)
 
 
 class CancelBookingRequest(BaseModel):
