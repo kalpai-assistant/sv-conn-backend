@@ -465,10 +465,17 @@ class ProviderService:
             .scalar_subquery()
         )
 
+        # Payout to the provider is the base commission split PLUS any
+        # consumer tip — tips are 100% pro-side (see Booking.tip_amount).
+        # Selected as an expression so both the per-row and total sums stay
+        # consistent without a Python re-derive.
+        effective_payout = (Booking.provider_payout + Booking.tip_amount).label("payout")
+
         stmt = (
             select(
                 Booking.id,
-                Booking.provider_payout,
+                effective_payout,
+                Booking.tip_amount,
                 service_names_subq.label("service_name"),
                 BookingStatusLog.created_at.label("completed_at"),
             )
@@ -491,13 +498,14 @@ class ProviderService:
                 "booking_id": row.id,
                 "service_name": row.service_name,
                 "completed_at": row.completed_at,
-                "payout_amount": row.provider_payout,
+                "payout_amount": row.payout,
+                "tip_amount": row.tip_amount,
             }
             for row in rows
         ]
         return {
             "range": range_,
-            "total_payout": round(sum(row.provider_payout for row in rows), 2),
+            "total_payout": round(sum(row.payout for row in rows), 2),
             "completed_count": len(rows),
             "bookings": bookings,
         }

@@ -74,6 +74,19 @@ class PaymentError(AppException):
         super().__init__(message, status_code=status.HTTP_402_PAYMENT_REQUIRED)
 
 
+class CouponInvalid(AppException):
+    """The requested coupon can't be used against this cart.
+
+    One exception type covers every reason (expired, min-order, per-user
+    limit, doesn't apply to this user). The client renders a single
+    generic message; a finer enumeration would need to stay in sync
+    between server and client for no visible user benefit at beta scale.
+    """
+
+    def __init__(self, message: str = "Coupon not applicable"):
+        super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST)
+
+
 class RateLimitExceeded(AppException):
     """
     Raised when a request exceeds a per-key rate limit.

@@ -140,6 +140,7 @@ class BookingService:
         address_id: uuid.UUID,
         scheduled_at: datetime | None = None,
         payment_method: str = "online",
+        coupon_code: str | None = None,
     ) -> Booking:
         """Create a booking from a cart of one or more services.
 
@@ -197,6 +198,20 @@ class BookingService:
         total_platform_commission = round(sum(line[3] for line in item_lines), 2)
         total_provider_payout = round(sum(line[4] for line in item_lines), 2)
 
+        # Coupon application. Validated with the cart total *before* the
+        # booking row is added so an invalid code refuses the request cleanly
+        # (no orphan Booking rolled back). CouponInvalid propagates as 400.
+        discount_amount = 0.0
+        redeemed_coupon = None
+        if coupon_code:
+            from app.services.coupon_service import CouponService
+
+            redeemed_coupon, discount_amount = await CouponService(self.db).validate(
+                code=coupon_code,
+                user_id=consumer_id,
+                cart_amount=total_service_amount,
+            )
+
         booking = Booking(
             consumer_id=consumer_id,
             provider_id=None,  # Unassigned until a provider accepts the broadcast
@@ -207,10 +222,26 @@ class BookingService:
             service_amount=total_service_amount,
             platform_commission=total_platform_commission,
             provider_payout=total_provider_payout,
+            discount_amount=discount_amount,
             payment_method=payment_method,
         )
         self.db.add(booking)
         await self.db.flush()
+
+        # Redemption written inside the same transaction as the Booking, so
+        # a rollback anywhere below (item insert failure, transaction abort)
+        # takes the redemption with it — see the note in
+        # coupon_service.apply_to_booking.
+        if redeemed_coupon is not None:
+            from app.services.coupon_service import CouponService
+
+            await CouponService(self.db).apply_to_booking(
+                coupon=redeemed_coupon,
+                booking_id=booking.id,
+                user_id=consumer_id,
+                discount_amount=discount_amount,
+            )
+            await self.db.flush()
 
         # Create items in one flush after the booking id is materialised.
         # We deliberately don't rely on the ORM cascade-through-relationship
@@ -585,6 +616,44 @@ class BookingService:
             page=page,
             per_page=per_page,
         )
+
+    # ------------------------------------------------------------------
+    # Tip
+    # ------------------------------------------------------------------
+
+    async def set_tip(
+        self, booking_id: uuid.UUID, consumer_id: uuid.UUID, amount: float
+    ) -> Booking:
+        """Set the tip on a completed booking.
+
+        Only the booking's own consumer may set a tip, and only after
+        completion — before that the provider is still on the way (or
+        working) and the tip amount would be a moving guarantee we can't
+        enforce. A tip is settable more than once as long as the payout
+        hasn't fired yet: consumers change their minds, and re-submitting
+        replaces rather than accumulates.
+
+        Bounds and non-negativity live in the request schema; here we only
+        enforce access + state.
+        """
+        booking = await self.db.get(Booking, booking_id, with_for_update=True)
+        if not booking:
+            raise BookingNotFound(booking_id)
+        if booking.consumer_id != consumer_id:
+            raise UnauthorizedAction("Only the booking's consumer can add a tip")
+        if booking.status is not BookingStatus.COMPLETED:
+            raise InvalidStateTransition("Tips are accepted only after the booking is completed")
+        # Once payout has fired the tip is gone from us — the money has
+        # left the platform's control. Refuse further edits.
+        if booking.payment_status is PaymentStatus.REFUNDED:
+            raise InvalidStateTransition("Cannot tip a refunded booking")
+
+        booking.tip_amount = round(amount, 2)
+        await self.db.flush()
+
+        await self.attach_addresses([booking])
+        await self.attach_items([booking])
+        return booking
 
     # ------------------------------------------------------------------
     # Private helpers
