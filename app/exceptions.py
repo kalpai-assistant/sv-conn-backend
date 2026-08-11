@@ -74,6 +74,17 @@ class PaymentError(AppException):
         super().__init__(message, status_code=status.HTTP_402_PAYMENT_REQUIRED)
 
 
+class InvalidPayoutMethod(AppException):
+    """Asked to activate a payout method the provider has nothing stored for.
+
+    400 rather than 402: the request itself is wrong (activate a destination that
+    does not exist), not a payment that could not be completed.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST)
+
+
 class CouponInvalid(AppException):
     """The requested coupon can't be used against this cart.
 

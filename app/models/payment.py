@@ -1,8 +1,9 @@
 import enum
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, String, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,9 +32,17 @@ class Payment(Base):
 
     __tablename__ = "payments"
 
+    # No unique constraint on booking_id: multiple payment records per booking are
+    # allowed (to track failed attempts). The CAPTURED record is the authoritative
+    # one (check status field).
     __table_args__ = (
-        # Allow multiple payment records per booking (to track failed attempts)
-        # The CAPTURED record is the authoritative one (check status field)
+        # Backs the admin bookings list's "has a disputed payment" lookup. Partial,
+        # so it stays tiny — disputes are rare.
+        Index(
+            "idx_payments_disputed_booking",
+            "booking_id",
+            postgresql_where="disputed_at IS NOT NULL",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -42,13 +51,18 @@ class Payment(Base):
     )
     razorpay_payment_id: Mapped[str | None] = mapped_column(String(255))
     razorpay_order_id: Mapped[str | None] = mapped_column(String(255))
-    amount: Mapped[float] = mapped_column(Float, nullable=False)
-    platform_fee: Mapped[float] = mapped_column(Float, nullable=False)
-    provider_settlement: Mapped[float] = mapped_column(Float, nullable=False)
+    # Numeric, not Float — see the note on Booking's money columns (SVC-150).
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    platform_fee: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    provider_settlement: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     status: Mapped[PaymentRecordStatus] = mapped_column(
         Enum(PaymentRecordStatus), default=PaymentRecordStatus.CREATED
     )
     method: Mapped[PaymentRecordMethod | None] = mapped_column(Enum(PaymentRecordMethod))
+    # Set when Razorpay reports a chargeback (payment.dispute.created). Beta keeps
+    # this as a flag only: status/settlement are never moved automatically, an admin
+    # resolves the dispute out of band.
+    disputed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships

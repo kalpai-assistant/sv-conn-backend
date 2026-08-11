@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.exceptions import (
     AppException,
     DuplicateSubscription,
+    InvalidPayoutMethod,
     ServiceNotFound,
     SubscriptionNotFound,
     UnauthorizedAction,
@@ -22,11 +23,11 @@ from app.exceptions import (
 )
 from app.models.booking import Booking, BookingStatus, PaymentStatus
 from app.models.booking_status_log import BookingStatusLog
-from app.models.provider_profile import KYCStatus, ProviderProfile
+from app.models.provider_profile import KYCStatus, PayoutMethod, ProviderProfile
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.service import Service
 from app.utils import storage
-from app.utils.encryption import encrypt
+from app.utils.encryption import decrypt, encrypt
 from app.utils.geo import build_point_wkt, distance_expression, st_dwithin_filter
 
 # Indian Standard Time — earnings windows are user-facing ("today", "this
@@ -87,6 +88,9 @@ class ProviderService:
         service_area_lat: float | None,
         service_area_lng: float | None,
         service_area_radius_km: int | None,
+        payout_vpa: str | None = None,
+        payout_account_number: str | None = None,
+        payout_ifsc: str | None = None,
         languages: list[str] | None = None,
     ) -> ProviderProfile:
         profile, _ = await self.get_or_create_profile(user_id)
@@ -100,6 +104,25 @@ class ProviderService:
             profile.upi_id_encrypted = encrypt(upi_id)
         if bank_account is not None:
             profile.bank_account_encrypted = encrypt(bank_account)
+
+        # Payout destination — encrypted at rest, never returned decrypted.
+        #
+        # Saving a method makes it the active one, and deliberately leaves the other
+        # method's stored values alone (SVC-148): a provider who switches keeps the
+        # old destination on file so they can flip back without re-entering it.
+        # Removal is an explicit action, never a side effect of saving.
+        # The schema rejects sending both methods at once, so at most one of these
+        # branches makes itself active — no arbitrary tie-break.
+        if payout_vpa is not None:
+            profile.payout_vpa_encrypted = encrypt(payout_vpa)
+            profile.payout_method = PayoutMethod.UPI
+            profile.payout_display = payout_vpa
+        if payout_account_number is not None:
+            profile.payout_account_number_encrypted = encrypt(payout_account_number)
+            profile.payout_method = PayoutMethod.BANK
+            profile.payout_display = self._mask_account(payout_account_number)
+        if payout_ifsc is not None:
+            profile.payout_ifsc_encrypted = encrypt(payout_ifsc)
 
         if service_area_lat is not None and service_area_lng is not None:
             profile.service_area_center = build_point_wkt(service_area_lat, service_area_lng)
@@ -146,6 +169,70 @@ class ProviderService:
             ) from exc
 
         profile.profile_photo_url = url
+        await self.db.flush()
+        return profile
+
+    @staticmethod
+    def _mask_account(account_number: str) -> str:
+        """Bank account as shown back to its owner: last 4 visible, rest masked.
+
+        Last-4 is the convention everywhere a person is shown their own account —
+        Indian net banking, GPay/PhonePe, the Razorpay and Stripe dashboards — and is
+        enough for them to recognise which account they saved. A UPI VPA gets no
+        masking: it is a public handle you hand out in order to be paid, so hiding it
+        would cost usability and protect nothing.
+        """
+        return "•" * max(len(account_number) - 4, 0) + account_number[-4:]
+
+    async def remove_payout_method(self, user_id: uuid.UUID) -> ProviderProfile:
+        """Erase every stored payout destination. Explicit action only.
+
+        Deliberately clears *both* methods, not just the active one: "remove my
+        payout details" means the platform holds nothing, and leaving the inactive
+        method behind would keep PII we have been asked to delete.
+        """
+        profile, _ = await self.get_or_create_profile(user_id)
+        profile.payout_vpa_encrypted = None
+        profile.payout_account_number_encrypted = None
+        profile.payout_ifsc_encrypted = None
+        profile.payout_method = None
+        profile.payout_display = None
+        await self.db.flush()
+        return profile
+
+    async def set_active_payout_method(
+        self, user_id: uuid.UUID, method: PayoutMethod
+    ) -> ProviderProfile:
+        """Switch payouts to an already-stored method, without re-entering it.
+
+        Rejects a method with nothing on file — activating a destination we cannot
+        actually pay to would fail later at payout time, when the provider is no
+        longer around to correct it.
+
+        "Is it stored?" is answered by ``ProviderProfile.payout_methods_stored``, the
+        same property the profile response exposes (SVC-152). Deliberately one shared
+        rule: if this check and what we advertise as switchable could drift, the
+        frontend would offer a switch that 400s.
+        """
+        profile, _ = await self.get_or_create_profile(user_id)
+
+        if method not in profile.payout_methods_stored:
+            raise InvalidPayoutMethod(
+                "No UPI ID on file to switch to"
+                if method is PayoutMethod.UPI
+                else "No bank account on file to switch to"
+            )
+
+        profile.payout_method = method
+        # The display label follows the active method, so it must be recomputed from
+        # the stored value — the only point where payout PII is decrypted outside the
+        # payout itself, and only for the method being activated.
+        if method is PayoutMethod.UPI:
+            profile.payout_display = decrypt(profile.payout_vpa_encrypted)
+        else:
+            profile.payout_display = self._mask_account(
+                decrypt(profile.payout_account_number_encrypted)
+            )
         await self.db.flush()
         return profile
 

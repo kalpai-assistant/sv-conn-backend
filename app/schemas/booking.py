@@ -174,6 +174,9 @@ class BookingResponse(BaseModel):
     address: BookingAddress | None = Field(
         validation_alias=AliasChoices("address", "consumer_address")
     )
+    # True when any payment for this booking has been charged back. Only populated by
+    # the admin bookings list (which computes it); defaults False elsewhere (SVC-134).
+    is_disputed: bool = False
     scheduled_at: datetime | None
     created_at: datetime
 

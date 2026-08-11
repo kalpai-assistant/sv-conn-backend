@@ -18,6 +18,7 @@ from app.models.booking_status_log import BookingStatusLog  # noqa: F401
 from app.models.category import Category  # noqa: F401
 from app.models.coupon import Coupon, CouponRedemption, DiscountType  # noqa: F401
 from app.models.payment import Payment  # noqa: F401
+from app.models.payout_audit import PayoutAudit  # noqa: F401
 from app.models.provider_profile import KYCStatus, ProviderProfile  # noqa: F401
 from app.models.provider_service import ProviderService  # noqa: F401
 from app.models.review import Review  # noqa: F401

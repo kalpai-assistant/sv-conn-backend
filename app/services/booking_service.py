@@ -7,6 +7,7 @@ import secrets
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +44,7 @@ from app.services.provider_matching import (
     is_eligible_provider_multi_stmt,
 )
 from app.utils.geo import distance_km_to_point
+from app.utils.money import to_decimal
 
 settings = get_settings()
 
@@ -180,27 +182,33 @@ class BookingService:
                 # can't fulfil, which is a request problem, not a resource one.
                 raise ValueError(f"Service {item.service_id} not found or inactive")
 
-        commission_rate = settings.PLATFORM_COMMISSION_PERCENT / 100
+        # Exact decimal arithmetic per line (SVC-150). Commission is the rounded
+        # half, payout is the remainder — so the two always add back to exactly
+        # the line total and no paisa is invented or lost in the split. Applied
+        # per item so the same guarantee holds for a multi-service cart.
+        commission_rate = to_decimal(settings.PLATFORM_COMMISSION_PERCENT) / 100
 
         # First pass: compute totals so we can seed the Booking row with the
         # aggregates. Second pass (after flush) creates the item rows keyed
         # to the booking id.
-        item_lines: list[tuple[CreateBookingItemRequest, Service, float, float, float]] = []
+        item_lines: list[tuple[CreateBookingItemRequest, Service, Decimal, Decimal, Decimal]] = []
         for item in items:
             svc = services_by_id[item.service_id]
-            unit_price = svc.base_price
-            total_price = round(unit_price * item.quantity, 2)
-            platform_commission = round(total_price * commission_rate, 2)
-            provider_payout = round(total_price - platform_commission, 2)
+            unit_price = to_decimal(svc.base_price)
+            total_price = to_decimal(unit_price * item.quantity)
+            platform_commission = to_decimal(total_price * commission_rate)
+            provider_payout = total_price - platform_commission
             item_lines.append((item, svc, total_price, platform_commission, provider_payout))
 
-        total_service_amount = round(sum(line[2] for line in item_lines), 2)
-        total_platform_commission = round(sum(line[3] for line in item_lines), 2)
-        total_provider_payout = round(sum(line[4] for line in item_lines), 2)
+        total_service_amount = sum((line[2] for line in item_lines), start=Decimal(0))
+        total_platform_commission = sum((line[3] for line in item_lines), start=Decimal(0))
+        total_provider_payout = sum((line[4] for line in item_lines), start=Decimal(0))
 
         # Coupon application. Validated with the cart total *before* the
         # booking row is added so an invalid code refuses the request cleanly
         # (no orphan Booking rolled back). CouponInvalid propagates as 400.
+        # CouponService.validate is float-typed pending a SVC-150 follow-up;
+        # convert at the boundary rather than plumbing Decimal through it here.
         discount_amount = 0.0
         redeemed_coupon = None
         if coupon_code:
@@ -209,7 +217,7 @@ class BookingService:
             redeemed_coupon, discount_amount = await CouponService(self.db).validate(
                 code=coupon_code,
                 user_id=consumer_id,
-                cart_amount=total_service_amount,
+                cart_amount=float(total_service_amount),
             )
 
         booking = Booking(
