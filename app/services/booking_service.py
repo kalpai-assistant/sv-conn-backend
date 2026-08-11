@@ -27,6 +27,7 @@ from app.models.booking import (
     VALID_TRANSITIONS,
     Booking,
     BookingStatus,
+    PaymentMethod,
     PaymentStatus,
 )
 from app.models.booking_item import BookingItem
@@ -552,7 +553,16 @@ class BookingService:
             booking.doorstep_otp = None
 
         if new_status == BookingStatus.COMPLETED:
-            booking.payment_status = PaymentStatus.PENDING
+            # Only reset for cash — `process_cash_payment` is enqueued after
+            # completion and needs PENDING to flip → PAID once the provider
+            # confirms receipt; its own early-return-on-PAID depends on this
+            # reset happening for cash. For online, PAID is set by
+            # `verify_payment` (or the payments webhook) before COMPLETED, and
+            # wiping it here on every completion erased the record at exactly
+            # the moment the booking became payout-eligible — this is SVC-39
+            # G9. Gate on CASH so online payments survive completion.
+            if booking.payment_method is PaymentMethod.CASH:
+                booking.payment_status = PaymentStatus.PENDING
             # Fix #6: increment provider completed jobs counter
             await self._increment_completed_jobs(booking.provider_id)
 
