@@ -1,4 +1,5 @@
 import uuid
+
 from sqlalchemy import ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -11,13 +12,9 @@ class ProviderService(Base):
 
     __tablename__ = "provider_services"
 
-    __table_args__ = (
-        UniqueConstraint("provider_id", "service_id", name="uix_provider_service"),
-    )
+    __table_args__ = (UniqueConstraint("provider_id", "service_id", name="uix_provider_service"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     provider_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("provider_profiles.user_id"), nullable=False, index=True
     )

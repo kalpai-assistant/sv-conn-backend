@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, status
-from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_redis
-from app.schemas.auth import SendOTPRequest, VerifyOTPRequest, TokenResponse, RefreshTokenRequest
+from app.schemas.auth import RefreshTokenRequest, SendOTPRequest, TokenResponse, VerifyOTPRequest
 from app.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])

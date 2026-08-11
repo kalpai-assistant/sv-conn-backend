@@ -2,9 +2,11 @@
 Auth integration tests.
 Covers: send-otp rate limiting, verify-otp happy path, token refresh.
 """
-import pytest
+
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
+
+import pytest
 
 
 @pytest.mark.asyncio

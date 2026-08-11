@@ -3,6 +3,7 @@ Notification service: thin orchestration layer that delegates to FCM and SMS cli
 Kept separate so the notification channel strategy can evolve without touching
 business services (Open/Closed principle).
 """
+
 from app.utils.fcm_client import send_push_notification
 from app.utils.sms_client import get_sms_client
 

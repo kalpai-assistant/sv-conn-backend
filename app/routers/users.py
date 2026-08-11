@@ -5,8 +5,11 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.user import User
 from app.schemas.user import (
-    UserResponse, UpdateProfileRequest, UpdateFCMTokenRequest,
-    AddressResponse, CreateAddressRequest,
+    AddressResponse,
+    CreateAddressRequest,
+    UpdateFCMTokenRequest,
+    UpdateProfileRequest,
+    UserResponse,
 )
 from app.services.user_service import UserService
 
@@ -37,6 +40,10 @@ async def update_fcm_token(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Register the caller's FCM token, or clear it by sending `null` on sign-out.
+
+    The field is required, so an empty body is rejected — clearing must be explicit.
+    """
     await UserService(db).update_fcm_token(current_user.id, request.fcm_token)
 
 
@@ -71,4 +78,5 @@ async def delete_address(
     db: AsyncSession = Depends(get_db),
 ):
     from uuid import UUID
+
     await UserService(db).delete_address(current_user.id, UUID(address_id))

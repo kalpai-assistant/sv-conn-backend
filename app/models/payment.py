@@ -1,10 +1,12 @@
-import uuid
 import enum
+import uuid
 from datetime import datetime
 from decimal import Decimal
-from sqlalchemy import Numeric, String, ForeignKey, DateTime, func, Enum, UniqueConstraint, Index
+
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.database import Base
 
 
@@ -43,9 +45,7 @@ class Payment(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     booking_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("bookings.id"), nullable=False
     )
@@ -63,9 +63,7 @@ class Payment(Base):
     # this as a flag only: status/settlement are never moved automatically, an admin
     # resolves the dispute out of band.
     disputed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     booking: Mapped["Booking"] = relationship("Booking", back_populates="payment")

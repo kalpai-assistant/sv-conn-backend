@@ -12,6 +12,7 @@ NOTE (v1.1): the composite call creates a fresh RazorpayX contact + fund account
 every payout, which accumulates duplicate contacts over time. Acceptable for beta;
 the v1.1 plan is to create+cache a contact id + fund account id once per provider.
 """
+
 import asyncio
 import logging
 
@@ -105,18 +106,18 @@ async def create_payout(
             # Retry only transient failures: network errors, or 502/503/504 from
             # RazorpayX. Anything else (4xx, etc.) is a real error — raise at once.
             status_code = (
-                exc.response.status_code
-                if isinstance(exc, httpx.HTTPStatusError)
-                else None
+                exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
             )
             transient = status_code is None or status_code in _RETRYABLE_STATUS
             if not transient or attempt == _MAX_ATTEMPTS:
                 raise
             backoff = _BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)
             logger.warning(
-                "RazorpayX payout transient failure (attempt %s/%s, status=%s); "
-                "retrying in %ss",
-                attempt, _MAX_ATTEMPTS, status_code, backoff,
+                "RazorpayX payout transient failure (attempt %s/%s, status=%s); " "retrying in %ss",
+                attempt,
+                _MAX_ATTEMPTS,
+                status_code,
+                backoff,
             )
             await asyncio.sleep(backoff)
 
@@ -163,9 +164,7 @@ async def list_payouts(
                 break
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                 status_code = (
-                    exc.response.status_code
-                    if isinstance(exc, httpx.HTTPStatusError)
-                    else None
+                    exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                 )
                 transient = status_code is None or status_code in _RETRYABLE_STATUS
                 if not transient or attempt == _MAX_ATTEMPTS:
@@ -174,7 +173,10 @@ async def list_payouts(
                 logger.warning(
                     "RazorpayX list_payouts transient failure (attempt %s/%s, status=%s); "
                     "retrying in %ss",
-                    attempt, _MAX_ATTEMPTS, status_code, backoff,
+                    attempt,
+                    _MAX_ATTEMPTS,
+                    status_code,
+                    backoff,
                 )
                 await asyncio.sleep(backoff)
 
@@ -186,6 +188,7 @@ async def list_payouts(
     else:
         logger.warning(
             "RazorpayX list_payouts hit the %s-page cap (%s items); results truncated",
-            _MAX_PAGES, len(all_items),
+            _MAX_PAGES,
+            len(all_items),
         )
     return all_items

@@ -2,7 +2,8 @@
 Security helpers: JWT encoding/decoding + password hashing.
 All JWT operations are centralised here — no other module touches jose directly.
 """
-from datetime import datetime, timezone, timedelta
+
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from jose import JWTError, jwt
@@ -18,6 +19,7 @@ _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # Password helpers (used for admin accounts; OTP users skip this)
 # ---------------------------------------------------------------------------
 
+
 def hash_password(plain: str) -> str:
     return _pwd_context.hash(plain)
 
@@ -30,10 +32,11 @@ def verify_password(plain: str, hashed: str) -> bool:
 # JWT helpers
 # ---------------------------------------------------------------------------
 
+
 def _build_token(data: dict[str, Any], expires_delta: timedelta) -> str:
     payload = data.copy()
-    payload["exp"] = datetime.now(timezone.utc) + expires_delta
-    payload["iat"] = datetime.now(timezone.utc)
+    payload["exp"] = datetime.now(UTC) + expires_delta
+    payload["iat"] = datetime.now(UTC)
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 

@@ -10,6 +10,7 @@ one place — the same reasoning as ``PayoutService._owed_filter``. Two copies o
 money rule will eventually disagree, and the amount an admin approves must equal the
 amount that leaves the bank.
 """
+
 from decimal import ROUND_HALF_UP, Decimal
 
 # Money is rupees with exactly two decimal places, matching Numeric(12, 2).

@@ -1,6 +1,6 @@
 # High-Level Design — On-Demand Service Marketplace
 
-**Project Codename:** ServiceConnect  
+**Project Codename:** Eazyserv  
 **Document Version:** 1.0  
 **Date:** April 14, 2026  
 **Author:** Vipul Rao  
@@ -10,7 +10,7 @@
 
 ## 1. Executive Summary
 
-ServiceConnect is a B2C on-demand home services marketplace — similar in model to Urban Company (India) or TaskRabbit (US) — with an Uber/Ola-style live tracking experience. The platform connects service providers (plumbers, electricians, cleaners, etc.) with consumers via a mobile application.
+Eazyserv is a B2C on-demand home services marketplace — similar in model to Urban Company (India) or TaskRabbit (US) — with an Uber/Ola-style live tracking experience. The platform connects service providers (plumbers, electricians, cleaners, etc.) with consumers via a mobile application.
 
 **Revenue Model:** 20% platform commission on every completed booking. On a ₹100 service, ₹20 goes to the platform and ₹80 is settled to the service provider.
 

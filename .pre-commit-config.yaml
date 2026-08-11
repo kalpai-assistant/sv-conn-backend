@@ -1,0 +1,46 @@
+# Pre-commit hooks — install once with `pre-commit install` in a fresh clone.
+#
+# What runs: fast local checks that catch the failures most common in
+# past PRs (accidental secrets, trailing whitespace, formatting drift).
+# CI still runs the definitive check — these hooks just shorten the
+# feedback loop from "PR failed" to "commit refused".
+#
+# Install:
+#   pipx install pre-commit
+#   pre-commit install                # writes .git/hooks/pre-commit
+#   pre-commit run --all-files        # one-time run over the whole tree
+
+repos:
+  # Secret scanner. Fails the commit if a diff introduces something that
+  # looks like a token, key, or credential. Cross-references thousands of
+  # patterns (AWS keys, Razorpay live prefixes, JWT-shaped strings, DB
+  # URIs with embedded passwords, etc). See SECRETS.md for the "why".
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # Basic hygiene — cheap and near-universally useful.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^alembic/versions/  # auto-generated migrations
+      - id: end-of-file-fixer
+        exclude: ^alembic/versions/
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=500]         # blocks the "committed a lockfile snapshot" mistake
+      - id: check-merge-conflict     # blocks accidentally-committed conflict markers
+      - id: detect-private-key       # SSH / GPG / PEM headers
+
+  # Ruff — matches what CI runs. Lints AND fixes AND formats in one pass.
+  # Format-check enforcement lives in CI (ruff format --check); this hook
+  # auto-applies the same formatter locally so no PR ever fails on format.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format

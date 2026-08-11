@@ -1,9 +1,10 @@
 """
 Payment Celery tasks: handles cash payment recording after booking completion.
 """
-from app.tasks.celery_app import celery_app
-from app.models.payment import Payment, PaymentRecordStatus, PaymentRecordMethod
+
 from app.models.booking import Booking, PaymentStatus
+from app.models.payment import Payment, PaymentRecordMethod, PaymentRecordStatus
+from app.tasks.celery_app import celery_app
 
 
 @celery_app.task(
@@ -68,9 +69,7 @@ def reconcile_payouts():
 
     async def _run():
         async with AsyncSessionLocal() as session:
-            report = await PayoutService(session).reconcile_payouts(
-                since_ts=since, until_ts=now
-            )
+            report = await PayoutService(session).reconcile_payouts(since_ts=since, until_ts=now)
             await session.commit()
             # Durable now — safe to tell the providers.
             PayoutService.dispatch_notifications(report.pop("notifications", []))

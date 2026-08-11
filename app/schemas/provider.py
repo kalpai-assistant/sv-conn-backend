@@ -1,7 +1,9 @@
 import re
+from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from uuid import UUID
+
 from app.models.provider_profile import KYCStatus, PayoutMethod
 
 # VPA: local-part@handle, e.g. "name@okhdfcbank". IFSC: 4 letters + 0 + 6 alnum.
@@ -26,6 +28,9 @@ class ProviderProfileUpdate(BaseModel):
     payout_vpa: str | None = Field(None, max_length=100)
     payout_account_number: str | None = Field(None, min_length=5, max_length=34)
     payout_ifsc: str | None = Field(None, max_length=11)
+    # List of languages the provider speaks. Strings are trimmed and
+    # de-duplicated (case-insensitive); an empty list clears the field.
+    languages: list[str] | None = Field(None, max_length=20)
 
     @field_validator("payout_vpa")
     @classmethod
@@ -57,12 +62,29 @@ class ProviderProfileUpdate(BaseModel):
             raise ValueError("payout_account_number must be 5-34 digits")
         return value
 
+    @field_validator("languages")
+    @classmethod
+    def _clean_languages(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in value:
+            lang = raw.strip()
+            if not lang:
+                continue
+            if len(lang) > 50:
+                raise ValueError("each language must be at most 50 characters")
+            key = lang.casefold()
+            if key not in seen:
+                seen.add(key)
+                cleaned.append(lang)
+        return cleaned
+
     @model_validator(mode="after")
     def _validate_account_ifsc_pair(self) -> "ProviderProfileUpdate":
         if bool(self.payout_account_number) != bool(self.payout_ifsc):
-            raise ValueError(
-                "payout_account_number and payout_ifsc must be provided together"
-            )
+            raise ValueError("payout_account_number and payout_ifsc must be provided together")
         # Saving a method makes it the active one (SVC-148), so sending both in one
         # request has no defined answer to "which is now active". Reject it rather
         # than pick one — the caller has to say what they mean.
@@ -88,6 +110,7 @@ class ProviderResponse(BaseModel):
     id: UUID
     user_id: UUID
     profile_photo_url: str | None
+    languages: list[str] = []
     avg_rating: float
     total_completed_jobs: int
     kyc_status: KYCStatus
@@ -137,3 +160,68 @@ class ProviderServiceSubscriptionResponse(BaseModel):
     service_id: UUID
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# KYC
+# ---------------------------------------------------------------------------
+
+
+class KYCSubmissionResponse(BaseModel):
+    kyc_status: KYCStatus
+    kyc_submitted_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class KYCRejectionRequest(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
+class KYCReviewResponse(BaseModel):
+    kyc_status: KYCStatus
+    kyc_reviewed_at: datetime | None
+    kyc_rejection_reason: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class KYCDocsResponse(BaseModel):
+    """Admin-only: full KYC payload including presigned doc URLs for review."""
+
+    user_id: UUID
+    name: str | None
+    phone: str
+    kyc_status: KYCStatus
+    kyc_submitted_at: datetime | None
+    kyc_reviewed_at: datetime | None
+    kyc_rejection_reason: str | None
+    # Presigned S3 URLs; nil if the provider hasn't uploaded yet.
+    aadhaar_url: str | None
+    selfie_url: str | None
+
+
+# ---------------------------------------------------------------------------
+# Earnings (SC-33)
+# ---------------------------------------------------------------------------
+
+
+class EarningsBookingItem(BaseModel):
+    booking_id: UUID
+    service_name: str
+    completed_at: datetime
+    # Base commission split + any consumer tip. Rendered as one line on
+    # the earnings dashboard.
+    payout_amount: float
+    # Broken out separately so the app can show "₹800 + ₹50 tip" when
+    # tips exist without doing the subtraction itself.
+    tip_amount: float = 0.0
+
+    model_config = {"from_attributes": True}
+
+
+class EarningsResponse(BaseModel):
+    range: str  # "today" | "week" | "month"
+    total_payout: float
+    completed_count: int
+    bookings: list[EarningsBookingItem]

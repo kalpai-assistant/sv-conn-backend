@@ -1,1 +1,1 @@
-# ServiceConnect application package
+# Eazyserv application package
