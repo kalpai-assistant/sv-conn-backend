@@ -208,8 +208,9 @@ class BookingService:
         # Coupon application. Validated with the cart total *before* the
         # booking row is added so an invalid code refuses the request cleanly
         # (no orphan Booking rolled back). CouponInvalid propagates as 400.
-        # CouponService.validate is float-typed pending a SVC-150 follow-up;
-        # convert at the boundary rather than plumbing Decimal through it here.
+        # CouponService.validate is float-typed (coupon rules still store
+        # discount_value as float — outside the scope of G31); convert at the
+        # boundary rather than plumbing Decimal through it here.
         discount_amount = 0.0
         redeemed_coupon = None
         if coupon_code:
@@ -231,7 +232,9 @@ class BookingService:
             service_amount=total_service_amount,
             platform_commission=total_platform_commission,
             provider_payout=total_provider_payout,
-            discount_amount=discount_amount,
+            # SVC-39 G31: discount_amount is now Numeric on the model; convert at
+            # the boundary so the ORM never receives a float for a Decimal column.
+            discount_amount=to_decimal(discount_amount),
             payment_method=payment_method,
         )
         self.db.add(booking)
@@ -666,7 +669,8 @@ class BookingService:
         if booking.payment_status is PaymentStatus.REFUNDED:
             raise InvalidStateTransition("Cannot tip a refunded booking")
 
-        booking.tip_amount = round(amount, 2)
+        # SVC-39 G31: tip_amount is Numeric; `to_decimal` rounds half-up to 2dp.
+        booking.tip_amount = to_decimal(amount)
         await self.db.flush()
 
         await self.attach_addresses([booking])
