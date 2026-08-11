@@ -12,6 +12,9 @@ import hashlib
 import hmac
 import inspect
 import json
+import hashlib
+import hmac
+import json
 import logging
 import uuid
 from unittest.mock import AsyncMock, patch
@@ -46,6 +49,18 @@ from tests.factories.booking_factory import BookingFactory
 from tests.factories.user_factory import UserFactory
 
 settings = get_settings()
+
+
+def _signed_body(payload: dict, secret: str) -> tuple[bytes, str]:
+    """Serialise + HMAC-SHA256 sign a webhook payload the way Razorpay does.
+
+    Returns (raw_body, signature) — post as ``content=raw_body`` with the sig
+    in ``X-Razorpay-Signature``. Same helper shape as `tests/test_disputes.py`.
+    """
+    raw = json.dumps(payload).encode()
+    sig = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return raw, sig
+
 
 # Real (un-stubbed) audit helpers, captured before the autouse fixture patches them,
 # so the dedicated audit tests below can exercise the real implementations.
@@ -396,17 +411,18 @@ async def test_payout_webhook_endpoint_settles(client, db_session):
     """POST /payments/payout-webhook routes a payout.processed event to PayoutService."""
     booking = await _booking_in_processing(db_session, "pout_endpoint")
 
-    # Bypass signature verification the same way test_payments.py does — see G3
-    # in SVC-39_GAP_ANALYSIS.md; once G3 is fixed these tests will need real
-    # HMAC signatures.
-    with patch.object(settings, "RAZORPAYX_WEBHOOK_SECRET", ""):
-        resp = await client.post(
-            f"{settings.API_V1_PREFIX}/payments/payout-webhook",
-            json={
-                "event": "payout.processed",
-                "payload": {"payout": {"entity": {"id": "pout_endpoint"}}},
-            },
-        )
+    body, sig = _signed_body(
+        {
+            "event": "payout.processed",
+            "payload": {"payout": {"entity": {"id": "pout_endpoint"}}},
+        },
+        settings.RAZORPAYX_WEBHOOK_SECRET,
+    )
+    resp = await client.post(
+        f"{settings.API_V1_PREFIX}/payments/payout-webhook",
+        content=body,
+        headers={"Content-Type": "application/json", "X-Razorpay-Signature": sig},
+    )
     assert resp.status_code == 200
 
     await db_session.refresh(booking)
@@ -423,14 +439,18 @@ async def test_payments_webhook_does_not_settle_payouts(client, db_session):
     """
     booking = await _booking_in_processing(db_session, "pout_wrong_endpoint")
 
-    with patch.object(settings, "RAZORPAY_WEBHOOK_SECRET", ""):
-        resp = await client.post(
-            f"{settings.API_V1_PREFIX}/payments/webhook",
-            json={
-                "event": "payout.processed",
-                "payload": {"payout": {"entity": {"id": "pout_wrong_endpoint"}}},
-            },
-        )
+    body, sig = _signed_body(
+        {
+            "event": "payout.processed",
+            "payload": {"payout": {"entity": {"id": "pout_wrong_endpoint"}}},
+        },
+        settings.RAZORPAY_WEBHOOK_SECRET,
+    )
+    resp = await client.post(
+        f"{settings.API_V1_PREFIX}/payments/webhook",
+        content=body,
+        headers={"Content-Type": "application/json", "X-Razorpay-Signature": sig},
+    )
     assert resp.status_code == 200
 
     await db_session.refresh(booking)
@@ -2105,14 +2125,18 @@ async def test_webhook_endpoint_dispatches_push_after_commit(db_session, stub_pa
         committed.append(True)  # stands in for get_db's commit
 
     async with await _client_with_db(_db) as client:
-        with patch.object(settings, "RAZORPAYX_WEBHOOK_SECRET", ""):
-            resp = await client.post(
-                f"{settings.API_V1_PREFIX}/payments/payout-webhook",
-                json={
-                    "event": "payout.processed",
-                    "payload": {"payout": {"entity": {"id": "pout_bg_ok", "amount": 8000}}},
-                },
-            )
+        body, sig = _signed_body(
+            {
+                "event": "payout.processed",
+                "payload": {"payout": {"entity": {"id": "pout_bg_ok", "amount": 8000}}},
+            },
+            settings.RAZORPAYX_WEBHOOK_SECRET,
+        )
+        resp = await client.post(
+            f"{settings.API_V1_PREFIX}/payments/payout-webhook",
+            content=body,
+            headers={"Content-Type": "application/json", "X-Razorpay-Signature": sig},
+        )
 
     assert resp.status_code == 200
     assert committed == [True]
@@ -2134,15 +2158,19 @@ async def test_no_push_when_the_commit_fails(db_session, stub_payout_push):
         raise RuntimeError("commit failed")
 
     async with await _client_with_db(_failing_db) as client:
-        with patch.object(settings, "RAZORPAYX_WEBHOOK_SECRET", ""):
-            with pytest.raises(RuntimeError):
-                await client.post(
-                    f"{settings.API_V1_PREFIX}/payments/payout-webhook",
-                    json={
-                        "event": "payout.processed",
-                        "payload": {"payout": {"entity": {"id": "pout_bg_fail", "amount": 8000}}},
-                    },
-                )
+        body, sig = _signed_body(
+            {
+                "event": "payout.processed",
+                "payload": {"payout": {"entity": {"id": "pout_bg_fail", "amount": 8000}}},
+            },
+            settings.RAZORPAYX_WEBHOOK_SECRET,
+        )
+        with pytest.raises(RuntimeError):
+            await client.post(
+                f"{settings.API_V1_PREFIX}/payments/payout-webhook",
+                content=body,
+                headers={"Content-Type": "application/json", "X-Razorpay-Signature": sig},
+            )
 
     stub_payout_push.assert_not_called()
 

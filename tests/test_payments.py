@@ -62,6 +62,10 @@ def _make_valid_signature(order_id: str, payment_id: str) -> str:
     ).hexdigest()
 
 
+def _sign_webhook(body: bytes, secret: str) -> str:
+    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
 # ------------------------------------------------------------------
 # create_order works without a provider Route account
 # ------------------------------------------------------------------
@@ -157,14 +161,16 @@ async def test_webhook_payment_captured_idempotent(client, db_session):
             "event": "payment.captured",
             "payload": {"payment": {"entity": {"order_id": "order_already_paid"}}},
         }
-    )
+    ).encode()
 
-    with patch.object(settings, "RAZORPAY_WEBHOOK_SECRET", ""):
-        response = await client.post(
-            "/api/v1/payments/webhook",
-            content=webhook_body,
-            headers={"Content-Type": "application/json"},
-        )
+    response = await client.post(
+        "/api/v1/payments/webhook",
+        content=webhook_body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Razorpay-Signature": _sign_webhook(webhook_body, settings.RAZORPAY_WEBHOOK_SECRET),
+        },
+    )
 
     assert response.status_code == 200
 
@@ -177,3 +183,67 @@ async def test_webhook_payment_captured_idempotent(client, db_session):
         )
     ).scalar_one()
     assert payment_count_after == payment_count_before
+
+
+# ------------------------------------------------------------------
+# SVC-39 G3: webhook secret must not silently disable verification in prod
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_webhook_refuses_when_secret_missing_in_non_dev(client):
+    """SVC-39 G3: empty secret + non-dev must 500, not silently accept.
+
+    The endpoint is unauthenticated by design (Razorpay initiates), so an
+    unset secret used to leave the route open to forged webhooks. Dev keeps
+    the log-warn-and-accept behaviour so local `.env` files without secrets
+    still work; staging and production hard-refuse.
+    """
+    body = json.dumps({"event": "payment.captured", "payload": {}}).encode()
+    with (
+        patch.object(settings, "RAZORPAY_WEBHOOK_SECRET", ""),
+        patch.object(settings, "ENVIRONMENT", "production"),
+    ):
+        response = await client.post(
+            "/api/v1/payments/webhook",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+    assert response.status_code == 500
+    # FastAPI's default HTTPException handler returns {"detail": "..."} — the
+    # app-level generic handler in exceptions.py only runs for uncaught
+    # exceptions, not for a raised HTTPException.
+    assert "Webhook secret not configured" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_accepts_empty_secret_in_dev(client, db_session):
+    """Dev keeps the shortcut so a local `.env` without secrets still works,
+    just log-warns loudly. Regression against the fix over-tightening."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+        payment_status=PaymentStatus.PAID,
+        razorpay_order_id="order_dev_bypass",
+    )
+
+    body = json.dumps(
+        {
+            "event": "payment.captured",
+            "payload": {"payment": {"entity": {"order_id": "order_dev_bypass"}}},
+        }
+    ).encode()
+    with (
+        patch.object(settings, "RAZORPAY_WEBHOOK_SECRET", ""),
+        patch.object(settings, "ENVIRONMENT", "dev"),
+    ):
+        response = await client.post(
+            "/api/v1/payments/webhook",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+    assert response.status_code == 200
