@@ -104,6 +104,105 @@ async def test_create_order_without_provider_linked_account(db_session):
     assert "transfers" not in call_kwargs["data"]
 
 
+# ------------------------------------------------------------------
+# SVC-39 G22: create_order subtracts discount_amount from the charge
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_order_subtracts_discount_from_charge(db_session):
+    """SVC-39 G22: a coupon booking bills the discounted amount, not the full one.
+
+    Before this the customer was charged ``service_amount`` regardless of any
+    coupon, so every coupon booking overcharged by the discount amount while
+    the redemption was still recorded. The rule is stated in
+    ``app/models/coupon.py``: "Effective charge to customer =
+    service_amount − discount_amount + tip_amount" (tip added post-completion).
+    """
+    from decimal import Decimal
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+    )
+    # ``service_amount`` = 100.0 from _create_booking_with_deps' service; layer a
+    # 25-rupee coupon on top. Both Numeric after SVC-39 G31, so the arithmetic
+    # is exact.
+    booking.service_amount = Decimal("100.00")
+    booking.discount_amount = Decimal("25.00")
+    await db_session.flush()
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        mock_rzp.order.create.return_value = {"id": "order_discounted"}
+        result = await PaymentService(db_session).create_order(booking.id)
+
+    # ₹100.00 − ₹25.00 = ₹75.00 = 7500 paise.
+    assert result["amount"] == 7500
+    _, call_kwargs = mock_rzp.order.create.call_args
+    assert call_kwargs["data"]["amount"] == 7500
+
+
+@pytest.mark.asyncio
+async def test_create_order_no_discount_charges_full_amount(db_session):
+    """A booking with no coupon (discount_amount == 0) is billed the full amount.
+
+    Regression against over-fixing: G22 must only subtract *when there is* a
+    discount, not silently reduce a non-coupon order.
+    """
+    from decimal import Decimal
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+    )
+    booking.service_amount = Decimal("200.00")
+    # discount_amount defaults to Decimal("0.00") — no override.
+    await db_session.flush()
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        mock_rzp.order.create.return_value = {"id": "order_no_coupon"}
+        result = await PaymentService(db_session).create_order(booking.id)
+
+    assert result["amount"] == 20000
+    assert booking.discount_amount == Decimal("0.00")
+
+
+@pytest.mark.asyncio
+async def test_create_order_paisa_exact_after_discount(db_session):
+    """The exact-money case that motivated SVC-150 also holds through G22.
+
+    ₹100.09 − ₹10.02 = ₹90.07 must bill 9007 paise, not 9006 or 9008. Float
+    arithmetic would truncate here; Decimal doesn't.
+    """
+    from decimal import Decimal
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+    )
+    booking.service_amount = Decimal("100.09")
+    booking.discount_amount = Decimal("10.02")
+    await db_session.flush()
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        mock_rzp.order.create.return_value = {"id": "order_precise"}
+        result = await PaymentService(db_session).create_order(booking.id)
+
+    assert result["amount"] == 9007
+
+
 @pytest.mark.asyncio
 async def test_verify_payment_invalid_signature(client, auth_headers, db_session):
     """Tampered signature must return 402."""
