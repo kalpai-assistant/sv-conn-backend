@@ -2,8 +2,11 @@
 OTP generation + Redis-backed storage/verification.
 All Redis key naming is centralised here — no other module builds OTP keys.
 """
+
 import secrets
+
 from redis.asyncio import Redis
+
 from app.config import get_settings
 
 settings = get_settings()
@@ -40,6 +43,19 @@ async def is_rate_limited(redis: Redis, phone: str) -> bool:
     """Return True if the phone has exceeded OTP_MAX_ATTEMPTS_PER_HOUR."""
     count = await redis.get(_attempt_key(phone))
     return int(count or 0) >= settings.OTP_MAX_ATTEMPTS_PER_HOUR
+
+
+async def otp_retry_after_seconds(redis: Redis, phone: str) -> int:
+    """
+    How long the caller should wait before another OTP request will succeed.
+
+    Reads the TTL on the hourly-attempts counter. If the key has already
+    vanished (rare race after a limit-hit) we fall back to 60s rather than
+    returning 0 or a negative number — this ends up in the `Retry-After`
+    header on a 429 response.
+    """
+    ttl = await redis.ttl(_attempt_key(phone))
+    return ttl if ttl > 0 else 60
 
 
 async def verify_otp(redis: Redis, phone: str, otp: str) -> bool:

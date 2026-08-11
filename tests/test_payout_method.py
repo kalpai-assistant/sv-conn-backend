@@ -10,15 +10,16 @@ Also covers SVC-152, split out of this ticket: because both methods can be on fi
 the response has to say which ones *are*, or the frontend cannot know whether
 switching back is possible. See the "which methods are stored" section below.
 """
+
 import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.models.provider_profile import ProviderProfile, KYCStatus, PayoutMethod
+from app.exceptions import InvalidPayoutMethod, PaymentError
+from app.models.provider_profile import KYCStatus, PayoutMethod, ProviderProfile
 from app.services.payout_service import PayoutService
 from app.services.provider_service import ProviderService
-from app.exceptions import InvalidPayoutMethod, PaymentError
 from app.utils.encryption import encrypt
 from tests.factories.user_factory import UserFactory
 
@@ -29,8 +30,13 @@ IFSC = "HDFC0001234"
 # update_profile takes every profile field positionally-ish; these are the ones this
 # module never sets, kept in one place so the payout arguments stay readable.
 _UNSET = dict(
-    aadhaar=None, pan=None, upi_id=None, bank_account=None,
-    service_area_lat=None, service_area_lng=None, service_area_radius_km=None,
+    aadhaar=None,
+    pan=None,
+    upi_id=None,
+    bank_account=None,
+    service_area_lat=None,
+    service_area_lng=None,
+    service_area_radius_km=None,
 )
 
 
@@ -42,10 +48,15 @@ def stub_payout_audit_io():
     test session, so against test data they hit a foreign-key violation on
     ``payout_audits.admin_user_id``. Any module that triggers a payout needs this.
     """
-    with patch.object(
-        PayoutService, "_record_attempting_audit",
-        new_callable=AsyncMock, return_value=uuid.uuid4(),
-    ), patch.object(PayoutService, "_resolve_audit", new_callable=AsyncMock):
+    with (
+        patch.object(
+            PayoutService,
+            "_record_attempting_audit",
+            new_callable=AsyncMock,
+            return_value=uuid.uuid4(),
+        ),
+        patch.object(PayoutService, "_resolve_audit", new_callable=AsyncMock),
+    ):
         yield
 
 
@@ -58,19 +69,26 @@ async def _provider(db):
 
 async def _set_upi(db, user):
     return await ProviderService(db).update_profile(
-        user.id, **_UNSET, payout_vpa=VPA,
-        payout_account_number=None, payout_ifsc=None,
+        user.id,
+        **_UNSET,
+        payout_vpa=VPA,
+        payout_account_number=None,
+        payout_ifsc=None,
     )
 
 
 async def _set_bank(db, user):
     return await ProviderService(db).update_profile(
-        user.id, **_UNSET, payout_vpa=None,
-        payout_account_number=ACCOUNT, payout_ifsc=IFSC,
+        user.id,
+        **_UNSET,
+        payout_vpa=None,
+        payout_account_number=ACCOUNT,
+        payout_ifsc=IFSC,
     )
 
 
 # --- saving a method makes it active, and keeps the other one -----------------
+
 
 @pytest.mark.asyncio
 async def test_saving_a_method_makes_it_active(db_session):
@@ -101,6 +119,7 @@ async def test_switching_keeps_the_old_method_stored(db_session):
 
 # --- the money-critical part: which destination actually gets paid ------------
 
+
 async def _payout_destination(db_session, user):
     """Run a payout and report the destination RazorpayX was actually given."""
     from app.models.booking import BookingStatus, SettlementStatus
@@ -110,9 +129,7 @@ async def _payout_destination(db_session, user):
     admin = await UserFactory.create(db_session, role="admin")
     await _booking_for(db_session, consumer, user)
 
-    with patch(
-        "app.services.payout_service.create_payout", new_callable=AsyncMock
-    ) as mock_payout:
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
         mock_payout.return_value = {"id": "pout_dest", "status": "processing"}
         await PayoutService(db_session).create_provider_payout(user.id, admin.id)
 
@@ -166,15 +183,14 @@ async def test_payout_refuses_when_values_stored_but_no_method_active(db_session
 
 # --- set active --------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_set_active_switches_without_re_entering(db_session):
     user = await _provider(db_session)
     await _set_bank(db_session, user)
     await _set_upi(db_session, user)  # UPI now active, bank still stored
 
-    profile = await ProviderService(db_session).set_active_payout_method(
-        user.id, PayoutMethod.BANK
-    )
+    profile = await ProviderService(db_session).set_active_payout_method(user.id, PayoutMethod.BANK)
 
     assert profile.payout_method is PayoutMethod.BANK
     # The label follows the active method, masked for a bank account.
@@ -191,16 +207,15 @@ async def test_set_active_rejects_a_method_with_nothing_stored(db_session):
     await _set_upi(db_session, user)
 
     with pytest.raises(InvalidPayoutMethod, match="No bank account on file"):
-        await ProviderService(db_session).set_active_payout_method(
-            user.id, PayoutMethod.BANK
-        )
+        await ProviderService(db_session).set_active_payout_method(user.id, PayoutMethod.BANK)
 
 
 # --- remove ------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_remove_clears_both_methods(db_session):
-    """"Remove my payout details" must leave the platform holding nothing."""
+    """ "Remove my payout details" must leave the platform holding nothing."""
     user = await _provider(db_session)
     await _set_bank(db_session, user)
     await _set_upi(db_session, user)
@@ -229,6 +244,7 @@ async def test_can_add_again_after_removing(db_session):
 
 # --- endpoints ---------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_endpoints_switch_and_remove(client, db_session, auth_headers):
     user = await _provider(db_session)
@@ -252,9 +268,7 @@ async def test_endpoints_switch_and_remove(client, db_session, auth_headers):
 
 
 @pytest.mark.asyncio
-async def test_set_active_endpoint_rejects_unstored_method(
-    client, db_session, auth_headers
-):
+async def test_set_active_endpoint_rejects_unstored_method(client, db_session, auth_headers):
     user = await _provider(db_session)
     await _set_upi(db_session, user)
 
@@ -292,6 +306,7 @@ async def test_cannot_set_both_methods_in_one_request(client, db_session, auth_h
 # Split out of SVC-148: the response described only the *active* method, so the
 # frontend could not tell whether switching back was possible and had to fire the
 # switch and read the 400 as its answer.
+
 
 @pytest.mark.asyncio
 async def test_both_stored_methods_are_listed(db_session):
@@ -344,9 +359,7 @@ async def test_bank_without_ifsc_is_not_listed(db_session):
     assert profile.payout_methods_stored == []
     # And the switch it would have advertised is still refused — one shared rule.
     with pytest.raises(InvalidPayoutMethod, match="No bank account on file"):
-        await ProviderService(db_session).set_active_payout_method(
-            user.id, PayoutMethod.BANK
-        )
+        await ProviderService(db_session).set_active_payout_method(user.id, PayoutMethod.BANK)
 
 
 @pytest.mark.asyncio
@@ -369,9 +382,7 @@ async def test_active_method_is_always_listed_as_stored(db_session):
         profile = await save(db_session, user)
         assert profile.payout_method in profile.payout_methods_stored
 
-    profile = await ProviderService(db_session).set_active_payout_method(
-        user.id, PayoutMethod.BANK
-    )
+    profile = await ProviderService(db_session).set_active_payout_method(user.id, PayoutMethod.BANK)
     assert profile.payout_method in profile.payout_methods_stored
 
 
@@ -381,9 +392,7 @@ async def test_get_me_reports_stored_methods(client, db_session, auth_headers):
     await _set_bank(db_session, user)
     await _set_upi(db_session, user)
 
-    resp = await client.get(
-        "/api/v1/providers/me", headers=auth_headers(str(user.id), "provider")
-    )
+    resp = await client.get("/api/v1/providers/me", headers=auth_headers(str(user.id), "provider"))
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -410,6 +419,7 @@ async def test_stored_methods_empty_after_remove(client, db_session, auth_header
 
 # --- the guarantee that actually matters -------------------------------------
 
+
 def test_payout_fields_are_not_exposed_on_any_other_provider_schema():
     """No endpoint may leak one provider's payout details to another user.
 
@@ -422,7 +432,10 @@ def test_payout_fields_are_not_exposed_on_any_other_provider_schema():
     from app.schemas.provider import NearbyProviderResponse, ProviderResponse
 
     payout_fields = {
-        "payout_set", "payout_method", "payout_display", "payout_methods_stored",
+        "payout_set",
+        "payout_method",
+        "payout_display",
+        "payout_methods_stored",
     }
     assert payout_fields <= set(ProviderResponse.model_fields)
     assert not (payout_fields & set(NearbyProviderResponse.model_fields))

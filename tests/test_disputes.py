@@ -6,25 +6,26 @@ deliberate absence of any automated state change on .won / .lost, the malformed
 and unknown-payment paths, the Payments webhook endpoint + signature, and the
 admin bookings list's disputed filter/badge.
 """
-import json
-import hmac
-import hashlib
-import uuid
-import pytest
 
+import hashlib
+import hmac
+import json
+import uuid
+
+import pytest
 from sqlalchemy import select
 
-from app.routers import payments as payments_router
-from tests.factories.user_factory import UserFactory
-from tests.factories.booking_factory import BookingFactory
+from app.config import get_settings
+from app.exceptions import PaymentError
+from app.models.address import Address
 from app.models.booking import Booking, BookingStatus, PaymentStatus
 from app.models.category import Category
+from app.models.payment import Payment, PaymentRecordMethod, PaymentRecordStatus
 from app.models.service import Service
-from app.models.address import Address
-from app.models.payment import Payment, PaymentRecordStatus, PaymentRecordMethod
+from app.routers import payments as payments_router
 from app.services.payment_service import PaymentService
-from app.exceptions import PaymentError
-from app.config import get_settings
+from tests.factories.booking_factory import BookingFactory
+from tests.factories.user_factory import UserFactory
 
 settings = get_settings()
 
@@ -91,16 +92,18 @@ def _dispute_payload(payment_id: str, dispute_id: str = "disp_test_1") -> dict:
     """A Razorpay dispute payload: the payment id lives at dispute.entity.payment_id."""
     return {
         "payment": {"entity": {"id": payment_id, "order_id": "order_x"}},
-        "dispute": {"entity": {
-            "id": dispute_id,
-            "payment_id": payment_id,
-            "amount": 10000,
-            "currency": "INR",
-            "reason_code": "chargeback_fraud",
-            "respond_by": 1699999999,
-            "status": "open",
-            "phase": "chargeback",
-        }},
+        "dispute": {
+            "entity": {
+                "id": dispute_id,
+                "payment_id": payment_id,
+                "amount": 10000,
+                "currency": "INR",
+                "reason_code": "chargeback_fraud",
+                "respond_by": 1699999999,
+                "status": "open",
+                "phase": "chargeback",
+            }
+        },
     }
 
 
@@ -113,6 +116,7 @@ def _signed_body(payload: dict, secret: str) -> tuple[bytes, str]:
 # ---------------------------------------------------------------------------
 # payment.dispute.created — flag the payment
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_dispute_created_stamps_disputed_at(db_session):
@@ -165,6 +169,7 @@ async def test_dispute_does_not_change_payment_or_booking_state(db_session):
 # .won / .lost — recorded, never acted on automatically
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("event", ["payment.dispute.won", "payment.dispute.lost"])
 @pytest.mark.asyncio
 async def test_dispute_resolution_makes_no_automated_state_change(db_session, event):
@@ -193,6 +198,7 @@ async def test_dispute_resolution_makes_no_automated_state_change(db_session, ev
 # ---------------------------------------------------------------------------
 # Malformed / unmappable payloads
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_dispute_missing_payment_id_raises(db_session):
@@ -237,6 +243,7 @@ async def test_unhandled_dispute_subevent_is_noop(db_session):
 # Payments webhook endpoint (disputes share the Payments secret, not RazorpayX's)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_dispute_webhook_endpoint_flags_payment(client, db_session):
     """A correctly-signed dispute on /payments/webhook flags the payment."""
@@ -265,8 +272,10 @@ async def test_dispute_webhook_malformed_payload_is_rejected(client, db_session)
     succeed — so this documents that a broken integration stays loud rather than
     being silently acknowledged. Mirrors the payout webhook's missing-id behaviour.
     """
-    body = {"event": "payment.dispute.created",
-            "payload": {"dispute": {"entity": {"id": "disp_malformed"}}}}
+    body = {
+        "event": "payment.dispute.created",
+        "payload": {"dispute": {"entity": {"id": "disp_malformed"}}},
+    }
     raw, sig = _signed_body(body, _RZP_SECRET)
 
     with pytest.MonkeyPatch.context() as mp:
@@ -303,6 +312,7 @@ async def test_dispute_webhook_rejects_invalid_signature(client, db_session):
 # ---------------------------------------------------------------------------
 # Admin visibility — the badge and its filter
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_admin_bookings_exposes_and_filters_disputed(client, db_session, auth_headers):

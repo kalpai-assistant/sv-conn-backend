@@ -1,21 +1,23 @@
 """
 Payment service: Razorpay order creation, signature verification, and webhook handling.
 """
-import hmac
+
 import hashlib
+import hmac
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.utils.money import to_paise
-from app.models.booking import Booking, PaymentStatus
-from app.models.payment import Payment, PaymentRecordStatus, PaymentRecordMethod
-from app.models.provider_profile import ProviderProfile
-from app.utils.razorpay_client import razorpay_client
-from app.exceptions import BookingNotFound, PaymentError
 from app.config import get_settings
+from app.exceptions import BookingNotFound, PaymentError
+from app.models.booking import Booking, PaymentStatus
+from app.models.payment import Payment, PaymentRecordMethod, PaymentRecordStatus
+from app.models.provider_profile import ProviderProfile
+from app.utils.money import to_paise
+from app.utils.razorpay_client import razorpay_client
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -184,19 +186,24 @@ class PaymentService:
             # investigating, but a retry can't fix it — log loudly and acknowledge.
             logger.error(
                 "Razorpay %s for unknown payment %s (dispute=%s)",
-                event, payment_id, dispute_entity.get("id"),
+                event,
+                payment_id,
+                dispute_entity.get("id"),
             )
             return
 
         if event == "payment.dispute.created":
             if payment.disputed_at is None:
-                payment.disputed_at = datetime.now(timezone.utc)
+                payment.disputed_at = datetime.now(UTC)
                 await self.db.flush()
             logger.warning(
                 "payment.dispute.created payment=%s booking=%s dispute=%s "
                 "amount=%s reason=%s respond_by=%s",
-                payment_id, payment.booking_id, dispute_entity.get("id"),
-                dispute_entity.get("amount"), dispute_entity.get("reason_code"),
+                payment_id,
+                payment.booking_id,
+                dispute_entity.get("id"),
+                dispute_entity.get("amount"),
+                dispute_entity.get("reason_code"),
                 dispute_entity.get("respond_by"),
             )
             # TODO(SVC-134): Sentry alert + Slack notification. Neither is wired up in
@@ -207,7 +214,10 @@ class PaymentService:
             # Deliberately no state change: beta AC leaves refund/settlement to admin.
             logger.warning(
                 "%s payment=%s booking=%s dispute=%s (no automated state change)",
-                event, payment_id, payment.booking_id, dispute_entity.get("id"),
+                event,
+                payment_id,
+                payment.booking_id,
+                dispute_entity.get("id"),
             )
 
         else:
@@ -238,9 +248,7 @@ class PaymentService:
         return result.scalar_one_or_none()
 
     async def _find_booking_by_order(self, order_id: str) -> Booking:
-        result = await self.db.execute(
-            select(Booking).where(Booking.razorpay_order_id == order_id)
-        )
+        result = await self.db.execute(select(Booking).where(Booking.razorpay_order_id == order_id))
         booking = result.scalar_one_or_none()
         if not booking:
             raise PaymentError(f"No booking found for order {order_id}")

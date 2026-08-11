@@ -1,16 +1,18 @@
 """
 FastAPI shared dependencies: DB session, Redis, current user resolution, RBAC.
 """
-from uuid import UUID
-from fastapi import Depends, HTTPException, status, WebSocket
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
-from redis.asyncio import Redis as AsyncRedis
 
+from uuid import UUID
+
+from fastapi import Depends, HTTPException, WebSocket, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis.asyncio import Redis as AsyncRedis
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import get_settings
 from app.database import get_db
 from app.models.user import User
 from app.utils.security import decode_jwt
-from app.config import get_settings
 
 settings = get_settings()
 security = HTTPBearer()
@@ -30,7 +32,13 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """Extract and validate JWT; return the active User object."""
+    """Extract and validate JWT; return the active User object.
+
+    SVC-47: also attaches the user to the current Sentry scope so events
+    raised during the request are filterable by user_id in the Sentry
+    UI. `send_default_pii=False` is set at init time, so only the id +
+    role make it into Sentry — never the phone number or email.
+    """
     payload = decode_jwt(credentials.credentials)
     if not payload:
         raise HTTPException(
@@ -44,7 +52,20 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
         )
+    _tag_sentry_user(str(user.id), user.role.value)
     return user
+
+
+def _tag_sentry_user(user_id: str, role: str) -> None:
+    """Bind user context to the current Sentry scope. Safe no-op when SDK
+    isn't initialised (SENTRY_DSN empty)."""
+    try:
+        import sentry_sdk
+
+        sentry_sdk.set_user({"id": user_id, "role": role})
+    except Exception:
+        # Never let Sentry issues break auth.
+        pass
 
 
 def require_role(*roles: str):
@@ -54,6 +75,7 @@ def require_role(*roles: str):
     Usage:
         @router.get("/admin/...", dependencies=[Depends(require_role("admin"))])
     """
+
     async def checker(user: User = Depends(get_current_user)) -> User:
         if user.role.value not in roles:
             raise HTTPException(

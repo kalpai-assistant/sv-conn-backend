@@ -2,8 +2,11 @@
 User factory for test fixtures.
 Uses direct ORM inserts (no factory_boy dependency for simplicity).
 """
+
 import uuid
+
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.models.user import User, UserRole
 
 

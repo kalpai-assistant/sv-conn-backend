@@ -4,18 +4,26 @@ Auth service: OTP flow + JWT token management.
 Single Responsibility: this service owns the full auth lifecycle.
 It does NOT touch HTTP concerns — that belongs to the router.
 """
-import uuid
+
 import logging
+import uuid
+
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from redis.asyncio import Redis
 
+from app.config import get_settings
+from app.exceptions import InvalidOTP, RateLimitExceeded
 from app.models.user import User, UserRole
-from app.utils.otp import generate_otp, store_otp, verify_otp, is_rate_limited
+from app.utils.otp import (
+    generate_otp,
+    is_rate_limited,
+    otp_retry_after_seconds,
+    store_otp,
+    verify_otp,
+)
 from app.utils.security import create_access_token, create_refresh_token, decode_jwt
 from app.utils.sms_client import get_sms_client
-from app.exceptions import InvalidOTP, RateLimitExceeded
-from app.config import get_settings
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -36,7 +44,18 @@ class AuthService:
     async def send_otp(self, phone: str) -> None:
         """Generate OTP, enforce rate limit, persist in Redis, send via SMS."""
         if await is_rate_limited(self.redis, phone):
-            raise RateLimitExceeded()
+            retry = await otp_retry_after_seconds(self.redis, phone)
+            raise RateLimitExceeded(retry_after=retry)
+
+        # SVC-52: E2E bypass. When the phone is on the whitelist AND the
+        # bypass is configured AND we're not in production, skip the SMS
+        # and use a fixed OTP. Lets nightly smoke tests complete auth
+        # without an SMS provider in the loop. Rate limiting still
+        # applies — this is not an unlimited backdoor.
+        if self._is_e2e_test_phone(phone):
+            await store_otp(self.redis, phone, settings.E2E_TEST_OTP)
+            logger.info("auth.e2e_bypass phone=%s", phone)
+            return
 
         otp = generate_otp(settings.OTP_LENGTH)
         logger.info(f"\n{'='*40}\n🔑 [MOCK OTP] Use {otp} to login for {phone}\n{'='*40}\n")
@@ -45,6 +64,22 @@ class AuthService:
             await self._sms.send_otp(phone, otp)
         except Exception as e:
             logger.warning(f"SMS sending failed (expected if keys missing): {e}")
+
+    @staticmethod
+    def _is_e2e_test_phone(phone: str) -> bool:
+        """True iff this phone is on the E2E bypass whitelist AND the bypass
+        is fully configured AND we're not in production.
+
+        Belt-and-suspenders: three independent checks, ALL of which must
+        pass. Any one being wrong (empty whitelist, empty test OTP, or
+        production env) disables the bypass entirely.
+        """
+        if settings.ENVIRONMENT == "production":
+            return False
+        if not settings.E2E_TEST_OTP:
+            return False
+        whitelist = {p.strip() for p in settings.E2E_TEST_PHONES.split(",") if p.strip()}
+        return phone in whitelist
 
     async def verify_otp(self, phone: str, otp: str, role: str) -> dict:
         """
@@ -63,6 +98,7 @@ class AuthService:
         payload = decode_jwt(refresh_token)
         if not payload or payload.get("type") != "refresh":
             from fastapi import HTTPException, status
+
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired refresh token",
@@ -71,6 +107,7 @@ class AuthService:
         user = await self.db.get(User, uuid.UUID(payload["sub"]))
         if not user or not user.is_active:
             from fastapi import HTTPException, status
+
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found or inactive",

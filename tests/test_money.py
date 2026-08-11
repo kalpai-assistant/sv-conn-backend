@@ -1,12 +1,13 @@
 """SVC-150 — money is Decimal end to end; no paisa is lost converting to paise."""
+
 from decimal import Decimal
 
 import pytest
 
 from app.utils.money import to_decimal, to_paise
 
-
 # --- the conversion itself ---------------------------------------------------
+
 
 @pytest.mark.parametrize(
     "rupees,expected_paise",
@@ -31,9 +32,9 @@ def test_to_paise_is_exact(rupees, expected_paise):
 
 def test_to_paise_rounds_half_up_not_down():
     """Half-paisa amounts round up. Truncation is what underpaid providers."""
-    assert to_paise(Decimal("0.005")) == 1      # not 0
+    assert to_paise(Decimal("0.005")) == 1  # not 0
     assert to_paise(Decimal("0.004")) == 0
-    assert to_paise(Decimal("1.005")) == 101    # not 100
+    assert to_paise(Decimal("1.005")) == 101  # not 100
 
 
 def test_to_paise_accepts_floats_without_reintroducing_the_bug():
@@ -49,6 +50,7 @@ def test_to_paise_accepts_floats_without_reintroducing_the_bug():
 
 # --- the split that produces the stored values -------------------------------
 
+
 @pytest.mark.asyncio
 async def test_commission_split_is_exact_and_adds_back_up(db_session):
     """The 80/20 split must not invent or lose a paisa.
@@ -56,12 +58,14 @@ async def test_commission_split_is_exact_and_adds_back_up(db_session):
     A price of ₹100.09 splits into ₹20.02 + ₹80.07. Under floats the payout came
     out a hair under 80.07 and then truncated to 8006 paise at payout time.
     """
+    import uuid
+
+    from app.models.address import Address
     from app.models.category import Category
     from app.models.service import Service
+    from app.schemas.booking import CreateBookingItemRequest
     from app.services.booking_service import BookingService
     from tests.factories.user_factory import UserFactory
-    from app.models.address import Address
-    import uuid
 
     suffix = uuid.uuid4().hex[:8]
     category = Category(
@@ -71,8 +75,11 @@ async def test_commission_split_is_exact_and_adds_back_up(db_session):
     await db_session.flush()
 
     service = Service(
-        category_id=category.id, name=f"Svc {suffix}",
-        base_price=Decimal("100.09"), duration_minutes=60, is_active=True,
+        category_id=category.id,
+        name=f"Svc {suffix}",
+        base_price=Decimal("100.09"),
+        duration_minutes=60,
+        is_active=True,
     )
     db_session.add(service)
     consumer = await UserFactory.create(db_session, role="consumer")
@@ -80,8 +87,12 @@ async def test_commission_split_is_exact_and_adds_back_up(db_session):
     db_session.add(address)
     await db_session.flush()
 
+    # Post-merge signature: `service_id` was replaced by `items` (multi-service cart,
+    # matching-policy (i)); a single service is a 1-item cart. See #76.
     booking = await BookingService(db_session).create_booking(
-        consumer_id=consumer.id, service_id=service.id, address_id=address.id,
+        consumer_id=consumer.id,
+        items=[CreateBookingItemRequest(service_id=service.id, quantity=1)],
+        address_id=address.id,
     )
 
     assert booking.service_amount == Decimal("100.09")
@@ -95,10 +106,9 @@ async def test_commission_split_is_exact_and_adds_back_up(db_session):
 
 # --- the API contract must not change ----------------------------------------
 
+
 @pytest.mark.asyncio
-async def test_api_still_returns_money_as_numbers_not_strings(
-    client, db_session, auth_headers
-):
+async def test_api_still_returns_money_as_numbers_not_strings(client, db_session, auth_headers):
     """Money stays a JSON number in responses.
 
     Pydantic serialises Decimal as a quoted string, so "tidying up" the response
@@ -106,23 +116,24 @@ async def test_api_still_returns_money_as_numbers_not_strings(
     break every client. The schemas stay float on purpose; this guards that.
     """
     import json
+    import uuid
 
-    from tests.factories.user_factory import UserFactory
-    from tests.factories.booking_factory import BookingFactory
     from app.models.address import Address
     from app.models.category import Category
     from app.models.service import Service
-    import uuid
+    from tests.factories.booking_factory import BookingFactory
+    from tests.factories.user_factory import UserFactory
 
     suffix = uuid.uuid4().hex[:8]
-    category = Category(
-        name=f"Api {suffix}", slug=f"api-{suffix}", is_active=True, sort_order=1
-    )
+    category = Category(name=f"Api {suffix}", slug=f"api-{suffix}", is_active=True, sort_order=1)
     db_session.add(category)
     await db_session.flush()
     service = Service(
-        category_id=category.id, name=f"Svc {suffix}",
-        base_price=Decimal("100.09"), duration_minutes=60, is_active=True,
+        category_id=category.id,
+        name=f"Svc {suffix}",
+        base_price=Decimal("100.09"),
+        duration_minutes=60,
+        is_active=True,
     )
     db_session.add(service)
     consumer = await UserFactory.create(db_session, role="consumer")
@@ -130,8 +141,12 @@ async def test_api_still_returns_money_as_numbers_not_strings(
     db_session.add(address)
     await db_session.flush()
     booking = await BookingFactory.create(
-        db_session, consumer_id=consumer.id, provider_id=None,
-        service_id=service.id, address_id=address.id, service_amount=100.09,
+        db_session,
+        consumer_id=consumer.id,
+        provider_id=None,
+        service_id=service.id,
+        address_id=address.id,
+        service_amount=100.09,
     )
     await db_session.flush()
 
@@ -143,7 +158,7 @@ async def test_api_still_returns_money_as_numbers_not_strings(
 
     raw = json.loads(resp.text)
     for field in ("service_amount", "platform_commission", "provider_payout"):
-        assert isinstance(raw[field], (int, float)), (
+        assert isinstance(raw[field], int | float), (
             f"{field} serialised as {type(raw[field]).__name__} "
             f"({raw[field]!r}) — money must stay a JSON number"
         )

@@ -31,28 +31,66 @@ uv run python scripts/seed_categories.py
 uv run python scripts/create_admin.py +91XXXXXXXXXX
 ```
 
+**Lint & format** — Ruff does both. CI enforces both blocking:
+```bash
+uv run ruff check .          # lint (E, W, F, I, B, UP rulesets)
+uv run ruff check --fix .    # + auto-fix what's safe
+uv run ruff format .         # apply formatter
+uv run ruff format --check . # CI enforcement
+```
+
+**Pre-commit** — one-time install for auto-format + secret scan on commit:
+```bash
+pipx install pre-commit
+pre-commit install                # writes .git/hooks/pre-commit
+pre-commit run --all-files        # sanity check
+```
+
 **Tests:**
 ```bash
 uv run pytest tests/ -v
 uv run pytest tests/path/to/test_file.py::test_name -v  # Single test
+uv run pytest tests/test_health.py tests/test_e2e_bypass.py \
+    tests/test_logging_correlation.py tests/test_log_redaction.py \
+    tests/test_celery_log_correlation.py tests/test_sentry_tagging.py \
+    tests/test_cors_config.py  # Standalone (no DB) — fast local sanity
+```
+
+**E2E smoke** — Playwright against staging (SC-52). Own npm project:
+```bash
+cd e2e && npm install
+STAGING_API_URL=... E2E_TEST_PHONE=... E2E_TEST_OTP=... npm test
 ```
 
 ## Architecture
 
 ### Layer Responsibilities
 
-- **`app/main.py`** — App factory, lifespan (Redis init/teardown), middleware stack, router registration
+- **`app/main.py`** — App factory, lifespan (Redis init/teardown), middleware stack, router registration, Sentry init (SVC-46)
 - **`app/config.py`** — All config via Pydantic Settings (reads from `.env`)
 - **`app/database.py`** — Async engine + `SyncSessionLocal` (Celery-only sync fallback), ORM `Base`
-- **`app/dependencies.py`** — `get_db`, `get_redis`, `get_current_user`, `require_role` (RBAC factory)
+- **`app/dependencies.py`** — `get_db`, `get_redis`, `get_current_user`, `require_role` (RBAC factory). `get_current_user` also binds the user into the Sentry scope (SC-47).
 - **`app/exceptions.py`** — Domain exceptions + FastAPI exception handler registration
+- **`app/logging_config.py`** — Structlog + JSON output + `request_id` / `task_id` contextvar processors + secret redaction (SC-46, SC-47, SC-50)
 - **`app/routers/`** — Route handlers only; no DB logic, no business logic
+- **`app/routers/health.py`** — `/health` (liveness, dumb 200) + `/healthz` (readiness, pings DB + Redis with 2s timeout). Unprefixed so LBs don't need to know the API version. (SC-48)
 - **`app/services/`** — All business logic; services receive `AsyncSession` via DI
 - **`app/models/`** — SQLAlchemy ORM models (9 tables)
 - **`app/schemas/`** — Pydantic v2 request/response schemas
-- **`app/tasks/`** — Celery async tasks (notifications, payments, cleanup)
+- **`app/tasks/`** — Celery async tasks (notifications, payments, cleanup). `log_correlation.py` binds `task_id` + inherited `request_id` into every worker log record via Celery signals (SC-46 followup).
 - **`app/utils/`** — Thin wrappers for external clients (SMS, FCM, Razorpay, S3, geo)
-- **`app/middleware/`** — Request ID correlation, JWT extraction, Redis rate limiting
+- **`app/middleware/`** — Request ID correlation (also tags Sentry, SC-47), JWT extraction, Redis rate limiting, admin IP allowlist (SC-75)
+
+### Runbooks (top-level)
+
+Every operational concern has its own runbook — followable by anyone with AWS console access, no institutional knowledge required:
+
+- **[INFRA.md](INFRA.md)** — provisioning topology (VPC, RDS, ElastiCache, Fargate, SSM). SC-44.
+- **[BACKUPS.md](BACKUPS.md)** — RDS backup config + quarterly restore drill. SC-34.
+- **[SECRETS.md](SECRETS.md)** — every secret enumerated, rotation cadence + procedure, incident response (DPDP 72h clock). SC-50.
+- **[OBSERVABILITY.md](OBSERVABILITY.md)** — Better Stack Logs vendor decision, alert catalog (P1/P2/P3), dashboard spec, Sentry↔logs correlation. SC-47.
+- **[ADMIN.md](ADMIN.md)** — admin IP allowlist + role hardening. SC-75.
+- **[PURE_CODE_QUEUE.md](PURE_CODE_QUEUE.md)** — in-flight pure-code work queue. Delete when drained.
 
 ### Booking State Machine
 
@@ -75,6 +113,15 @@ Doorstep OTP (4-digit, stored in Redis) is required to transition from `en_route
 
 Rate limiting: 5 OTP attempts per phone per hour, tracked in Redis.
 
+**E2E bypass (SC-52):** in staging, a whitelisted phone + fixed OTP skips the SMS path. Hard-refuses when `ENVIRONMENT=production`. See `AuthService._is_e2e_test_phone`.
+
+### Observability (SC-46, SC-47, SC-50)
+
+- **Structured logs** — `LOG_JSON=true` in staging/prod emits newline-delimited JSON. Every record carries `timestamp`, `level`, `logger`, `event`, plus `request_id` / `task_id` when in scope.
+- **Request ID correlation** — `RequestIDMiddleware` binds a contextvar; structlog processor adds it to every record. Propagates into Celery workers via `task_prerun` signal.
+- **Secret redaction** — structlog processor scrubs sensitive keys (`password`, `otp`, `token`, `secret`, `razorpay_signature`, ...) and known patterns (JWT, `rzp_live_*`, `AKIA*`) before render. Safety net for accidental logging.
+- **Sentry** — no-op when `SENTRY_DSN` is unset (dev-safe). `send_default_pii=False` — never ship JWT/phone/email to Sentry. Request-scoped tag + user context wired from middleware + `get_current_user`.
+
 ### Key Design Patterns
 
 - **RBAC**: `require_role("admin")` / `require_role("provider")` is a dependency factory — returns a FastAPI dependency
@@ -84,6 +131,7 @@ Rate limiting: 5 OTP attempts per phone per hour, tracked in Redis.
 - **PII encryption**: AES-256 via `app/utils/encryption.py` for sensitive fields at rest
 - **WebSocket auth**: JWT passed as `?token=<jwt>` query param, validated per connection in `app/routers/tracking.py`
 - **Celery + async DB**: Workers use `SyncSessionLocal` (derived from async URL) since Celery is sync
+- **CORS**: `CORS_ALLOWED_ORIGINS` env var, comma-separated. Dev default in `config.py` covers localhost + Capacitor + prod web. Wildcard deliberately not accepted (spec violation with `allow_credentials=True`).
 
 ### Infrastructure (docker-compose)
 
@@ -91,8 +139,19 @@ Rate limiting: 5 OTP attempts per phone per hour, tracked in Redis.
 
 ## Environment
 
-Copy `.env.example` to `.env`. Key variable groups: JWT secrets, OTP config, SMS provider (MSG91/Twilio), Razorpay keys, Firebase credentials, S3/MinIO, Google Maps API, AES encryption key.
+Copy `.env.example` to `.env`. Key variable groups: JWT secrets, OTP config, SMS provider (MSG91/Twilio), Razorpay keys, Firebase credentials, S3/MinIO, Google Maps API, AES encryption key, CORS origins, E2E bypass (staging only), observability (Sentry DSN, LOG_JSON, LOG_LEVEL, ENVIRONMENT).
 
 ## Testing
 
-Tests use `pytest-asyncio` with `AsyncClient` over ASGI transport. `conftest.py` provides fixtures: `engine`, `db_session`, `client`, `auth_headers`. Factories from `factory-boy` generate test data.
+Tests use `pytest-asyncio` with `AsyncClient` over ASGI transport. `conftest.py` provides fixtures: `db_session`, `client`, `redis_client`, `auth_headers`. Factories from `factory-boy` generate test data.
+
+**Standalone tests** (no DB / no Redis) run in ~1s and cover the observability, health, e2e-bypass, CORS, and Sentry-tagging surfaces. Use them for fast local sanity when iterating on infra code.
+
+## CI
+
+`.github/workflows/ci.yml` runs on push to main + every PR:
+1. `ruff check` (lint) + `ruff format --check` (format enforcement) — blocking
+2. PostGIS extension enable → `alembic upgrade head` → `alembic check` (drift catch) — blocking
+3. `pytest tests/` — blocking
+
+`.github/workflows/e2e-nightly.yml` runs the Playwright suite against staging at 02:00 IST (SC-52).

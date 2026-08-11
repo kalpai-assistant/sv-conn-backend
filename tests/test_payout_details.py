@@ -14,10 +14,11 @@ returned in full — only its last 4 — while a VPA is returned as-is, because
 payment app shows a VPA in full. See ``tests/test_payout_method.py`` for the test
 that no *other* endpoint exposes payout fields, which is the guarantee that matters.
 """
+
 import pytest
 from sqlalchemy import select
 
-from app.models.provider_profile import ProviderProfile, KYCStatus
+from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.utils.encryption import decrypt
 from tests.factories.user_factory import UserFactory
 
@@ -31,9 +32,7 @@ async def _seed_provider(db, kyc_status: KYCStatus = KYCStatus.VERIFIED):
 
 
 async def _get_profile(db, user_id):
-    result = await db.execute(
-        select(ProviderProfile).where(ProviderProfile.user_id == user_id)
-    )
+    result = await db.execute(select(ProviderProfile).where(ProviderProfile.user_id == user_id))
     return result.scalar_one()
 
 

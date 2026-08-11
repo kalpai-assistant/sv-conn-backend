@@ -1,9 +1,21 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from sqlalchemy import String, Boolean, Integer, Numeric, ForeignKey, Enum, DateTime, func, Text, Index
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.database import Base
 
 
@@ -17,9 +29,7 @@ class Service(Base):
         Index("idx_services_category_active", "category_id", postgresql_where="is_active = true"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     category_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("categories.id"), nullable=False
@@ -31,14 +41,9 @@ class Service(Base):
     base_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-
-    category: Mapped["Category"] = relationship(
-        "Category", back_populates="services"
-    )
+    category: Mapped["Category"] = relationship("Category", back_populates="services")

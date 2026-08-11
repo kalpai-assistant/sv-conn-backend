@@ -6,6 +6,7 @@ For beta this is triggered manually from the admin panel, on a weekly cadence.
 Payment for each booking is collected up front to the platform account; this
 service pays the provider their share afterwards.
 """
+
 import hashlib
 import logging
 from decimal import Decimal
@@ -15,11 +16,11 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
-from app.models.booking import Booking, BookingStatus, SettlementStatus
-from app.models.provider_profile import ProviderProfile, PayoutMethod
-from app.models.user import User
-from app.models.payout_audit import PayoutAudit
 from app.exceptions import PaymentError, UserNotFound
+from app.models.booking import Booking, BookingStatus, SettlementStatus
+from app.models.payout_audit import PayoutAudit
+from app.models.provider_profile import PayoutMethod, ProviderProfile
+from app.models.user import User
 from app.utils.encryption import decrypt
 from app.utils.money import to_paise
 from app.utils.razorpayx_client import create_payout, list_payouts
@@ -49,9 +50,7 @@ class PayoutService:
         # ``dispatch_notifications`` (the reconcile Celery task, post-commit).
         self._pending_notifications: list[dict] = []
 
-    async def list_pending_settlements(
-        self, *, limit: int = PENDING_SETTLEMENTS_LIMIT
-    ) -> dict:
+    async def list_pending_settlements(self, *, limit: int = PENDING_SETTLEMENTS_LIMIT) -> dict:
         """Providers with money owed, aggregated one row per provider.
 
         Powers the admin payouts screen: each row is a provider the platform owes,
@@ -121,8 +120,7 @@ class PayoutService:
                 "pending_payout_paise": to_paise(rupees),
                 "payout_set": bool(has_payout),
             }
-            for provider_id, name, phone, is_active, booking_count, rupees, has_payout, _
-            in rows
+            for provider_id, name, phone, is_active, booking_count, rupees, has_payout, _ in rows
         ]
 
         # The window count is identical on every row; no rows means nothing is owed.
@@ -134,9 +132,7 @@ class PayoutService:
             "truncated": total > len(providers),
         }
 
-    async def create_provider_payout(
-        self, provider_id: UUID, admin_user_id: UUID
-    ) -> dict:
+    async def create_provider_payout(self, provider_id: UUID, admin_user_id: UUID) -> dict:
         """
         Pay out all of a provider's completed bookings whose settlement is still
         PENDING, as a single RazorpayX payout.
@@ -178,7 +174,10 @@ class PayoutService:
 
         logger.info(
             "payout.attempt admin=%s provider=%s amount_paise=%s bookings=%s",
-            admin_user_id, provider_id, amount_paise, len(bookings),
+            admin_user_id,
+            provider_id,
+            amount_paise,
+            len(bookings),
         )
 
         # Breadcrumb committed BEFORE the RazorpayX call, in its own transaction, so
@@ -203,7 +202,10 @@ class PayoutService:
             # then re-raise for the caller to surface to the admin.
             logger.error(
                 "payout.failed admin=%s provider=%s amount_paise=%s error=%s",
-                admin_user_id, provider_id, amount_paise, exc,
+                admin_user_id,
+                provider_id,
+                amount_paise,
+                exc,
             )
             await self._resolve_audit(audit_id, outcome="failed", error=str(exc))
             raise
@@ -220,14 +222,16 @@ class PayoutService:
             booking.settlement_failure_reason = None
 
         # Resolve the breadcrumb to the real outcome + payout id.
-        await self._resolve_audit(
-            audit_id, outcome=status or "initiated", payout_id=payout_id
-        )
+        await self._resolve_audit(audit_id, outcome=status or "initiated", payout_id=payout_id)
         await self.db.flush()
 
         logger.info(
             "payout.initiated admin=%s provider=%s payout_id=%s status=%s bookings=%s",
-            admin_user_id, provider_id, payout_id, status, len(bookings),
+            admin_user_id,
+            provider_id,
+            payout_id,
+            status,
+            len(bookings),
         )
         # Buffered, not sent: this transaction has not committed yet. RazorpayX has
         # already accepted the payout, so if the commit fails the money moved but we
@@ -266,9 +270,7 @@ class PayoutService:
         admin audit row and returns how many were re-queued.
         """
         if from_status not in (SettlementStatus.FAILED, SettlementStatus.REVERSED):
-            raise PaymentError(
-                f"Cannot re-queue settlements from {from_status.value}"
-            )
+            raise PaymentError(f"Cannot re-queue settlements from {from_status.value}")
 
         result = await self.db.execute(
             select(Booking)
@@ -281,29 +283,32 @@ class PayoutService:
         )
         stuck = list(result.scalars().all())
         if not stuck:
-            raise PaymentError(
-                f"No {from_status.value} settlements to re-queue for this provider"
-            )
+            raise PaymentError(f"No {from_status.value} settlements to re-queue for this provider")
 
         for booking in stuck:
             booking.settlement_status = SettlementStatus.PENDING
             booking.settlement_payout_id = None
 
         amount_paise = to_paise(sum((b.provider_payout for b in stuck), Decimal("0")))
-        self.db.add(PayoutAudit(
-            admin_user_id=admin_user_id,
-            provider_id=provider_id,
-            source="admin",
-            amount_paise=amount_paise,
-            booking_count=len(stuck),
-            payout_id=None,
-            outcome="requeued",
-        ))
+        self.db.add(
+            PayoutAudit(
+                admin_user_id=admin_user_id,
+                provider_id=provider_id,
+                source="admin",
+                amount_paise=amount_paise,
+                booking_count=len(stuck),
+                payout_id=None,
+                outcome="requeued",
+            )
+        )
         await self.db.flush()
 
         logger.info(
             "payout.requeue admin=%s provider=%s from=%s bookings=%s",
-            admin_user_id, provider_id, from_status.value, len(stuck),
+            admin_user_id,
+            provider_id,
+            from_status.value,
+            len(stuck),
         )
         return {
             "requeued": len(stuck),
@@ -327,8 +332,11 @@ class PayoutService:
         transitionable state for that payout are touched.
         """
         handled = {
-            "payout.processed", "payout.failed", "payout.reversed",
-            "payout.rejected", "payout.queued",
+            "payout.processed",
+            "payout.failed",
+            "payout.reversed",
+            "payout.rejected",
+            "payout.queued",
         }
         if event not in handled:
             # payout.updated, transaction.*, etc. are a legitimate no-op.
@@ -350,13 +358,18 @@ class PayoutService:
         # than here, so all payout→booking re-linking lives in one guarded place.
         if event == "payout.queued":
             linked = (
-                await self.db.execute(
-                    select(Booking).where(Booking.settlement_payout_id == payout_id)
+                (
+                    await self.db.execute(
+                        select(Booking).where(Booking.settlement_payout_id == payout_id)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             logger.info(
                 "payout.webhook event=queued payout_id=%s linked=%s (no state change)",
-                payout_id, len(linked),
+                payout_id,
+                len(linked),
             )
             return
 
@@ -367,13 +380,17 @@ class PayoutService:
         if event == "payout.rejected":
             reason = self._failure_reason(entity)
             rejected = (
-                await self.db.execute(
-                    select(Booking).where(
-                        Booking.settlement_payout_id == payout_id,
-                        Booking.settlement_status == SettlementStatus.PROCESSING,
+                (
+                    await self.db.execute(
+                        select(Booking).where(
+                            Booking.settlement_payout_id == payout_id,
+                            Booking.settlement_status == SettlementStatus.PROCESSING,
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             for booking in rejected:
                 booking.settlement_status = SettlementStatus.PENDING
                 booking.settlement_payout_id = None
@@ -381,7 +398,9 @@ class PayoutService:
             await self.db.flush()
             logger.info(
                 "payout.webhook event=rejected payout_id=%s returned_to_pending=%s reason=%s",
-                payout_id, len(rejected), reason,
+                payout_id,
+                len(rejected),
+                reason,
             )
             return
 
@@ -395,9 +414,7 @@ class PayoutService:
         # A failed payout carries a reason (rejected/reversed do not, per RazorpayX);
         # record it so an admin can see why before deciding to re-queue the FAILED
         # settlement.
-        failure_reason = (
-            self._failure_reason(entity) if event == "payout.failed" else None
-        )
+        failure_reason = self._failure_reason(entity) if event == "payout.failed" else None
         # processed/failed transition a PROCESSING settlement; a reversal claws back a
         # payout that had already COMPLETED (and defensively one still PROCESSING).
         from_statuses = (
@@ -421,7 +438,10 @@ class PayoutService:
 
         logger.info(
             "payout.webhook event=%s payout_id=%s settled=%s -> %s",
-            event, payout_id, len(settled), new_status.value,
+            event,
+            payout_id,
+            len(settled),
+            new_status.value,
         )
         # Notify only when this webhook actually moved something: a redelivery of an
         # already-applied event settles nothing, and must not re-push.
@@ -442,7 +462,8 @@ class PayoutService:
             # Completed money was clawed back — always surface for a human to review.
             logger.error(
                 "ALERT payout.reversed payout_id=%s reversed_bookings=%s",
-                payout_id, len(settled),
+                payout_id,
+                len(settled),
             )
 
     @staticmethod
@@ -513,7 +534,9 @@ class PayoutService:
                 logger.error(
                     "ALERT payout reconciliation unresolved payout_id=%s "
                     "reference_id=%s status=%s",
-                    payout.get("id"), payout.get("reference_id"), payout.get("status"),
+                    payout.get("id"),
+                    payout.get("reference_id"),
+                    payout.get("status"),
                 )
 
         await self.db.flush()
@@ -544,12 +567,14 @@ class PayoutService:
         """
         async with AsyncSessionLocal() as session:
             existing = (
-                await session.execute(
-                    select(PayoutAudit.id).where(
-                        PayoutAudit.reference_id == reference_id
+                (
+                    await session.execute(
+                        select(PayoutAudit.id).where(PayoutAudit.reference_id == reference_id)
                     )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             if existing is not None:
                 return existing
 
@@ -599,7 +624,8 @@ class PayoutService:
                 logger.error(
                     "ALERT payout audit resolve touched %s rows for audit_id=%s "
                     "(expected 1) — breadcrumb not updated",
-                    result.rowcount, audit_id,
+                    result.rowcount,
+                    audit_id,
                 )
 
     @staticmethod
@@ -631,7 +657,10 @@ class PayoutService:
         except Exception as exc:
             logger.error(
                 "payout.notify enqueue failed provider=%s event=%s payout_id=%s error=%s",
-                provider_id, event, payout_id, exc,
+                provider_id,
+                event,
+                payout_id,
+                exc,
             )
 
     def _buffer_notification(
@@ -657,12 +686,14 @@ class PayoutService:
         Drained by ``dispatch_pending_notifications`` (request paths) or
         ``dispatch_notifications`` (the reconcile task) — both only after commit.
         """
-        self._pending_notifications.append({
-            "provider_id": str(provider_id),
-            "event": event,
-            "amount_paise": amount_paise,
-            "payout_id": payout_id,
-        })
+        self._pending_notifications.append(
+            {
+                "provider_id": str(provider_id),
+                "event": event,
+                "amount_paise": amount_paise,
+                "payout_id": payout_id,
+            }
+        )
 
     def dispatch_pending_notifications(self) -> None:
         """Drain this instance's buffered pushes. **Must run after the commit.**
@@ -693,9 +724,7 @@ class PayoutService:
         ids = ",".join(sorted(str(b.id) for b in bookings))
         return "payout_" + hashlib.sha256(ids.encode()).hexdigest()[:32]
 
-    async def _reconcile_linked(
-        self, payout: dict, target: SettlementStatus
-    ) -> int | None:
+    async def _reconcile_linked(self, payout: dict, target: SettlementStatus) -> int | None:
         """Case A: repair bookings already linked to this payout id.
 
         Transitions linked bookings not yet in ``target`` and returns how many were
@@ -704,10 +733,14 @@ class PayoutService:
         """
         payout_id = payout.get("id")
         linked = (
-            await self.db.execute(
-                select(Booking).where(Booking.settlement_payout_id == payout_id)
+            (
+                await self.db.execute(
+                    select(Booking).where(Booking.settlement_payout_id == payout_id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if not linked:
             return None
 
@@ -716,16 +749,20 @@ class PayoutService:
             booking.settlement_status = target
         if repaired:
             self._add_reconciliation_audit(
-                provider_id=repaired[0].provider_id, payout=payout,
-                target=target, count=len(repaired),
+                provider_id=repaired[0].provider_id,
+                payout=payout,
+                target=target,
+                count=len(repaired),
             )
             # Reconciliation exists because the webhook never arrived — so neither did
             # the provider's push. Buffer it (not enqueue) so it only goes out once the
             # repair is committed; only repaired rows qualify, so a run over
             # already-consistent payouts stays silent.
             self._buffer_notification(
-                repaired[0].provider_id, target.value,
-                self._batch_amount_paise(payout, repaired), payout.get("id"),
+                repaired[0].provider_id,
+                target.value,
+                self._batch_amount_paise(payout, repaired),
+                payout.get("id"),
             )
         return len(repaired)
 
@@ -742,10 +779,14 @@ class PayoutService:
             return 0
 
         audit = (
-            await self.db.execute(
-                select(PayoutAudit).where(PayoutAudit.reference_id == reference_id)
+            (
+                await self.db.execute(
+                    select(PayoutAudit).where(PayoutAudit.reference_id == reference_id)
+                )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         if audit is None:
             return 0
 
@@ -767,14 +808,18 @@ class PayoutService:
         audit.outcome = target.value
         audit.payout_id = payout_id
         self._add_reconciliation_audit(
-            provider_id=audit.provider_id, payout=payout,
-            target=target, count=len(pending),
+            provider_id=audit.provider_id,
+            payout=payout,
+            target=target,
+            count=len(pending),
         )
         # The create path crashed before linking the payout, so no push went out for
         # the initiation either — the terminal state is the provider's first news.
         self._buffer_notification(
-            audit.provider_id, target.value,
-            self._batch_amount_paise(payout, pending), payout_id,
+            audit.provider_id,
+            target.value,
+            self._batch_amount_paise(payout, pending),
+            payout_id,
         )
         return len(pending)
 
@@ -782,16 +827,18 @@ class PayoutService:
         self, *, provider_id: UUID, payout: dict, target: SettlementStatus, count: int
     ) -> None:
         """Record an automated (non-admin) reconciliation repair in payout_audits."""
-        self.db.add(PayoutAudit(
-            admin_user_id=None,
-            provider_id=provider_id,
-            source="reconciliation",
-            amount_paise=payout.get("amount") or 0,
-            booking_count=count,
-            payout_id=payout.get("id"),
-            reference_id=payout.get("reference_id"),
-            outcome=target.value,
-        ))
+        self.db.add(
+            PayoutAudit(
+                admin_user_id=None,
+                provider_id=provider_id,
+                source="reconciliation",
+                amount_paise=payout.get("amount") or 0,
+                booking_count=count,
+                payout_id=payout.get("id"),
+                reference_id=payout.get("reference_id"),
+                outcome=target.value,
+            )
+        )
 
     async def _get_provider_profile(self, provider_id: UUID) -> ProviderProfile:
         result = await self.db.execute(
@@ -818,11 +865,7 @@ class PayoutService:
         answers "what is stored", not "where should this money go".
         """
         if profile.payout_method is PayoutMethod.UPI:
-            vpa = (
-                decrypt(profile.payout_vpa_encrypted)
-                if profile.payout_vpa_encrypted
-                else None
-            )
+            vpa = decrypt(profile.payout_vpa_encrypted) if profile.payout_vpa_encrypted else None
             if not vpa:
                 raise PaymentError("Provider has no payout details on file")
             return vpa, None, None
@@ -833,11 +876,7 @@ class PayoutService:
                 if profile.payout_account_number_encrypted
                 else None
             )
-            ifsc = (
-                decrypt(profile.payout_ifsc_encrypted)
-                if profile.payout_ifsc_encrypted
-                else None
-            )
+            ifsc = decrypt(profile.payout_ifsc_encrypted) if profile.payout_ifsc_encrypted else None
             if not (account_number and ifsc):
                 raise PaymentError("Provider has no payout details on file")
             return None, account_number, ifsc

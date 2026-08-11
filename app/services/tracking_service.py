@@ -1,9 +1,11 @@
 """
 Redis pub/sub real-time location tracking service — exact from LLD.
 """
+
 import json
 import time
 from uuid import UUID
+
 from redis.asyncio import Redis
 
 TRACKING_CHANNEL_PREFIX = "tracking:"
@@ -34,12 +36,14 @@ class TrackingService:
         heading: float | None = None,
     ) -> None:
         """Provider publishes their current location."""
-        payload = json.dumps({
-            "lat": lat,
-            "lng": lng,
-            "heading": heading,
-            "timestamp": time.time(),
-        })
+        payload = json.dumps(
+            {
+                "lat": lat,
+                "lng": lng,
+                "heading": heading,
+                "timestamp": time.time(),
+            }
+        )
 
         channel = self.channel_name(booking_id)
         await self.redis.publish(channel, payload)

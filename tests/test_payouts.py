@@ -7,37 +7,37 @@ silent returns), the no-details and IMPS/bank payout paths, the dedicated
 RazorpayX payout webhook endpoint (separate from the Payments webhook), and the
 provider payout push notifications fired on each settlement transition.
 """
+
+import hashlib
+import hmac
 import inspect
 import json
-import hmac
-import hashlib
 import logging
 import uuid
+from unittest.mock import AsyncMock, patch
+
 import httpx
 import pytest
-from unittest.mock import patch, AsyncMock
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.routers import payments as payments_router
-
-from sqlalchemy import select, delete
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-
-from tests.conftest import TEST_DATABASE_URL
-from tests.factories.user_factory import UserFactory
-from tests.factories.booking_factory import BookingFactory
+from app.config import Settings, get_settings
 from app.database import Base
-from app.models.booking import Booking, BookingStatus, SettlementStatus
-from app.models.provider_profile import ProviderProfile, PayoutMethod
-from app.models.payout_audit import PayoutAudit
-from app.models.user import User
-from app.models.category import Category
-from app.models.service import Service
+from app.exceptions import PaymentError
 from app.models.address import Address
+from app.models.booking import Booking, BookingStatus, SettlementStatus
+from app.models.category import Category
+from app.models.payout_audit import PayoutAudit
+from app.models.provider_profile import PayoutMethod, ProviderProfile
+from app.models.service import Service
+from app.models.user import User
+from app.routers import payments as payments_router
 from app.services.payout_service import PayoutService
 from app.utils import razorpayx_client
-from app.exceptions import PaymentError
 from app.utils.encryption import encrypt
-from app.config import get_settings, Settings
+from tests.conftest import TEST_DATABASE_URL
+from tests.factories.booking_factory import BookingFactory
+from tests.factories.user_factory import UserFactory
 
 settings = get_settings()
 
@@ -57,12 +57,19 @@ def stub_payout_audit_io():
     returned mocks. ``_record_attempting_audit`` returns a stable fake audit id.
     """
     fake_audit_id = uuid.uuid4()
-    with patch.object(
-        PayoutService, "_record_attempting_audit",
-        new_callable=AsyncMock, return_value=fake_audit_id,
-    ) as rec, patch.object(
-        PayoutService, "_resolve_audit", new_callable=AsyncMock,
-    ) as res:
+    with (
+        patch.object(
+            PayoutService,
+            "_record_attempting_audit",
+            new_callable=AsyncMock,
+            return_value=fake_audit_id,
+        ) as rec,
+        patch.object(
+            PayoutService,
+            "_resolve_audit",
+            new_callable=AsyncMock,
+        ) as res,
+    ):
         yield rec, res, fake_audit_id
 
 
@@ -86,9 +93,9 @@ async def _booking_for(db_session, consumer, provider, **kwargs):
     Uses a unique category/service per call so multiple bookings can be created in
     one test without violating the category name/slug unique constraints.
     """
+    from app.models.address import Address
     from app.models.category import Category
     from app.models.service import Service
-    from app.models.address import Address
 
     suffix = uuid.uuid4().hex[:8]
     category = Category(
@@ -269,6 +276,7 @@ async def _provider_with_bank_account(db_session, provider):
 # #1 — RazorpayX client must be async (no blocking httpx.post on the event loop)
 # ---------------------------------------------------------------------------
 
+
 def test_create_payout_is_async():
     """Regression guard: the RazorpayX client must be awaitable, not blocking."""
     assert inspect.iscoroutinefunction(razorpayx_client.create_payout)
@@ -277,6 +285,7 @@ def test_create_payout_is_async():
 # ---------------------------------------------------------------------------
 # #4 — handle_payout_webhook must not fail silently
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_payout_webhook_missing_id_raises(db_session):
@@ -313,6 +322,7 @@ async def test_payout_webhook_ignores_unknown_event(db_session):
 # ---------------------------------------------------------------------------
 # Coverage gaps flagged in review: no-details error, IMPS/bank path
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_payout_no_details_raises(db_session):
@@ -353,6 +363,7 @@ async def test_payout_uses_imps_for_bank_account(db_session):
 # #2 — RazorpayX payouts arrive on their own endpoint, not the Payments webhook
 # ---------------------------------------------------------------------------
 
+
 async def _booking_in_processing(db_session, payout_id: str):
     """Create a provider's booking already PROCESSING under the given payout id."""
     consumer = await UserFactory.create(db_session, role="consumer")
@@ -374,8 +385,10 @@ async def test_payout_webhook_endpoint_settles(client, db_session):
 
     resp = await client.post(
         f"{settings.API_V1_PREFIX}/payments/payout-webhook",
-        json={"event": "payout.processed",
-              "payload": {"payout": {"entity": {"id": "pout_endpoint"}}}},
+        json={
+            "event": "payout.processed",
+            "payload": {"payout": {"entity": {"id": "pout_endpoint"}}},
+        },
     )
     assert resp.status_code == 200
 
@@ -395,8 +408,10 @@ async def test_payments_webhook_does_not_settle_payouts(client, db_session):
 
     resp = await client.post(
         f"{settings.API_V1_PREFIX}/payments/webhook",
-        json={"event": "payout.processed",
-              "payload": {"payout": {"entity": {"id": "pout_wrong_endpoint"}}}},
+        json={
+            "event": "payout.processed",
+            "payload": {"payout": {"entity": {"id": "pout_wrong_endpoint"}}},
+        },
     )
     assert resp.status_code == 200
 
@@ -407,6 +422,7 @@ async def test_payments_webhook_does_not_settle_payouts(client, db_session):
 # ---------------------------------------------------------------------------
 # #3 — Concurrent payouts must not double-pay (FOR UPDATE SKIP LOCKED)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_concurrent_payouts_do_not_double_pay():
@@ -429,18 +445,28 @@ async def test_concurrent_payouts_do_not_double_pay():
         consumer = await UserFactory.create(s, role="consumer")
         provider = await UserFactory.create(s, role="provider")
         admin = await UserFactory.create(s, role="admin")
-        s.add(ProviderProfile(
-            user_id=provider.id, payout_vpa_encrypted=encrypt("provider@upi"),
-            payout_method=PayoutMethod.UPI,
-        ))
+        s.add(
+            ProviderProfile(
+                user_id=provider.id,
+                payout_vpa_encrypted=encrypt("provider@upi"),
+                payout_method=PayoutMethod.UPI,
+            )
+        )
         booking = await _booking_for(s, consumer, provider)
+        # Capture ids BEFORE commit — after commit the ORM expires attributes and
+        # `booking.items` is `raise_on_sql`, so any later access re-hydrates
+        # nothing. `service_id` used to live on Booking (moved to BookingItem in
+        # #76), so read it off the loaded item while it is still available.
+        service_id = booking.items[0].service_id
+        address_id = booking.consumer_address_id
+        booking_id = booking.id
         await s.commit()
         provider_id = provider.id
         admin_id = admin.id
         ids = {
-            "booking": booking.id,
-            "service": booking.service_id,
-            "address": booking.consumer_address_id,
+            "booking": booking_id,
+            "service": service_id,
+            "address": address_id,
             "consumer": consumer.id,
             "provider": provider.id,
             "admin": admin.id,
@@ -449,7 +475,9 @@ async def test_concurrent_payouts_do_not_double_pay():
     session_a = factory()
     session_b = factory()
     try:
-        with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
+        with patch(
+            "app.services.payout_service.create_payout", new_callable=AsyncMock
+        ) as mock_payout:
             mock_payout.return_value = {"id": "pout_race", "status": "processing"}
 
             # A pays out and holds the locks (no commit yet).
@@ -471,15 +499,15 @@ async def test_concurrent_payouts_do_not_double_pay():
             cat_id = (
                 await s.execute(select(Service.category_id).where(Service.id == ids["service"]))
             ).scalar()
-            await s.execute(
-                delete(PayoutAudit).where(PayoutAudit.provider_id == ids["provider"])
-            )
+            await s.execute(delete(PayoutAudit).where(PayoutAudit.provider_id == ids["provider"]))
             await s.execute(delete(Booking).where(Booking.id == ids["booking"]))
             await s.execute(delete(Address).where(Address.id == ids["address"]))
             await s.execute(delete(Service).where(Service.id == ids["service"]))
             if cat_id:
                 await s.execute(delete(Category).where(Category.id == cat_id))
-            await s.execute(delete(ProviderProfile).where(ProviderProfile.user_id == ids["provider"]))
+            await s.execute(
+                delete(ProviderProfile).where(ProviderProfile.user_id == ids["provider"])
+            )
             await s.execute(
                 delete(User).where(User.id.in_([ids["consumer"], ids["provider"], ids["admin"]]))
             )
@@ -490,6 +518,7 @@ async def test_concurrent_payouts_do_not_double_pay():
 # ---------------------------------------------------------------------------
 # #7 — Audit trail: every payout attempt is recorded (success and failure)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_payout_writes_success_audit(db_session, stub_payout_audit_io):
@@ -560,6 +589,7 @@ async def test_payout_failure_resolves_audit_failed_and_keeps_bookings_pending(
 # #8 — Transient RazorpayX failures are retried with backoff
 # ---------------------------------------------------------------------------
 
+
 class _FakeAsyncClient:
     """Minimal stand-in for httpx.AsyncClient that returns canned responses."""
 
@@ -598,10 +628,15 @@ def _resp(status_code, json_data=None):
 async def test_create_payout_retries_transient_then_succeeds():
     """A 503 is retried; the next 200 succeeds (idempotency key makes this safe)."""
     fake = _FakeAsyncClient([_resp(503), _resp(200, {"id": "pout_ok", "status": "processing"})])
-    with patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake), \
-         patch("app.utils.razorpayx_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+    with (
+        patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake),
+        patch("app.utils.razorpayx_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
         result = await razorpayx_client.create_payout(
-            amount_paise=8000, idempotency_key="k", reference_id="r", vpa="x@upi",
+            amount_paise=8000,
+            idempotency_key="k",
+            reference_id="r",
+            vpa="x@upi",
         )
     assert result == {"id": "pout_ok", "status": "processing"}
     assert fake.calls == 2
@@ -612,11 +647,16 @@ async def test_create_payout_retries_transient_then_succeeds():
 async def test_create_payout_does_not_retry_client_error():
     """A 400 is a real error, not transient — raise immediately, no retry."""
     fake = _FakeAsyncClient([_resp(400)])
-    with patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake), \
-         patch("app.utils.razorpayx_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+    with (
+        patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake),
+        patch("app.utils.razorpayx_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
         with pytest.raises(httpx.HTTPStatusError):
             await razorpayx_client.create_payout(
-                amount_paise=8000, idempotency_key="k", reference_id="r", vpa="x@upi",
+                amount_paise=8000,
+                idempotency_key="k",
+                reference_id="r",
+                vpa="x@upi",
             )
     assert fake.calls == 1
     mock_sleep.assert_not_awaited()
@@ -626,11 +666,16 @@ async def test_create_payout_does_not_retry_client_error():
 async def test_create_payout_exhausts_retries():
     """Persistent 503s exhaust the retry budget and raise."""
     fake = _FakeAsyncClient([_resp(503), _resp(503), _resp(503)])
-    with patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake), \
-         patch("app.utils.razorpayx_client.asyncio.sleep", new_callable=AsyncMock):
+    with (
+        patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake),
+        patch("app.utils.razorpayx_client.asyncio.sleep", new_callable=AsyncMock),
+    ):
         with pytest.raises(httpx.HTTPStatusError):
             await razorpayx_client.create_payout(
-                amount_paise=8000, idempotency_key="k", reference_id="r", vpa="x@upi",
+                amount_paise=8000,
+                idempotency_key="k",
+                reference_id="r",
+                vpa="x@upi",
             )
     assert fake.calls == 3
 
@@ -638,6 +683,7 @@ async def test_create_payout_exhausts_retries():
 # ---------------------------------------------------------------------------
 # SVC-137 — list_payouts (reconciliation reads RazorpayX's record of payouts)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_list_payouts_single_page():
@@ -652,8 +698,8 @@ async def test_list_payouts_single_page():
 @pytest.mark.asyncio
 async def test_list_payouts_paginates_until_short_page():
     """A full page triggers another fetch; a short page stops it."""
-    full = _resp(200, {"items": [{"id": "a"}, {"id": "b"}]})   # count==2 → keep going
-    short = _resp(200, {"items": [{"id": "c"}]})               # < count → stop
+    full = _resp(200, {"items": [{"id": "a"}, {"id": "b"}]})  # count==2 → keep going
+    short = _resp(200, {"items": [{"id": "c"}]})  # < count → stop
     fake = _FakeAsyncClient([full, short])
     with patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake):
         items = await razorpayx_client.list_payouts(count=2)
@@ -665,8 +711,10 @@ async def test_list_payouts_paginates_until_short_page():
 async def test_list_payouts_retries_transient():
     """A transient 503 is retried, then the page is returned."""
     fake = _FakeAsyncClient([_resp(503), _resp(200, {"items": [{"id": "pout_ok"}]})])
-    with patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake), \
-         patch("app.utils.razorpayx_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+    with (
+        patch("app.utils.razorpayx_client.httpx.AsyncClient", lambda *a, **k: fake),
+        patch("app.utils.razorpayx_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
         items = await razorpayx_client.list_payouts(count=100)
     assert [p["id"] for p in items] == ["pout_ok"]
     mock_sleep.assert_awaited_once()
@@ -676,10 +724,12 @@ async def test_list_payouts_retries_transient():
 # SVC-137 — reconcile_payouts: repair drift vs RazorpayX (Case A / Case B / alert)
 # ---------------------------------------------------------------------------
 
+
 def _patch_list_payouts(payouts):
     return patch(
         "app.services.payout_service.list_payouts",
-        new_callable=AsyncMock, return_value=payouts,
+        new_callable=AsyncMock,
+        return_value=payouts,
     )
 
 
@@ -711,14 +761,23 @@ async def test_reconcile_case_b_orphan_relink(db_session):
     batch_key = PayoutService._batch_idempotency_key([booking])
 
     # The 'attempting' breadcrumb the create path commits before calling RazorpayX.
-    db_session.add(PayoutAudit(
-        admin_user_id=None, provider_id=provider.id, source="admin",
-        amount_paise=8000, booking_count=1, reference_id=batch_key,
-        payout_id=None, outcome="attempting",
-    ))
+    db_session.add(
+        PayoutAudit(
+            admin_user_id=None,
+            provider_id=provider.id,
+            source="admin",
+            amount_paise=8000,
+            booking_count=1,
+            reference_id=batch_key,
+            payout_id=None,
+            outcome="attempting",
+        )
+    )
     await db_session.flush()
 
-    payouts = [{"id": "pout_orphan", "status": "processed", "amount": 8000, "reference_id": batch_key}]
+    payouts = [
+        {"id": "pout_orphan", "status": "processed", "amount": 8000, "reference_id": batch_key}
+    ]
     with _patch_list_payouts(payouts):
         report = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
 
@@ -729,10 +788,14 @@ async def test_reconcile_case_b_orphan_relink(db_session):
 
     # An automated (source='reconciliation', no admin) audit row is written.
     recon = (
-        await db_session.execute(
-            select(PayoutAudit).where(PayoutAudit.source == "reconciliation")
+        (
+            await db_session.execute(
+                select(PayoutAudit).where(PayoutAudit.source == "reconciliation")
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert len(recon) == 1
     assert recon[0].admin_user_id is None and recon[0].payout_id == "pout_orphan"
 
@@ -744,14 +807,23 @@ async def test_reconcile_is_idempotent(db_session):
     provider = await UserFactory.create(db_session, role="provider")
     booking = await _booking_for(db_session, consumer, provider)
     batch_key = PayoutService._batch_idempotency_key([booking])
-    db_session.add(PayoutAudit(
-        admin_user_id=None, provider_id=provider.id, source="admin",
-        amount_paise=8000, booking_count=1, reference_id=batch_key,
-        payout_id=None, outcome="attempting",
-    ))
+    db_session.add(
+        PayoutAudit(
+            admin_user_id=None,
+            provider_id=provider.id,
+            source="admin",
+            amount_paise=8000,
+            booking_count=1,
+            reference_id=batch_key,
+            payout_id=None,
+            outcome="attempting",
+        )
+    )
     await db_session.flush()
 
-    payouts = [{"id": "pout_idem", "status": "processed", "amount": 8000, "reference_id": batch_key}]
+    payouts = [
+        {"id": "pout_idem", "status": "processed", "amount": 8000, "reference_id": batch_key}
+    ]
     with _patch_list_payouts(payouts):
         first = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
         second = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
@@ -759,14 +831,20 @@ async def test_reconcile_is_idempotent(db_session):
     assert first["case_b"] == 1
     # Nothing repaired the second time — and so nobody notified again either.
     assert second == {
-        "checked": 1, "case_a": 0, "case_b": 0, "unresolved": 0, "notifications": [],
+        "checked": 1,
+        "case_a": 0,
+        "case_b": 0,
+        "unresolved": 0,
+        "notifications": [],
     }
 
 
 @pytest.mark.asyncio
 async def test_reconcile_unresolved_orphan_alerts(db_session, caplog):
     """An orphan we can't map (no breadcrumb) is counted unresolved and alerted."""
-    payouts = [{"id": "pout_x", "status": "processed", "amount": 8000, "reference_id": "unknown_ref"}]
+    payouts = [
+        {"id": "pout_x", "status": "processed", "amount": 8000, "reference_id": "unknown_ref"}
+    ]
     with _patch_list_payouts(payouts):
         with caplog.at_level(logging.ERROR):
             report = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
@@ -782,11 +860,18 @@ async def test_reconcile_amount_mismatch_not_relinked(db_session):
     provider = await UserFactory.create(db_session, role="provider")
     booking = await _booking_for(db_session, consumer, provider)
     batch_key = PayoutService._batch_idempotency_key([booking])
-    db_session.add(PayoutAudit(
-        admin_user_id=None, provider_id=provider.id, source="admin",
-        amount_paise=8000, booking_count=1, reference_id=batch_key,
-        payout_id=None, outcome="attempting",
-    ))
+    db_session.add(
+        PayoutAudit(
+            admin_user_id=None,
+            provider_id=provider.id,
+            source="admin",
+            amount_paise=8000,
+            booking_count=1,
+            reference_id=batch_key,
+            payout_id=None,
+            outcome="attempting",
+        )
+    )
     await db_session.flush()
 
     # RazorpayX reports a different amount — must NOT re-link.
@@ -802,6 +887,7 @@ async def test_reconcile_amount_mismatch_not_relinked(db_session):
 # ---------------------------------------------------------------------------
 # SVC-137 — the reconcile Celery Beat task wires the service to its own session
 # ---------------------------------------------------------------------------
+
 
 def test_reconcile_payouts_task_runs_service_with_window():
     """The Beat task runs reconcile in its own session with an overlapping window."""
@@ -824,8 +910,10 @@ def test_reconcile_payouts_task_runs_service_with_window():
         captured["window"] = (since_ts, until_ts)
         return {"checked": 2, "case_a": 1, "case_b": 0, "unresolved": 0}
 
-    with patch.object(database_mod, "AsyncSessionLocal", lambda: _FakeSession()), \
-         patch.object(PayoutService, "reconcile_payouts", _fake_reconcile):
+    with (
+        patch.object(database_mod, "AsyncSessionLocal", lambda: _FakeSession()),
+        patch.object(PayoutService, "reconcile_payouts", _fake_reconcile),
+    ):
         result = payment_tasks.reconcile_payouts()
 
     assert "case_a" in result  # report is echoed in the task's return string
@@ -836,6 +924,7 @@ def test_reconcile_payouts_task_runs_service_with_window():
 # ---------------------------------------------------------------------------
 # SVC-137 — admin re-queues stranded settlements (FAILED / REVERSED) → PENDING
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_requeue_failed_resets_to_pending(db_session):
@@ -889,8 +978,8 @@ async def test_requeue_no_failed_raises(db_session):
     admin = await UserFactory.create(db_session, role="admin")
     with pytest.raises(PaymentError):
         await PayoutService(db_session).requeue_settlements(
-        provider.id, admin.id, from_status=SettlementStatus.FAILED
-    )
+            provider.id, admin.id, from_status=SettlementStatus.FAILED
+        )
 
 
 @pytest.mark.asyncio
@@ -908,9 +997,7 @@ async def test_requeue_writes_admin_audit(db_session):
     )
 
     audit = (
-        await db_session.execute(
-            select(PayoutAudit).where(PayoutAudit.outcome == "requeued")
-        )
+        await db_session.execute(select(PayoutAudit).where(PayoutAudit.outcome == "requeued"))
     ).scalar_one()
     assert audit.source == "admin"
     assert audit.admin_user_id == admin.id
@@ -968,8 +1055,10 @@ def _signed_body(payload: dict, secret: str) -> tuple[bytes, str]:
 async def test_payout_webhook_accepts_valid_signature(client, db_session):
     """With RAZORPAYX_WEBHOOK_SECRET set, a correctly-signed payout webhook settles."""
     booking = await _booking_in_processing(db_session, "pout_signed")
-    payload = {"event": "payout.processed",
-               "payload": {"payout": {"entity": {"id": "pout_signed"}}}}
+    payload = {
+        "event": "payout.processed",
+        "payload": {"payout": {"entity": {"id": "pout_signed"}}},
+    }
     raw, sig = _signed_body(payload, _RZPX_SECRET)
 
     with patch.object(payments_router.settings, "RAZORPAYX_WEBHOOK_SECRET", _RZPX_SECRET):
@@ -988,8 +1077,10 @@ async def test_payout_webhook_accepts_valid_signature(client, db_session):
 async def test_payout_webhook_rejects_invalid_signature(client, db_session):
     """A bad signature on the payout webhook is rejected (400) and settles nothing."""
     booking = await _booking_in_processing(db_session, "pout_badsig")
-    payload = {"event": "payout.processed",
-               "payload": {"payout": {"entity": {"id": "pout_badsig"}}}}
+    payload = {
+        "event": "payout.processed",
+        "payload": {"payout": {"entity": {"id": "pout_badsig"}}},
+    }
     raw, _ = _signed_body(payload, _RZPX_SECRET)
 
     with patch.object(payments_router.settings, "RAZORPAYX_WEBHOOK_SECRET", _RZPX_SECRET):
@@ -1008,6 +1099,7 @@ async def test_payout_webhook_rejects_invalid_signature(client, db_session):
 # SVC-137 — reconciliation schema groundwork:
 # REVERSED state, nullable admin, source, reference_id (nothing reads these yet)
 # ---------------------------------------------------------------------------
+
 
 def test_settlement_status_has_reversed():
     """REVERSED is a distinct settlement state (completed money clawed back)."""
@@ -1073,6 +1165,7 @@ async def test_payout_audit_source_defaults_to_admin(db_session):
 # SVC-137 — webhook handles payout.reversed → REVERSED (+ alert)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_payout_reversed_webhook_claws_back_completed(db_session, caplog):
     """payout.reversed moves a COMPLETED settlement to REVERSED and logs an alert."""
@@ -1115,6 +1208,7 @@ async def test_payout_reversed_webhook_handles_still_processing(db_session):
 # SVC-141 — webhook handles payout.queued (no-op) and payout.rejected (→ PENDING)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_payout_queued_webhook_no_state_change(db_session):
     """payout.queued leaves the booking PROCESSING and its payout id intact."""
@@ -1137,10 +1231,14 @@ async def test_payout_rejected_returns_to_pending_with_reason(db_session):
 
     await PayoutService(db_session).handle_payout_webhook(
         event="payout.rejected",
-        payload={"payout": {"entity": {
-            "id": "pout_rej",
-            "failure_reason": "beneficiary account invalid",  # real RazorpayX field
-        }}},
+        payload={
+            "payout": {
+                "entity": {
+                    "id": "pout_rej",
+                    "failure_reason": "beneficiary account invalid",  # real RazorpayX field
+                }
+            }
+        },
     )
 
     await db_session.refresh(booking)
@@ -1157,10 +1255,14 @@ async def test_payout_failed_records_reason(db_session):
 
     await PayoutService(db_session).handle_payout_webhook(
         event="payout.failed",
-        payload={"payout": {"entity": {
-            "id": "pout_failreason",
-            "failure_reason": "Payout failed. Contact support for help",
-        }}},
+        payload={
+            "payout": {
+                "entity": {
+                    "id": "pout_failreason",
+                    "failure_reason": "Payout failed. Contact support for help",
+                }
+            }
+        },
     )
 
     await db_session.refresh(booking)
@@ -1196,6 +1298,7 @@ async def test_new_payout_clears_failure_reason(db_session):
 # their own session rather than the request's.
 # ---------------------------------------------------------------------------
 
+
 async def _committed_provider_admin(factory):
     async with factory() as s:
         provider = await UserFactory.create(s, role="provider")
@@ -1227,8 +1330,10 @@ async def test_record_attempting_audit_is_idempotent_on_reference_id():
 
         async with factory() as s:
             rows = (
-                await s.execute(select(PayoutAudit).where(PayoutAudit.reference_id == ref))
-            ).scalars().all()
+                (await s.execute(select(PayoutAudit).where(PayoutAudit.reference_id == ref)))
+                .scalars()
+                .all()
+            )
         assert len(rows) == 1  # exactly one audit row, not a duplicate
         assert rows[0].outcome == "processing" and rows[0].payout_id == "pout_x"
     finally:
@@ -1261,6 +1366,7 @@ async def test_resolve_audit_missing_row_is_alerted(caplog):
 # ---------------------------------------------------------------------------
 # SVC-137 — bank payout mode is chosen by amount: IMPS at/under the cap, NEFT above
 # ---------------------------------------------------------------------------
+
 
 async def _bank_payout_mode(amount_paise: int) -> str:
     """Run create_payout for a bank account and return the RazorpayX mode it sent."""
@@ -1338,6 +1444,7 @@ async def test_upi_payout_ignores_cap():
 # SVC-143 — provider payout FCM notifications
 # ---------------------------------------------------------------------------
 
+
 class _FakeSyncSession:
     """Minimal stand-in for SyncSessionLocal() — the Celery task only does .get()."""
 
@@ -1407,7 +1514,8 @@ async def test_failed_payout_creation_does_not_notify(db_session, stub_payout_pu
 
     with patch(
         "app.services.payout_service.create_payout",
-        new_callable=AsyncMock, side_effect=RuntimeError("boom"),
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("boom"),
     ):
         with pytest.raises(RuntimeError):
             await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
@@ -1439,19 +1547,19 @@ async def test_webhook_buffers_notification(db_session, stub_payout_push, event,
         payload={"payout": {"entity": {"id": "pout_wh", "amount": 8000}}},
     )
 
-    assert service._pending_notifications == [{
-        "provider_id": str(provider.id),
-        "event": expected,
-        "amount_paise": 8000,
-        "payout_id": "pout_wh",
-    }]
+    assert service._pending_notifications == [
+        {
+            "provider_id": str(provider.id),
+            "event": expected,
+            "amount_paise": 8000,
+            "payout_id": "pout_wh",
+        }
+    ]
     stub_payout_push.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_webhook_redelivery_after_commit_does_not_renotify(
-    db_session, stub_payout_push
-):
+async def test_webhook_redelivery_after_commit_does_not_renotify(db_session, stub_payout_push):
     """Redelivery of an already-applied event settles nothing → no second push."""
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
@@ -1472,9 +1580,7 @@ async def test_webhook_redelivery_after_commit_does_not_renotify(
 
 
 @pytest.mark.asyncio
-async def test_webhook_rolled_back_delivery_then_retry_pushes_once(
-    db_session, stub_payout_push
-):
+async def test_webhook_rolled_back_delivery_then_retry_pushes_once(db_session, stub_payout_push):
     """A delivery that rolls back must not notify — only the successful retry does.
 
     The in-memory ``settled`` filter can't help here: the rollback leaves the
@@ -1563,12 +1669,14 @@ async def test_reconcile_case_a_buffers_notification(db_session, stub_payout_pus
     with _patch_list_payouts(payouts):
         report = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
 
-    assert report["notifications"] == [{
-        "provider_id": str(provider.id),
-        "event": "completed",
-        "amount_paise": 8000,
-        "payout_id": "pout_rec_a",
-    }]
+    assert report["notifications"] == [
+        {
+            "provider_id": str(provider.id),
+            "event": "completed",
+            "amount_paise": 8000,
+            "payout_id": "pout_rec_a",
+        }
+    ]
     # Nothing enqueued yet — the repair isn't committed at this point.
     stub_payout_push.assert_not_called()
 
@@ -1616,17 +1724,21 @@ async def test_broker_failure_does_not_break_settlement(db_session, stub_payout_
 
 # --- the Celery task itself -------------------------------------------------
 
+
 def test_send_payout_notification_pushes_to_provider():
     """Happy path: the provider's token gets the templated push + payout data."""
     from app.tasks.notification_tasks import send_payout_notification
 
     user = User(phone="+919999999999", role="provider", fcm_token="tok_123")
-    with _patch_task_session(user), patch(
-        "app.tasks.notification_tasks.send_push_notification"
-    ) as mock_push:
+    with (
+        _patch_task_session(user),
+        patch("app.tasks.notification_tasks.send_push_notification") as mock_push,
+    ):
         send_payout_notification(
-            provider_id=str(uuid.uuid4()), event="completed",
-            amount_paise=123450, payout_id="pout_x",
+            provider_id=str(uuid.uuid4()),
+            event="completed",
+            amount_paise=123450,
+            payout_id="pout_x",
         )
 
     mock_push.assert_called_once()
@@ -1641,11 +1753,14 @@ def test_send_payout_notification_no_token_is_noop():
     from app.tasks.notification_tasks import send_payout_notification
 
     user = User(phone="+919999999998", role="provider", fcm_token=None)
-    with _patch_task_session(user), patch(
-        "app.tasks.notification_tasks.send_push_notification"
-    ) as mock_push:
+    with (
+        _patch_task_session(user),
+        patch("app.tasks.notification_tasks.send_push_notification") as mock_push,
+    ):
         send_payout_notification(
-            provider_id=str(uuid.uuid4()), event="completed", amount_paise=8000,
+            provider_id=str(uuid.uuid4()),
+            event="completed",
+            amount_paise=8000,
         )
 
     mock_push.assert_not_called()
@@ -1656,11 +1771,14 @@ def test_send_payout_notification_unknown_event_is_noop():
     from app.tasks.notification_tasks import send_payout_notification
 
     user = User(phone="+919999999997", role="provider", fcm_token="tok_456")
-    with _patch_task_session(user), patch(
-        "app.tasks.notification_tasks.send_push_notification"
-    ) as mock_push:
+    with (
+        _patch_task_session(user),
+        patch("app.tasks.notification_tasks.send_push_notification") as mock_push,
+    ):
         send_payout_notification(
-            provider_id=str(uuid.uuid4()), event="pending", amount_paise=8000,
+            provider_id=str(uuid.uuid4()),
+            event="pending",
+            amount_paise=8000,
         )
 
     mock_push.assert_not_called()
@@ -1700,7 +1818,7 @@ def test_format_rupees_preserves_paise_exactly():
     """Integer arithmetic — the paise must never round on the way to the string."""
     from app.tasks.notification_tasks import _format_rupees
 
-    assert _format_rupees(8009) == "₹80.09"   # the SVC-150 truncation, rendered as-is
+    assert _format_rupees(8009) == "₹80.09"  # the SVC-150 truncation, rendered as-is
     assert _format_rupees(5) == "₹0.05"
     assert _format_rupees(0) == "₹0"
     assert _format_rupees(100) == "₹1"
@@ -1714,26 +1832,39 @@ async def test_reconcile_case_b_buffers_notification(db_session, stub_payout_pus
     booking = await _booking_for(db_session, consumer, provider)  # PENDING, unlinked
     batch_key = PayoutService._batch_idempotency_key([booking])
 
-    db_session.add(PayoutAudit(
-        admin_user_id=None, provider_id=provider.id, source="admin",
-        amount_paise=8000, booking_count=1, reference_id=batch_key,
-        payout_id=None, outcome="attempting",
-    ))
+    db_session.add(
+        PayoutAudit(
+            admin_user_id=None,
+            provider_id=provider.id,
+            source="admin",
+            amount_paise=8000,
+            booking_count=1,
+            reference_id=batch_key,
+            payout_id=None,
+            outcome="attempting",
+        )
+    )
     await db_session.flush()
 
-    payouts = [{
-        "id": "pout_orphan_notify", "status": "processed",
-        "amount": 8000, "reference_id": batch_key,
-    }]
+    payouts = [
+        {
+            "id": "pout_orphan_notify",
+            "status": "processed",
+            "amount": 8000,
+            "reference_id": batch_key,
+        }
+    ]
     with _patch_list_payouts(payouts):
         report = await PayoutService(db_session).reconcile_payouts(since_ts=0, until_ts=1)
 
-    assert report["notifications"] == [{
-        "provider_id": str(provider.id),
-        "event": "completed",
-        "amount_paise": 8000,
-        "payout_id": "pout_orphan_notify",
-    }]
+    assert report["notifications"] == [
+        {
+            "provider_id": str(provider.id),
+            "event": "completed",
+            "amount_paise": 8000,
+            "payout_id": "pout_orphan_notify",
+        }
+    ]
     stub_payout_push.assert_not_called()
 
 
@@ -1789,12 +1920,14 @@ def _run_reconcile_task_with(report, commit_error=None):
     async def _fake_reconcile(self, *, since_ts, until_ts):
         return dict(report)
 
-    with patch.object(database_mod, "AsyncSessionLocal", lambda: _FakeSession()), \
-         patch.object(PayoutService, "reconcile_payouts", _fake_reconcile), \
-         patch(
-             "app.tasks.notification_tasks.send_payout_notification.delay",
-             side_effect=lambda **kw: events.append(("push", kw["payout_id"])),
-         ):
+    with (
+        patch.object(database_mod, "AsyncSessionLocal", lambda: _FakeSession()),
+        patch.object(PayoutService, "reconcile_payouts", _fake_reconcile),
+        patch(
+            "app.tasks.notification_tasks.send_payout_notification.delay",
+            side_effect=lambda **kw: events.append(("push", kw["payout_id"])),
+        ),
+    ):
         try:
             payment_tasks.reconcile_payouts()
         except Exception as exc:
@@ -1804,19 +1937,34 @@ def _run_reconcile_task_with(report, commit_error=None):
 
 def test_reconcile_task_pushes_only_after_commit():
     """The repair must be durable before the provider is told it happened."""
-    events = _run_reconcile_task_with({
-        "checked": 2, "case_a": 1, "case_b": 1, "unresolved": 0,
-        "notifications": [
-            {"provider_id": "p1", "event": "completed",
-             "amount_paise": 8000, "payout_id": "pout_1"},
-            {"provider_id": "p2", "event": "reversed",
-             "amount_paise": 9000, "payout_id": "pout_2"},
-        ],
-    })
+    events = _run_reconcile_task_with(
+        {
+            "checked": 2,
+            "case_a": 1,
+            "case_b": 1,
+            "unresolved": 0,
+            "notifications": [
+                {
+                    "provider_id": "p1",
+                    "event": "completed",
+                    "amount_paise": 8000,
+                    "payout_id": "pout_1",
+                },
+                {
+                    "provider_id": "p2",
+                    "event": "reversed",
+                    "amount_paise": 9000,
+                    "payout_id": "pout_2",
+                },
+            ],
+        }
+    )
 
     # Commit strictly precedes every push, and each buffered push is sent once.
     assert events == [
-        "commit", ("push", "pout_1"), ("push", "pout_2"),
+        "commit",
+        ("push", "pout_1"),
+        ("push", "pout_2"),
     ]
 
 
@@ -1824,10 +1972,17 @@ def test_reconcile_task_sends_nothing_when_commit_fails():
     """A rolled-back run must not tell providers their money arrived."""
     events = _run_reconcile_task_with(
         {
-            "checked": 1, "case_a": 1, "case_b": 0, "unresolved": 0,
+            "checked": 1,
+            "case_a": 1,
+            "case_b": 0,
+            "unresolved": 0,
             "notifications": [
-                {"provider_id": "p1", "event": "completed",
-                 "amount_paise": 8000, "payout_id": "pout_1"},
+                {
+                    "provider_id": "p1",
+                    "event": "completed",
+                    "amount_paise": 8000,
+                    "payout_id": "pout_1",
+                },
             ],
         },
         commit_error=RuntimeError("db gone"),
@@ -1853,16 +2008,25 @@ def test_reconcile_task_report_excludes_notifications():
 
     async def _fake_reconcile(self, *, since_ts, until_ts):
         return {
-            "checked": 1, "case_a": 1, "case_b": 0, "unresolved": 0,
+            "checked": 1,
+            "case_a": 1,
+            "case_b": 0,
+            "unresolved": 0,
             "notifications": [
-                {"provider_id": "p1", "event": "completed",
-                 "amount_paise": 8000, "payout_id": "pout_1"},
+                {
+                    "provider_id": "p1",
+                    "event": "completed",
+                    "amount_paise": 8000,
+                    "payout_id": "pout_1",
+                },
             ],
         }
 
-    with patch.object(database_mod, "AsyncSessionLocal", lambda: _FakeSession()), \
-         patch.object(PayoutService, "reconcile_payouts", _fake_reconcile), \
-         patch("app.tasks.notification_tasks.send_payout_notification.delay"):
+    with (
+        patch.object(database_mod, "AsyncSessionLocal", lambda: _FakeSession()),
+        patch.object(PayoutService, "reconcile_payouts", _fake_reconcile),
+        patch("app.tasks.notification_tasks.send_payout_notification.delay"),
+    ):
         result = payment_tasks.reconcile_payouts()
 
     assert "case_a" in result
@@ -1871,17 +2035,24 @@ def test_reconcile_task_report_excludes_notifications():
 
 def test_dispatch_notifications_enqueues_each(stub_payout_push):
     """dispatch_notifications forwards every buffered entry verbatim."""
-    PayoutService.dispatch_notifications([
-        {"provider_id": "p1", "event": "completed",
-         "amount_paise": 8000, "payout_id": "pout_1"},
-        {"provider_id": "p2", "event": "failed",
-         "amount_paise": 500, "payout_id": None},
-    ])
+    PayoutService.dispatch_notifications(
+        [
+            {
+                "provider_id": "p1",
+                "event": "completed",
+                "amount_paise": 8000,
+                "payout_id": "pout_1",
+            },
+            {"provider_id": "p2", "event": "failed", "amount_paise": 500, "payout_id": None},
+        ]
+    )
 
     assert stub_payout_push.call_count == 2
     assert stub_payout_push.call_args_list[1].kwargs == {
-        "provider_id": "p2", "event": "failed",
-        "amount_paise": 500, "payout_id": None,
+        "provider_id": "p2",
+        "event": "failed",
+        "amount_paise": 500,
+        "payout_id": None,
     }
 
 
@@ -1892,11 +2063,13 @@ def test_dispatch_notifications_enqueues_each(stub_payout_push):
 # that teardown raises. These tests pin that framework behaviour so a refactor
 # can't quietly reintroduce a pre-commit push.
 
+
 async def _client_with_db(db_override):
     """An AsyncClient over the real app with get_db replaced."""
-    from httpx import AsyncClient, ASGITransport
-    from app.main import create_app
+    from httpx import ASGITransport, AsyncClient
+
     from app.database import get_db as real_get_db
+    from app.main import create_app
 
     app = create_app()
     app.dependency_overrides[real_get_db] = db_override
@@ -1904,11 +2077,9 @@ async def _client_with_db(db_override):
 
 
 @pytest.mark.asyncio
-async def test_webhook_endpoint_dispatches_push_after_commit(
-    db_session, stub_payout_push
-):
+async def test_webhook_endpoint_dispatches_push_after_commit(db_session, stub_payout_push):
     """The webhook route actually drains the buffer — the push reaches the queue."""
-    booking = await _booking_in_processing(db_session, "pout_bg_ok")
+    await _booking_in_processing(db_session, "pout_bg_ok")
     committed = []
 
     async def _db():
@@ -1918,8 +2089,10 @@ async def test_webhook_endpoint_dispatches_push_after_commit(
     async with await _client_with_db(_db) as client:
         resp = await client.post(
             f"{settings.API_V1_PREFIX}/payments/payout-webhook",
-            json={"event": "payout.processed",
-                  "payload": {"payout": {"entity": {"id": "pout_bg_ok", "amount": 8000}}}},
+            json={
+                "event": "payout.processed",
+                "payload": {"payout": {"entity": {"id": "pout_bg_ok", "amount": 8000}}},
+            },
         )
 
     assert resp.status_code == 200
@@ -1945,15 +2118,19 @@ async def test_no_push_when_the_commit_fails(db_session, stub_payout_push):
         with pytest.raises(RuntimeError):
             await client.post(
                 f"{settings.API_V1_PREFIX}/payments/payout-webhook",
-                json={"event": "payout.processed",
-                      "payload": {"payout": {"entity": {"id": "pout_bg_fail", "amount": 8000}}}},
+                json={
+                    "event": "payout.processed",
+                    "payload": {"payout": {"entity": {"id": "pout_bg_fail", "amount": 8000}}},
+                },
             )
 
     stub_payout_push.assert_not_called()
 
+
 # ---------------------------------------------------------------------------
 # SVC-144 — GET /admin/providers/pending-settlements (admin payouts list)
 # ---------------------------------------------------------------------------
+
 
 async def _provider_with_bank_details(db_session, provider):
     profile = ProviderProfile(
@@ -2149,13 +2326,9 @@ async def test_listed_total_matches_what_the_payout_actually_charges(db_session)
 
     listed = (await PayoutService(db_session).list_pending_settlements())["providers"][0]
 
-    with patch(
-        "app.services.payout_service.create_payout", new_callable=AsyncMock
-    ) as mock_payout:
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
         mock_payout.return_value = {"id": "pout_consistency", "status": "processing"}
-        result = await PayoutService(db_session).create_provider_payout(
-            provider.id, admin.id
-        )
+        result = await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
 
     charged = mock_payout.call_args.kwargs["amount_paise"]
     # Pinned, not merely compared: 120.50 + 75.25 + 340.00 = ₹535.75 = 53575 paise.
@@ -2166,9 +2339,7 @@ async def test_listed_total_matches_what_the_payout_actually_charges(db_session)
 
 
 @pytest.mark.asyncio
-async def test_pending_settlements_endpoint_returns_rows(
-    client, db_session, auth_headers
-):
+async def test_pending_settlements_endpoint_returns_rows(client, db_session, auth_headers):
     """Admin gets the list over HTTP in the documented shape."""
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
@@ -2192,9 +2363,7 @@ async def test_pending_settlements_endpoint_returns_rows(
 
 
 @pytest.mark.asyncio
-async def test_pending_settlements_endpoint_rejects_non_admin(
-    client, db_session, auth_headers
-):
+async def test_pending_settlements_endpoint_rejects_non_admin(client, db_session, auth_headers):
     """Payout data is admin-only."""
     consumer = await UserFactory.create(db_session, role="consumer")
 

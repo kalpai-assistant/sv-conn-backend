@@ -2,15 +2,15 @@
 Notification Celery tasks — handles async push + SMS dispatch for booking events.
 Uses a synchronous DB session (SyncSessionLocal) because Celery workers are not async.
 """
+
 from app.tasks.celery_app import celery_app
 from app.utils.fcm_client import send_push_notification
-from app.utils.sms_client import get_sms_client
-
 
 NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
     "new_request": {
         "title": "New Booking Request!",
-        "body": "You have a new service request. Accept within 2 minutes.",
+        # {service} is filled per booking — see build_new_request_body.
+        "body": "{service} — accept within 2 minutes.",
     },
     "accepted": {
         "title": "Booking Confirmed",
@@ -49,7 +49,7 @@ PAYOUT_NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
     "reversed": {
         "title": "Payout Update",
         "body": "Your payout of {amount} was returned to us. We're looking into it "
-                "and will update you shortly.",
+        "and will update you shortly.",
     },
 }
 
@@ -80,6 +80,32 @@ def _format_rupees(amount_paise: int) -> str:
     return f"₹{grouped}" if paise == 0 else f"₹{grouped}.{paise:02d}"
 
 
+def build_new_request_body(service_name: str | None) -> str:
+    """Body for the broadcast push: what the job is, and nothing more (SVC-153).
+
+    Naming the service lets a provider decide whether the notification is worth
+    opening. The **amount and address deliberately stay out**:
+
+    * the address would be delivered to every nearby provider, including all the
+      ones who lose the race, and would persist in OS notification logs — the
+      offer endpoint hands it only to eligible providers and stops once the job
+      is taken;
+    * the amount would have to be rendered as a ₹ string here, and this branch has
+      no money formatter. Indian digit grouping (₹10,00,000, not ₹1,000,000) is
+      only visibly different above ₹1,00,000, so a naive f-string would look
+      correct in review and in every realistic test, then misread for a provider
+      one day. ``GET /bookings/{id}/offer`` returns the number and the app formats
+      it. See the money note on SVC-153.
+
+    Falls back to generic copy when the service is missing — an FK makes that
+    unreachable today, but a push that renders "{service}" literally would be
+    worse than a vague one.
+    """
+    return NOTIFICATION_TEMPLATES["new_request"]["body"].format(
+        service=service_name or "A new service request",
+    )
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -101,31 +127,46 @@ def send_booking_notification(self, booking_id: str, event: str):
             if not template:
                 return
 
+            body = template["body"]
+
             if event == "new_request":
-                from sqlalchemy import select, func
-                from app.models.provider_profile import ProviderProfile, KYCStatus
-                from app.models.provider_service import ProviderService
-                from app.models.user import User
+                from sqlalchemy.orm import selectinload
+
                 from app.models.address import Address
+                from app.models.booking_item import BookingItem
+                from app.services.booking_service import _summarise_service_names
+                from app.services.provider_matching import eligible_providers_multi_stmt
 
                 # Get the booking address location directly
                 address = db.get(Address, booking.consumer_address_id)
                 if not address or not address.location:
                     return
 
-                # PostGIS broadcast query: find all verified, online, subscribed providers nearby
-                stmt = select(User).join(ProviderProfile, User.id == ProviderProfile.user_id).join(
-                    ProviderService, ProviderService.provider_id == ProviderProfile.user_id
-                ).where(
-                    ProviderService.service_id == booking.service_id,
-                    ProviderProfile.is_online == True,
-                    ProviderProfile.kyc_status == KYCStatus.VERIFIED,
-                    func.ST_DWithin(
-                        ProviderProfile.service_area_center,
-                        address.location,
-                        ProviderProfile.service_area_radius_km * 1000
+                # Load the cart items (with each item's service) so the summary
+                # can name the first service. Explicit fetch — booking.items on
+                # the ORM object is ``raise_on_sql``, and even if it weren't,
+                # the sync worker doesn't get the async ``attach_items`` helper.
+                from sqlalchemy import select as sync_select
+
+                items = (
+                    db.execute(
+                        sync_select(BookingItem)
+                        .options(selectinload(BookingItem.service))
+                        .where(BookingItem.booking_id == booking.id)
                     )
+                    .scalars()
+                    .all()
                 )
+                body = build_new_request_body(_summarise_service_names(items))
+
+                # Matching-policy (i): a provider must cover every service in
+                # the cart to receive the push. Same predicate the async
+                # ``get_offer`` uses to decide who may resolve it — SVC-153
+                # keeps the broadcast set and accept set aligned.
+                service_ids = [item.service_id for item in items]
+                if not service_ids:
+                    return
+                stmt = eligible_providers_multi_stmt(service_ids, address.location)
                 recipients = db.execute(stmt).scalars().all()
             else:
                 recipients = [booking.provider if event == "accepted" else booking.consumer]
@@ -135,7 +176,10 @@ def send_booking_notification(self, booking_id: str, event: str):
                     send_push_notification(
                         token=recipient.fcm_token,
                         title=template["title"],
-                        body=template["body"],
+                        body=body,
+                        # Payload stays a bare pointer — the card fetches its data
+                        # from the offer endpoint, which can revoke access once the
+                        # booking is claimed. A push cannot be taken back.
                         data={"booking_id": booking_id, "event": event},
                     )
 
