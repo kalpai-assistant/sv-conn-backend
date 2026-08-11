@@ -25,7 +25,13 @@ from app.config import Settings, get_settings
 from app.database import Base
 from app.exceptions import PaymentError
 from app.models.address import Address
-from app.models.booking import Booking, BookingStatus, PaymentStatus, SettlementStatus
+from app.models.booking import (
+    Booking,
+    BookingStatus,
+    PaymentMethod,
+    PaymentStatus,
+    SettlementStatus,
+)
 from app.models.category import Category
 from app.models.payout_audit import PayoutAudit
 from app.models.provider_profile import PayoutMethod, ProviderProfile
@@ -2244,6 +2250,58 @@ async def test_create_provider_payout_refuses_unpaid_bookings(db_session):
     await _provider_with_payout_vpa(db_session, provider)
 
     await _booking_for(db_session, consumer, provider, payment_status=PaymentStatus.PENDING)
+    await db_session.flush()
+
+    with pytest.raises(PaymentError, match="No pending settlements for this provider"):
+        await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_excludes_cash_bookings(db_session):
+    """SVC-39 G2: on a cash job the provider already has the money in hand.
+
+    `process_cash_payment` flips the booking to PAID once completed, so after
+    G1's PAID gate the row would still be `owed` unless method is checked.
+    Excluding cash from `_owed_filter` is what stops the platform from paying
+    the provider their 80% again via RazorpayX.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    await _provider_with_payout_vpa(db_session, provider)
+
+    online = await _booking_for(db_session, consumer, provider)  # default ONLINE + PAID
+    cash = await _booking_for(  # noqa: F841 — created to prove exclusion
+        db_session,
+        consumer,
+        provider,
+        payment_method=PaymentMethod.CASH,
+        payment_status=PaymentStatus.PAID,
+    )
+    await db_session.flush()
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    (row,) = report["providers"]
+    assert row["pending_booking_count"] == 1
+    assert row["pending_payout_paise"] == int(online.provider_payout * 100)
+
+
+@pytest.mark.asyncio
+async def test_create_provider_payout_refuses_cash_only_bookings(db_session):
+    """The payout path shares `_owed_filter` — a provider whose only bookings
+    are cash cannot be paid out (they were paid in cash on the doorstep)."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+
+    await _booking_for(
+        db_session,
+        consumer,
+        provider,
+        payment_method=PaymentMethod.CASH,
+        payment_status=PaymentStatus.PAID,
+    )
     await db_session.flush()
 
     with pytest.raises(PaymentError, match="No pending settlements for this provider"):

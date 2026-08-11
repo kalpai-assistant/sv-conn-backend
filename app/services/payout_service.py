@@ -17,7 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.exceptions import PaymentError, UserNotFound
-from app.models.booking import Booking, BookingStatus, PaymentStatus, SettlementStatus
+from app.models.booking import (
+    Booking,
+    BookingStatus,
+    PaymentMethod,
+    PaymentStatus,
+    SettlementStatus,
+)
 from app.models.payout_audit import PayoutAudit
 from app.models.provider_profile import PayoutMethod, ProviderProfile
 from app.models.user import User
@@ -899,10 +905,20 @@ class PayoutService:
         Depends on SVC-39 G9 landing first — before G9, online bookings had
         their PAID stamp wiped on COMPLETED and this filter would match nothing
         for them.
+
+        ``payment_method != CASH`` was added for SVC-39 G2: on a cash job the
+        provider has already collected the full amount in hand.
+        ``process_cash_payment`` flips the booking to PAID once completed, so
+        after G1 the row satisfies status+PAID+PENDING and would be picked up
+        by the next payout batch — the platform would send the provider their
+        80% again via RazorpayX, on top of the cash they are already holding.
+        (The 20% platform commission on cash is a receivable we owe ourselves;
+        it is not modelled anywhere yet — separate follow-up.)
         """
         return (
             Booking.status == BookingStatus.COMPLETED,
             Booking.payment_status == PaymentStatus.PAID,
+            Booking.payment_method != PaymentMethod.CASH,
             Booking.settlement_status == SettlementStatus.PENDING,
         )
 
