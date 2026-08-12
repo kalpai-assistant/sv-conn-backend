@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -104,10 +105,18 @@ class PaymentService:
         Verify the Razorpay HMAC-SHA256 signature.
         On success, create a Payment record and mark the booking as paid.
 
-        SVC-39 G5: also refuses if ``consumer_id`` doesn't own the booking the
-        order was created for. The signature check alone would let a caller
+        SVC-173 (G5): also refuses if ``consumer_id`` doesn't own the booking
+        the order was created for. The signature check alone would let a caller
         flip *someone else's* booking to PAID by relaying the victim's order
         id + a valid signature (from a completed Razorpay session they saw).
+
+        SVC-175 (G6): idempotent on ``razorpay_payment_id``. The signature is a
+        pure function of ``order_id|payment_id`` and stays valid forever, so
+        every re-submission of the same request used to write another CAPTURED
+        row. Now: query first, insert only if absent. The partial unique index
+        on ``razorpay_payment_id`` (migration ``5b293fc63525``) is the tie-breaker
+        against a concurrent double-call — the second caller's insert fails on
+        the constraint and we re-query the winner.
         """
         expected = hmac.new(
             key=settings.RAZORPAY_KEY_SECRET.encode(),
@@ -122,6 +131,16 @@ class PaymentService:
         if booking.consumer_id != consumer_id:
             raise UnauthorizedAction("You do not have access to this booking")
 
+        existing = await self._find_payment_by_razorpay_id(razorpay_payment_id)
+        if existing is not None:
+            # A prior verify already recorded this payment. Belt-and-braces: make
+            # sure the booking is flagged PAID (a lost response before the flip
+            # would otherwise strand the row on PENDING); no-op if it already is.
+            if booking.payment_status is not PaymentStatus.PAID:
+                booking.payment_status = PaymentStatus.PAID
+                await self.db.flush()
+            return existing
+
         payment = Payment(
             booking_id=booking.id,
             razorpay_payment_id=razorpay_payment_id,
@@ -135,7 +154,24 @@ class PaymentService:
         self.db.add(payment)
 
         booking.payment_status = PaymentStatus.PAID
-        await self.db.flush()
+        try:
+            await self.db.flush()
+        except IntegrityError:
+            # A concurrent verify raced us and inserted first — the partial
+            # unique index refused our duplicate. Roll back to a savepoint via
+            # session.rollback() would blow away our booking edit above; safer
+            # to re-query the winner and return it. The booking's payment_status
+            # is idempotent (PAID either way), so nothing else needs undoing.
+            await self.db.rollback()
+            winner = await self._find_payment_by_razorpay_id(razorpay_payment_id)
+            if winner is None:  # pragma: no cover - defensive; index guarantees a winner exists
+                raise PaymentError("Payment write raced but no winning row was found") from None
+            # Re-flag PAID after rollback (rollback undid our earlier flip).
+            booking = await self._find_booking_by_order(razorpay_order_id)
+            if booking.payment_status is not PaymentStatus.PAID:
+                booking.payment_status = PaymentStatus.PAID
+                await self.db.flush()
+            return winner
 
         return payment
 

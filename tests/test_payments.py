@@ -231,7 +231,7 @@ async def test_verify_payment_invalid_signature(client, auth_headers, db_session
 
 
 # ------------------------------------------------------------------
-# SVC-39 G5: payment endpoints refuse when the caller isn't the booking owner
+# SVC-173 (G5): payment endpoints refuse when the caller isn't the booking owner
 # ------------------------------------------------------------------
 
 
@@ -239,7 +239,7 @@ async def test_verify_payment_invalid_signature(client, auth_headers, db_session
 async def test_create_order_refuses_when_caller_isnt_booking_owner(
     client, auth_headers, db_session
 ):
-    """SVC-39 G5: a stranger cannot mint a Razorpay order for someone else's booking.
+    """SVC-173 (G5): a stranger cannot mint a Razorpay order for someone else's booking.
 
     Before this fix, ``current_user`` was authenticated but never checked
     against ``booking.consumer_id``. Any logged-in user could read another
@@ -295,7 +295,7 @@ async def test_create_order_owner_still_succeeds(client, auth_headers, db_sessio
 async def test_verify_payment_refuses_when_caller_isnt_booking_owner(
     client, auth_headers, db_session
 ):
-    """SVC-39 G5: a stranger with a valid signature cannot flip another user's
+    """SVC-173 (G5): a stranger with a valid signature cannot flip another user's
     booking to PAID. Signature verification alone would accept the request —
     the ownership check is what refuses it."""
     consumer = await UserFactory.create(db_session, role="consumer")
@@ -321,6 +321,118 @@ async def test_verify_payment_refuses_when_caller_isnt_booking_owner(
     )
 
     assert response.status_code == 403
+
+
+# ------------------------------------------------------------------
+# SVC-175 (G6): verify_payment is idempotent on razorpay_payment_id
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_replayed_signature_creates_only_one_ledger_row(db_session):
+    """SVC-175 (G6): replaying the same order|payment id must not duplicate the ledger.
+
+    The signature is a pure function of (order_id, payment_id) and stays valid
+    forever, so before this fix a re-submitted verify wrote a second CAPTURED
+    row. The partial unique index (migration 5b293fc63525) + the query-first
+    upsert in verify_payment now make it a no-op.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+        razorpay_order_id="order_replay_test",
+    )
+
+    sig = _make_valid_signature("order_replay_test", "pay_replay_test")
+    svc = PaymentService(db_session)
+
+    first = await svc.verify_payment(
+        razorpay_order_id="order_replay_test",
+        razorpay_payment_id="pay_replay_test",
+        razorpay_signature=sig,
+        consumer_id=consumer.id,  # SVC-173 (G5)
+    )
+    second = await svc.verify_payment(
+        razorpay_order_id="order_replay_test",
+        razorpay_payment_id="pay_replay_test",
+        razorpay_signature=sig,
+        consumer_id=consumer.id,
+    )
+
+    # Same row returned twice — the second call short-circuits on the existing lookup.
+    assert first.id == second.id
+
+    # And only ONE row exists in the ledger.
+    count = (
+        await db_session.execute(
+            select(func.count()).select_from(Payment).where(Payment.booking_id == booking.id)
+        )
+    ).scalar_one()
+    assert count == 1
+
+    # Booking is (still) PAID.
+    await db_session.refresh(booking)
+    assert booking.payment_status == PaymentStatus.PAID
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_leaves_failed_rows_alone(db_session):
+    """A booking with a prior failed attempt (payment_id NULL) can still be verified.
+
+    Regression against over-tightening: the partial unique index is
+    `WHERE razorpay_payment_id IS NOT NULL`, so multiple failed attempts
+    (which have NULL payment_id) still coexist per booking. A subsequent
+    successful verify writes exactly one CAPTURED row alongside them.
+    """
+    from app.models.payment import Payment as PaymentModel
+    from app.models.payment import PaymentRecordMethod, PaymentRecordStatus
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+        razorpay_order_id="order_after_failure",
+    )
+    # Two prior failed rows with NULL payment id — the WHERE-NOT-NULL partial
+    # constraint must permit this.
+    for _ in range(2):
+        db_session.add(
+            PaymentModel(
+                booking_id=booking.id,
+                razorpay_payment_id=None,
+                razorpay_order_id="order_after_failure",
+                amount=booking.service_amount,
+                platform_fee=booking.platform_commission,
+                provider_settlement=booking.provider_payout,
+                status=PaymentRecordStatus.FAILED,
+                method=PaymentRecordMethod.UPI,
+            )
+        )
+    await db_session.flush()
+
+    sig = _make_valid_signature("order_after_failure", "pay_finally_ok")
+    payment = await PaymentService(db_session).verify_payment(
+        razorpay_order_id="order_after_failure",
+        razorpay_payment_id="pay_finally_ok",
+        razorpay_signature=sig,
+        consumer_id=consumer.id,  # SVC-173 (G5)
+    )
+
+    assert payment.status == PaymentRecordStatus.CAPTURED
+    # Three rows total: two FAILED + one CAPTURED.
+    count = (
+        await db_session.execute(
+            select(func.count()).select_from(Payment).where(Payment.booking_id == booking.id)
+        )
+    ).scalar_one()
+    assert count == 3
 
 
 # ------------------------------------------------------------------
