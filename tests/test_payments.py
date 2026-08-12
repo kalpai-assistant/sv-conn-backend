@@ -103,7 +103,9 @@ async def test_create_order_without_provider_linked_account(db_session):
     """
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
-    # No ProviderProfile / razorpay_linked_account_id is created for the provider.
+    # No ProviderProfile is created for the provider — SVC-130 removed the Route
+    # requirement and SVC-183 (G17) dropped the field itself. Kept as a
+    # regression against re-introducing a Route-style precondition.
     booking = await _create_booking_with_deps(
         db_session,
         consumer,

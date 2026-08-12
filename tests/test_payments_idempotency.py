@@ -29,10 +29,10 @@ async def _seed(db_session):
 
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
-    profile = ProviderProfile(
-        user_id=provider.id,
-        razorpay_linked_account_id="acc_test_link_123",
-    )
+    # SVC-183 (G17): dropped `razorpay_linked_account_id` — the Route field is
+    # no longer required by create_order (removed in SVC-130). Bare profile is
+    # enough for this test's setup.
+    profile = ProviderProfile(user_id=provider.id)
     db_session.add(profile)
     # Unique suffix — `categories.name` has a UNIQUE constraint, and one test
     # (`test_same_key_different_body_returns_422`) calls _seed twice inside a

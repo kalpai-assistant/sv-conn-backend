@@ -433,16 +433,11 @@ async def test_create_payment_order_response_conforms(client, db_session, auth_h
     )
     booking.payment_method = "online"
 
-    # Payment-order creation requires the provider to have a Razorpay-linked
-    # account (see payment_service._get_provider_profile). Without a profile
-    # carrying razorpay_linked_account_id the endpoint 402s — real behaviour
-    # but not the schema we're pinning here.
-    db_session.add(
-        ProviderProfile(
-            user_id=provider.id,
-            razorpay_linked_account_id="acc_test_contract_link",
-        )
-    )
+    # SVC-183 (G17): create_order no longer requires a Route linked account
+    # (the requirement was removed in SVC-130; the field itself was dropped
+    # here). A bare ProviderProfile is still added so any downstream fixture
+    # or helper that expects one keeps working.
+    db_session.add(ProviderProfile(user_id=provider.id))
     await db_session.flush()
 
     fake_order = {
