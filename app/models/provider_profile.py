@@ -75,7 +75,6 @@ class ProviderProfile(Base):
 
     avg_rating: Mapped[float] = mapped_column(Float, default=0.0)
     total_completed_jobs: Mapped[int] = mapped_column(Integer, default=0)
-    razorpay_linked_account_id: Mapped[str | None] = mapped_column(String(255))
     kyc_status: Mapped[KYCStatus] = mapped_column(Enum(KYCStatus), default=KYCStatus.PENDING)
     # KYC document storage. JSONB lets us add fields (e.g. video selfie, address proof)
     # without a new migration. Only S3 keys are stored — never raw bytes, never public

@@ -379,3 +379,87 @@ async def test_get_booking_not_found(client, auth_headers, db_session):
     )
 
     assert response.status_code == 404
+
+
+# ------------------------------------------------------------------
+# SVC-186 (G29): Booking.payments is plural (multiple attempts + captured)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_booking_payments_relationship_returns_all_rows(db_session):
+    """SVC-186 (G29): a booking with several payment rows must return the whole list.
+
+    Before this fix `Booking.payment` was scalar (``uselist=False``), which would
+    raise ``MultipleResultsFound`` on exactly the bookings that had a retry —
+    the ones most likely to be under investigation for the refund flow (SVC-178).
+    The refactor made it a list keyed on ``back_populates="payments"``.
+    """
+    from sqlalchemy.orm import selectinload
+
+    from app.models.booking import Booking
+    from app.models.payment import Payment as PaymentModel
+    from app.models.payment import PaymentRecordMethod, PaymentRecordStatus
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    _, _, booking = await _create_booking_with_deps(
+        db_session, consumer, provider, status=BookingStatus.COMPLETED
+    )
+
+    # One failed attempt (razorpay_payment_id NULL — permitted by the partial
+    # unique index from SVC-175) + one captured row.
+    db_session.add(
+        PaymentModel(
+            booking_id=booking.id,
+            razorpay_payment_id=None,
+            razorpay_order_id="order_regression",
+            amount=booking.service_amount,
+            platform_fee=booking.platform_commission,
+            provider_settlement=booking.provider_payout,
+            status=PaymentRecordStatus.FAILED,
+            method=PaymentRecordMethod.UPI,
+        )
+    )
+    db_session.add(
+        PaymentModel(
+            booking_id=booking.id,
+            razorpay_payment_id="pay_regression_ok",
+            razorpay_order_id="order_regression",
+            amount=booking.service_amount,
+            platform_fee=booking.platform_commission,
+            provider_settlement=booking.provider_payout,
+            status=PaymentRecordStatus.CAPTURED,
+            method=PaymentRecordMethod.CARD,
+        )
+    )
+    await db_session.flush()
+
+    from sqlalchemy import select as sa_select
+
+    reloaded = (
+        await db_session.execute(
+            sa_select(Booking)
+            .where(Booking.id == booking.id)
+            .options(selectinload(Booking.payments))
+        )
+    ).scalar_one()
+
+    # Two rows returned — no MultipleResultsFound. Callers filter by status
+    # themselves (the CAPTURED row is the authoritative one).
+    assert len(reloaded.payments) == 2
+    statuses = {p.status for p in reloaded.payments}
+    assert statuses == {PaymentRecordStatus.FAILED, PaymentRecordStatus.CAPTURED}
+
+
+def test_booking_relationship_is_declared_list_not_scalar():
+    """Structural pin: a future refactor tempted to make the relationship scalar
+    again would fail this first. The name change (payment → payments) is the
+    surface signal; the shape check is what actually guards the invariant."""
+    from app.models.booking import Booking
+
+    rel = Booking.__mapper__.relationships["payments"]
+    assert rel.uselist is True, (
+        "Booking.payments must be a list (SVC-186 G29). Reverting to scalar "
+        "would re-introduce MultipleResultsFound on any booking with a retry."
+    )

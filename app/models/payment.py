@@ -77,4 +77,7 @@ class Payment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    booking: Mapped["Booking"] = relationship("Booking", back_populates="payment")
+    # SVC-186 (G29): back_populates="payments" (plural), matching the list-shaped
+    # relationship on Booking. A booking may have several payment rows — failed
+    # attempts + the captured one; see the note there.
+    booking: Mapped["Booking"] = relationship("Booking", back_populates="payments")

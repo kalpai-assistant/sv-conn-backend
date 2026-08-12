@@ -36,7 +36,8 @@ class PaymentStatus(str, enum.Enum):
 
 
 class SettlementStatus(str, enum.Enum):
-    """Provider-payout lifecycle. Reserved for future use — not read at runtime yet."""
+    """Provider-payout lifecycle. Driven by ``PayoutService`` — every read/write of
+    ``bookings.settlement_status`` goes through it."""
 
     PENDING = "pending"
     PROCESSING = "processing"
@@ -139,7 +140,9 @@ class Booking(Base):
     payment_status: Mapped[PaymentStatus] = mapped_column(
         Enum(PaymentStatus), default=PaymentStatus.PENDING
     )
-    # Provider-payout lifecycle. Reserved for future use — not read at runtime yet.
+    # Provider-payout lifecycle. Driven by ``PayoutService`` — see the enum's
+    # docstring. ``_owed_filter`` gates on ``PENDING`` so a booking already in
+    # PROCESSING / COMPLETED / FAILED / REVERSED never re-enters the payout batch.
     settlement_status: Mapped[SettlementStatus] = mapped_column(
         Enum(SettlementStatus), default=SettlementStatus.PENDING, server_default="PENDING"
     )
@@ -187,4 +190,13 @@ class Booking(Base):
         "BookingStatusLog", back_populates="booking"
     )
     review: Mapped["Review"] = relationship("Review", back_populates="booking", uselist=False)
-    payment: Mapped["Payment"] = relationship("Payment", back_populates="booking", uselist=False)
+    # SVC-186 (G29): plural, not scalar. `44a9651a7ef8_drop_payment_unique_constraint`
+    # deliberately allowed multiple payment rows per booking (failed attempts +
+    # the captured one), and SVC-175 (G6) further pinned that shape at the DB
+    # level. A scalar relationship (`uselist=False`) would raise
+    # `MultipleResultsFound` on exactly the bookings that had a retry — the
+    # ones most likely to be under investigation for the refund flow.
+    # Consumers pick the CAPTURED row themselves: for the common case,
+    # `PaymentService._find_payment_by_razorpay_id` already keys on the
+    # Razorpay payment id, which is unique per SVC-175's partial index.
+    payments: Mapped[list["Payment"]] = relationship("Payment", back_populates="booking")

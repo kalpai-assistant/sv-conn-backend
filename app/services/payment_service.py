@@ -17,7 +17,6 @@ from app.config import get_settings
 from app.exceptions import BookingNotFound, PaymentError, UnauthorizedAction
 from app.models.booking import Booking, PaymentStatus
 from app.models.payment import Payment, PaymentRecordMethod, PaymentRecordStatus
-from app.models.provider_profile import ProviderProfile
 from app.utils.money import to_paise
 from app.utils.razorpay_client import razorpay_client
 
@@ -376,15 +375,6 @@ class PaymentService:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
-    async def _get_provider_profile(self, provider_user_id: UUID) -> ProviderProfile:
-        result = await self.db.execute(
-            select(ProviderProfile).where(ProviderProfile.user_id == provider_user_id)
-        )
-        profile = result.scalar_one_or_none()
-        if not profile or not profile.razorpay_linked_account_id:
-            raise PaymentError("Provider is not set up for payouts")
-        return profile
 
     async def _find_payment_by_razorpay_id(self, payment_id: str) -> Payment | None:
         """Look up a ledger row by Razorpay payment id (disputes key on this)."""

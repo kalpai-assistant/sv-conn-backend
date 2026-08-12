@@ -1,7 +1,7 @@
 """svc-181: money breadth — coupons/booking_items Float -> Numeric(12,2)
 
 Revision ID: a74102eb723f
-Revises: 5b293fc63525
+Revises: ccc5480fdb44
 Create Date: 2026-08-13 00:26:20.348738
 
 SVC-181 closes out the SVC-150 / G31 sweep. Three tables still held money as
@@ -31,7 +31,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "a74102eb723f"
-down_revision: Union[str, None] = "5b293fc63525"
+down_revision: Union[str, None] = "ccc5480fdb44"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
