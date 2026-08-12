@@ -43,6 +43,17 @@ class Payment(Base):
             "booking_id",
             postgresql_where="disputed_at IS NOT NULL",
         ),
+        # SVC-175 (G6): one row per real Razorpay payment id. The old unique on
+        # booking_id was dropped for the multiple-attempts pattern, and nothing
+        # replaced it — verify_payment could write N duplicates for one payment.
+        # Partial so NULLs (the failed branch before Razorpay assigns an id)
+        # still coexist per booking.
+        Index(
+            "uix_payments_razorpay_payment_id",
+            "razorpay_payment_id",
+            unique=True,
+            postgresql_where="razorpay_payment_id IS NOT NULL",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
