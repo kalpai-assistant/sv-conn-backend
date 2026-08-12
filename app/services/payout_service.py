@@ -168,6 +168,23 @@ class PayoutService:
         if not bookings:
             raise PaymentError("No pending settlements for this provider")
 
+        # SVC-172 (G28): refuse a new attempt while a previous one is unresolved.
+        # Before this, a payout that RazorpayX accepted but whose response was
+        # lost (timeout / transport error) resolved the audit to "failed" and
+        # left the bookings PENDING. Days later — after another booking B3
+        # completes — the retry saw a *different* batch, derived a different
+        # idempotency key, and RazorpayX created a second payout: B1/B2 got
+        # paid twice. The refuse-on-open-attempt gate closes that door, and the
+        # exception path below now records "unknown" so reconciliation (or an
+        # admin) can resolve against RazorpayX before another attempt fires.
+        open_attempt = await self._find_open_attempt(provider_id)
+        if open_attempt is not None:
+            raise PaymentError(
+                "Previous payout attempt is unresolved (audit "
+                f"{open_attempt.id}, reference_id={open_attempt.reference_id}). "
+                "Reconcile against RazorpayX before triggering another payout."
+            )
+
         # Decimal throughout: the columns are Numeric, so this sum is exact and
         # to_paise rounds half up instead of dropping a paisa (SVC-150).
         # ``_owed_amount`` folds in tip_amount too (SVC-39 G23).
@@ -179,7 +196,8 @@ class PayoutService:
         # below fails, retrying this batch reuses the key and RazorpayX returns the
         # existing payout rather than creating a duplicate. The same key is also sent
         # as the RazorpayX reference_id so reconciliation can map a payout back to its
-        # exact batch.
+        # exact batch. The batch-key-change race is closed at the audit gate above,
+        # not here — see SVC-172.
         idempotency_key = self._batch_idempotency_key(bookings)
 
         logger.info(
@@ -207,17 +225,22 @@ class PayoutService:
                 ifsc=ifsc,
             )
         except Exception as exc:
-            # The payout call failed (after retries). Resolve the breadcrumb to
-            # ``failed`` in its own transaction so it survives the request rollback,
-            # then re-raise for the caller to surface to the admin.
+            # SVC-172 (G28): "failed" claimed positive knowledge the payout
+            # did not happen. That claim is wrong on the ordering that matters
+            # — RazorpayX may have accepted the payout and only the response
+            # was lost — so we resolve to ``unknown`` and let reconciliation
+            # (or an admin) confirm against RazorpayX before another attempt.
+            # The refuse-on-open-attempt gate at the top of this method reads
+            # this outcome and blocks a naive retry that would otherwise
+            # generate a fresh batch key and cause a second payout.
             logger.error(
-                "payout.failed admin=%s provider=%s amount_paise=%s error=%s",
+                "payout.unresolved admin=%s provider=%s amount_paise=%s error=%s",
                 admin_user_id,
                 provider_id,
                 amount_paise,
                 exc,
             )
-            await self._resolve_audit(audit_id, outcome="failed", error=str(exc))
+            await self._resolve_audit(audit_id, outcome="unknown", error=str(exc))
             raise
 
         # The payout has been created at RazorpayX; record it on the bookings. If
@@ -557,6 +580,32 @@ class PayoutService:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _find_open_attempt(self, provider_id: UUID) -> PayoutAudit | None:
+        """Return the most recent unresolved payout audit for this provider, or None.
+
+        "Unresolved" is any audit whose outcome is ``attempting`` (crash between
+        `_record_attempting_audit` and the RazorpayX response) or ``unknown``
+        (the RazorpayX call raised — we don't know whether the money moved).
+        Reconciliation is expected to resolve these against RazorpayX and either
+        mark them ``processing``/``completed`` or ``failed``; until it does, the
+        gate in ``create_provider_payout`` refuses another attempt.
+
+        Read via ``self.db`` deliberately (not ``AsyncSessionLocal`` like the
+        write helpers): the request session sees the same table, and using it
+        keeps the tests session-local rather than requiring another patch on
+        ``stub_payout_audit_io``. SVC-172 (G28).
+        """
+        result = await self.db.execute(
+            select(PayoutAudit)
+            .where(
+                PayoutAudit.provider_id == provider_id,
+                PayoutAudit.outcome.in_(("attempting", "unknown")),
+            )
+            .order_by(PayoutAudit.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     @staticmethod
     async def _record_attempting_audit(

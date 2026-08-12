@@ -588,13 +588,19 @@ async def test_payout_writes_success_audit(db_session, stub_payout_audit_io):
 
 
 @pytest.mark.asyncio
-async def test_payout_failure_resolves_audit_failed_and_keeps_bookings_pending(
+async def test_payout_failure_resolves_audit_unknown_and_keeps_bookings_pending(
     db_session, stub_payout_audit_io
 ):
-    """A failed RazorpayX call resolves the breadcrumb to 'failed', re-raises, flips nothing.
+    """A failed RazorpayX call resolves the breadcrumb to 'unknown', re-raises, flips nothing.
 
-    The audit helpers commit in their own session (app DB), so they're stubbed; this
-    asserts the failure is recorded and the bookings are left untouched for a safe retry.
+    Renamed from *_failed to *_unknown for SVC-172 (G28): a raised exception no
+    longer proves the money didn't move — RazorpayX may have accepted the
+    payout with the response lost in transit. ``unknown`` is what reconciliation
+    resolves against RazorpayX before another attempt is allowed.
+
+    The audit helpers commit in their own session (app DB), so they're stubbed;
+    this asserts the failure is recorded and the bookings are left untouched
+    for a safe retry (after reconciliation clears the ``unknown`` audit).
     """
     rec, res, _ = stub_payout_audit_io
     consumer = await UserFactory.create(db_session, role="consumer")
@@ -609,15 +615,172 @@ async def test_payout_failure_resolves_audit_failed_and_keeps_bookings_pending(
         with pytest.raises(RuntimeError):
             await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
 
-    # Breadcrumb was written, then resolved to failed with the error captured.
+    # Breadcrumb was written, then resolved to unknown with the error captured.
     rec.assert_awaited_once()
     res.assert_awaited_once()
-    assert res.call_args.kwargs["outcome"] == "failed"
+    assert res.call_args.kwargs["outcome"] == "unknown"
     assert "RazorpayX 503" in res.call_args.kwargs["error"]
 
-    # Bookings remain PENDING — nothing was settled, so a retry is safe.
+    # Bookings remain PENDING — nothing was settled locally.
     await db_session.refresh(booking)
     assert booking.settlement_status == SettlementStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# SVC-172 (G28) — refuse-on-open-attempt closes the double-pay window
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_payout_refuses_when_previous_attempt_is_attempting(db_session, stub_payout_audit_io):
+    """SVC-172 (G28): an `attempting` audit for this provider blocks a new payout.
+
+    The old code allowed a retry that (with a changed batch) generated a fresh
+    idempotency key and RazorpayX created a *second* payout for money it had
+    already accepted. Now the retry is refused until reconciliation resolves
+    the audit against RazorpayX.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider)
+
+    db_session.add(
+        PayoutAudit(
+            admin_user_id=admin.id,
+            provider_id=provider.id,
+            source="admin",
+            amount_paise=8000,
+            booking_count=1,
+            reference_id="ref_of_the_original_attempt",
+            payout_id=None,
+            outcome="attempting",
+        )
+    )
+    await db_session.flush()
+
+    with pytest.raises(PaymentError, match="Previous payout attempt is unresolved"):
+        await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+
+@pytest.mark.asyncio
+async def test_payout_refuses_when_previous_attempt_is_unknown(db_session, stub_payout_audit_io):
+    """SVC-172 (G28): the `unknown` outcome (transport failure) also blocks."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider)
+
+    db_session.add(
+        PayoutAudit(
+            admin_user_id=admin.id,
+            provider_id=provider.id,
+            source="admin",
+            amount_paise=8000,
+            booking_count=1,
+            reference_id="ref_of_the_lost_attempt",
+            payout_id=None,
+            outcome="unknown",
+            error="RazorpayX 503",
+        )
+    )
+    await db_session.flush()
+
+    with pytest.raises(PaymentError, match="Previous payout attempt is unresolved"):
+        await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+
+@pytest.mark.asyncio
+async def test_payout_proceeds_when_previous_attempt_was_resolved(db_session, stub_payout_audit_io):
+    """SVC-172 (G28) regression: resolved audits (processing/completed/failed)
+    must NOT block a legitimate future payout — only unresolved ones do."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider)
+
+    # An old completed audit sits in the table — this is the normal case for
+    # any provider who has ever been paid before.
+    db_session.add(
+        PayoutAudit(
+            admin_user_id=admin.id,
+            provider_id=provider.id,
+            source="admin",
+            amount_paise=8000,
+            booking_count=1,
+            reference_id="ref_of_prior_completed_payout",
+            payout_id="pout_prior_completed",
+            outcome="processing",
+        )
+    )
+    await db_session.flush()
+
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
+        mock_payout.return_value = {"id": "pout_next_cycle", "status": "processing"}
+        result = await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+    assert result["payout_id"] == "pout_next_cycle"
+
+
+@pytest.mark.asyncio
+async def test_payout_ticket_failure_sequence_no_longer_double_pays(
+    db_session, stub_payout_audit_io
+):
+    """SVC-172 (G28) end-to-end: the exact sequence from the ticket is blocked.
+
+    1. First attempt (batch {B1, B2}) — RazorpayX call raises (transport error).
+    2. Audit resolves to ``unknown``; bookings stay PENDING.
+    3. Days pass, B3 completes.
+    4. Admin retries — batch is now {B1, B2, B3}, so before this fix RazorpayX
+       saw a fresh idempotency key and created a second payout. Now the
+       refuse-on-open-attempt gate stops it before we touch RazorpayX.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+
+    b1 = await _booking_for(db_session, consumer, provider)  # noqa: F841
+    b2 = await _booking_for(db_session, consumer, provider)  # noqa: F841
+
+    # Step 1: attempt 1 fails with a transport error.
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
+        mock_payout.side_effect = RuntimeError("RazorpayX timeout")
+        with pytest.raises(RuntimeError):
+            await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+    # Simulate what the (stubbed) audit resolver would have written to the app
+    # DB: an `unknown`-outcome audit for this provider. In prod
+    # `_resolve_audit` handles this via its own committed session; here we
+    # write it directly into the test session so `_find_open_attempt` sees it.
+    db_session.add(
+        PayoutAudit(
+            admin_user_id=admin.id,
+            provider_id=provider.id,
+            source="admin",
+            amount_paise=16000,
+            booking_count=2,
+            reference_id="ref_of_first_attempt",
+            payout_id=None,
+            outcome="unknown",
+            error="RazorpayX timeout",
+        )
+    )
+
+    # Step 3: B3 completes.
+    b3 = await _booking_for(db_session, consumer, provider)  # noqa: F841
+    await db_session.flush()
+
+    # Step 4: retry. Before SVC-172, this would derive a fresh idempotency key
+    # from {B1, B2, B3} and RazorpayX would create a second payout for B1/B2.
+    # Now: refused at the audit gate before we call RazorpayX.
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
+        with pytest.raises(PaymentError, match="Previous payout attempt is unresolved"):
+            await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+        mock_payout.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

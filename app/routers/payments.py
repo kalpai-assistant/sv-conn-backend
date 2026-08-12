@@ -39,9 +39,11 @@ _PAYMENT_RATE_LIMIT = Depends(rate_limit("payment_ops", max_requests=20))
     "/orders",
     response_model=PaymentOrderResponse,
     dependencies=[_PAYMENT_RATE_LIMIT],
-    # SVC-158 follow-up: idempotency conflict codes so the generated client
-    # can distinguish them from generic 4xx and back off / surface correctly.
     responses={
+        # SVC-39 G5 — caller must own the booking.
+        403: {"description": "You do not have access to this booking."},
+        # SVC-158 follow-up: idempotency conflict codes so the generated client
+        # can distinguish them from generic 4xx and back off / surface correctly.
         409: {
             "description": "A request with this Idempotency-Key is already in "
             "progress. Retry after a short backoff."
@@ -64,7 +66,7 @@ async def create_payment_order(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     async def do_create() -> dict:
-        return await PaymentService(db).create_order(request.booking_id)
+        return await PaymentService(db).create_order(request.booking_id, current_user.id)
 
     if not idempotency_key:
         return await do_create()
@@ -99,6 +101,10 @@ async def create_payment_order(
     "/verify",
     status_code=status.HTTP_200_OK,
     dependencies=[_PAYMENT_RATE_LIMIT],
+    responses={
+        # SVC-39 G5 — caller must own the booking the order was created for.
+        403: {"description": "You do not have access to this booking."},
+    },
 )
 async def verify_payment(
     request: VerifyPaymentRequest,
@@ -109,6 +115,7 @@ async def verify_payment(
         razorpay_order_id=request.razorpay_order_id,
         razorpay_payment_id=request.razorpay_payment_id,
         razorpay_signature=request.razorpay_signature,
+        consumer_id=current_user.id,
     )
     return {"message": "Payment verified", "payment_id": str(payment.id)}
 
