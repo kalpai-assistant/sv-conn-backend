@@ -92,7 +92,7 @@ async def test_create_order_without_provider_linked_account(db_session):
 
     with patch("app.services.payment_service.razorpay_client") as mock_rzp:
         mock_rzp.order.create.return_value = {"id": "order_no_route_test"}
-        result = await service.create_order(booking.id)
+        result = await service.create_order(booking.id, consumer.id)
 
     # Order created successfully and persisted on the booking.
     assert result["razorpay_order_id"] == "order_no_route_test"
@@ -138,7 +138,7 @@ async def test_create_order_subtracts_discount_from_charge(db_session):
 
     with patch("app.services.payment_service.razorpay_client") as mock_rzp:
         mock_rzp.order.create.return_value = {"id": "order_discounted"}
-        result = await PaymentService(db_session).create_order(booking.id)
+        result = await PaymentService(db_session).create_order(booking.id, consumer.id)
 
     # ₹100.00 − ₹25.00 = ₹75.00 = 7500 paise.
     assert result["amount"] == 7500
@@ -169,7 +169,7 @@ async def test_create_order_no_discount_charges_full_amount(db_session):
 
     with patch("app.services.payment_service.razorpay_client") as mock_rzp:
         mock_rzp.order.create.return_value = {"id": "order_no_coupon"}
-        result = await PaymentService(db_session).create_order(booking.id)
+        result = await PaymentService(db_session).create_order(booking.id, consumer.id)
 
     assert result["amount"] == 20000
     assert booking.discount_amount == Decimal("0.00")
@@ -198,7 +198,7 @@ async def test_create_order_paisa_exact_after_discount(db_session):
 
     with patch("app.services.payment_service.razorpay_client") as mock_rzp:
         mock_rzp.order.create.return_value = {"id": "order_precise"}
-        result = await PaymentService(db_session).create_order(booking.id)
+        result = await PaymentService(db_session).create_order(booking.id, consumer.id)
 
     assert result["amount"] == 9007
 
@@ -228,6 +228,99 @@ async def test_verify_payment_invalid_signature(client, auth_headers, db_session
 
     assert response.status_code == 402
     assert "signature" in response.json()["message"].lower()
+
+
+# ------------------------------------------------------------------
+# SVC-173 (G5): payment endpoints refuse when the caller isn't the booking owner
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_order_refuses_when_caller_isnt_booking_owner(
+    client, auth_headers, db_session
+):
+    """SVC-173 (G5): a stranger cannot mint a Razorpay order for someone else's booking.
+
+    Before this fix, ``current_user`` was authenticated but never checked
+    against ``booking.consumer_id``. Any logged-in user could read another
+    user's booking amount and — worse — overwrite ``razorpay_order_id`` on
+    their booking, orphaning the legitimate in-flight order.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    stranger = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session, consumer, provider, status=BookingStatus.COMPLETED
+    )
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        # The Razorpay call must NOT happen — the ownership check runs first.
+        response = await client.post(
+            "/api/v1/payments/orders",
+            json={"booking_id": str(booking.id)},
+            headers=auth_headers(str(stranger.id), "consumer"),
+        )
+
+    assert response.status_code == 403
+    mock_rzp.order.create.assert_not_called()
+
+    # The victim's booking is unchanged — no order id was written.
+    await db_session.refresh(booking)
+    assert booking.razorpay_order_id is None
+
+
+@pytest.mark.asyncio
+async def test_create_order_owner_still_succeeds(client, auth_headers, db_session):
+    """Regression: G5 must not break the happy path — the booking's own consumer
+    can still mint an order."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session, consumer, provider, status=BookingStatus.COMPLETED
+    )
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        mock_rzp.order.create.return_value = {"id": "order_owner_ok"}
+        response = await client.post(
+            "/api/v1/payments/orders",
+            json={"booking_id": str(booking.id)},
+            headers=auth_headers(str(consumer.id), "consumer"),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["razorpay_order_id"] == "order_owner_ok"
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_refuses_when_caller_isnt_booking_owner(
+    client, auth_headers, db_session
+):
+    """SVC-173 (G5): a stranger with a valid signature cannot flip another user's
+    booking to PAID. Signature verification alone would accept the request —
+    the ownership check is what refuses it."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    stranger = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+        razorpay_order_id="order_owned_by_someone_else",
+    )
+
+    valid_sig = _make_valid_signature("order_owned_by_someone_else", "pay_relay_attempt")
+    response = await client.post(
+        "/api/v1/payments/verify",
+        json={
+            "razorpay_order_id": "order_owned_by_someone_else",
+            "razorpay_payment_id": "pay_relay_attempt",
+            "razorpay_signature": valid_sig,
+        },
+        headers=auth_headers(str(stranger.id), "consumer"),
+    )
+
+    assert response.status_code == 403
 
 
 # ------------------------------------------------------------------
@@ -261,11 +354,13 @@ async def test_verify_payment_replayed_signature_creates_only_one_ledger_row(db_
         razorpay_order_id="order_replay_test",
         razorpay_payment_id="pay_replay_test",
         razorpay_signature=sig,
+        consumer_id=consumer.id,  # SVC-173 (G5)
     )
     second = await svc.verify_payment(
         razorpay_order_id="order_replay_test",
         razorpay_payment_id="pay_replay_test",
         razorpay_signature=sig,
+        consumer_id=consumer.id,
     )
 
     # Same row returned twice — the second call short-circuits on the existing lookup.
@@ -327,6 +422,7 @@ async def test_verify_payment_leaves_failed_rows_alone(db_session):
         razorpay_order_id="order_after_failure",
         razorpay_payment_id="pay_finally_ok",
         razorpay_signature=sig,
+        consumer_id=consumer.id,  # SVC-173 (G5)
     )
 
     assert payment.status == PaymentRecordStatus.CAPTURED
