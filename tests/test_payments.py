@@ -115,7 +115,7 @@ async def test_create_order_without_provider_linked_account(db_session):
 
     with patch("app.services.payment_service.razorpay_client") as mock_rzp:
         mock_rzp.order.create.return_value = {"id": "order_no_route_test"}
-        result = await service.create_order(booking.id)
+        result = await service.create_order(booking.id, consumer.id)
 
     # Order created successfully and persisted on the booking.
     assert result["razorpay_order_id"] == "order_no_route_test"
@@ -161,7 +161,7 @@ async def test_create_order_subtracts_discount_from_charge(db_session):
 
     with patch("app.services.payment_service.razorpay_client") as mock_rzp:
         mock_rzp.order.create.return_value = {"id": "order_discounted"}
-        result = await PaymentService(db_session).create_order(booking.id)
+        result = await PaymentService(db_session).create_order(booking.id, consumer.id)
 
     # ₹100.00 − ₹25.00 = ₹75.00 = 7500 paise.
     assert result["amount"] == 7500
@@ -192,7 +192,7 @@ async def test_create_order_no_discount_charges_full_amount(db_session):
 
     with patch("app.services.payment_service.razorpay_client") as mock_rzp:
         mock_rzp.order.create.return_value = {"id": "order_no_coupon"}
-        result = await PaymentService(db_session).create_order(booking.id)
+        result = await PaymentService(db_session).create_order(booking.id, consumer.id)
 
     assert result["amount"] == 20000
     assert booking.discount_amount == Decimal("0.00")
@@ -221,7 +221,7 @@ async def test_create_order_paisa_exact_after_discount(db_session):
 
     with patch("app.services.payment_service.razorpay_client") as mock_rzp:
         mock_rzp.order.create.return_value = {"id": "order_precise"}
-        result = await PaymentService(db_session).create_order(booking.id)
+        result = await PaymentService(db_session).create_order(booking.id, consumer.id)
 
     assert result["amount"] == 9007
 
@@ -251,6 +251,89 @@ async def test_verify_payment_invalid_signature(client, auth_headers, db_session
 
     assert response.status_code == 402
     assert "signature" in response.json()["message"].lower()
+
+
+# ------------------------------------------------------------------
+# SVC-173 (G5): payment endpoints refuse when the caller isn't the booking owner
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_order_refuses_when_caller_isnt_booking_owner(
+    client, auth_headers, db_session
+):
+    """SVC-173 (G5): a stranger cannot mint a Razorpay order for someone else's booking."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    stranger = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session, consumer, provider, status=BookingStatus.COMPLETED
+    )
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        response = await client.post(
+            "/api/v1/payments/orders",
+            json={"booking_id": str(booking.id)},
+            headers=auth_headers(str(stranger.id), "consumer"),
+        )
+
+    assert response.status_code == 403
+    mock_rzp.order.create.assert_not_called()
+    await db_session.refresh(booking)
+    assert booking.razorpay_order_id is None
+
+
+@pytest.mark.asyncio
+async def test_create_order_owner_still_succeeds(client, auth_headers, db_session):
+    """Regression: G5 must not break the happy path — the booking's own consumer
+    can still mint an order."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session, consumer, provider, status=BookingStatus.COMPLETED
+    )
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        mock_rzp.order.create.return_value = {"id": "order_owner_ok"}
+        response = await client.post(
+            "/api/v1/payments/orders",
+            json={"booking_id": str(booking.id)},
+            headers=auth_headers(str(consumer.id), "consumer"),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["razorpay_order_id"] == "order_owner_ok"
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_refuses_when_caller_isnt_booking_owner(
+    client, auth_headers, db_session
+):
+    """SVC-173 (G5): a stranger with a valid signature cannot flip another user's
+    booking to PAID."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    stranger = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+        razorpay_order_id="order_owned_by_someone_else",
+    )
+
+    valid_sig = _make_valid_signature("order_owned_by_someone_else", "pay_relay_attempt")
+    response = await client.post(
+        "/api/v1/payments/verify",
+        json={
+            "razorpay_order_id": "order_owned_by_someone_else",
+            "razorpay_payment_id": "pay_relay_attempt",
+            "razorpay_signature": valid_sig,
+        },
+        headers=auth_headers(str(stranger.id), "consumer"),
+    )
+
+    assert response.status_code == 403
 
 
 # ------------------------------------------------------------------
@@ -288,11 +371,13 @@ async def test_verify_payment_replayed_signature_creates_only_one_ledger_row(db_
             razorpay_order_id="order_replay_test",
             razorpay_payment_id="pay_replay_test",
             razorpay_signature=sig,
+            consumer_id=consumer.id,  # SVC-173 (G5)
         )
         second = await svc.verify_payment(
             razorpay_order_id="order_replay_test",
             razorpay_payment_id="pay_replay_test",
             razorpay_signature=sig,
+            consumer_id=consumer.id,
         )
 
     # Same row returned twice — the second call short-circuits on the existing lookup.
@@ -356,6 +441,7 @@ async def test_verify_payment_leaves_failed_rows_alone(db_session):
             razorpay_order_id="order_after_failure",
             razorpay_payment_id="pay_finally_ok",
             razorpay_signature=sig,
+            consumer_id=consumer.id,  # SVC-173 (G5)
         )
 
     assert payment.status == PaymentRecordStatus.CAPTURED
@@ -402,7 +488,7 @@ async def test_create_order_sets_partial_payment_zero(db_session):
 
     with patch("app.services.payment_service.razorpay_client") as mock_rzp:
         mock_rzp.order.create.return_value = {"id": "order_no_partial"}
-        await PaymentService(db_session).create_order(booking.id)
+        await PaymentService(db_session).create_order(booking.id, consumer.id)
 
     _, call_kwargs = mock_rzp.order.create.call_args
     assert call_kwargs["data"]["partial_payment"] == 0
@@ -411,7 +497,7 @@ async def test_create_order_sets_partial_payment_zero(db_session):
 @pytest.mark.asyncio
 async def test_verify_payment_refuses_short_amount(db_session):
     """SVC-174 (G7): a partial payment (amount < what the booking expects) is refused."""
-    _, _, booking = await _booking_for_verify(db_session, "order_short")
+    consumer, _, booking = await _booking_for_verify(db_session, "order_short")
     sig = _make_valid_signature("order_short", "pay_short")
     # Booking is 100.00 rupees → 10000 paise. Razorpay reports 5000. Refuse.
     entity = _fake_razorpay_payment("pay_short", amount_paise=5000)
@@ -423,6 +509,7 @@ async def test_verify_payment_refuses_short_amount(db_session):
                 razorpay_order_id="order_short",
                 razorpay_payment_id="pay_short",
                 razorpay_signature=sig,
+                consumer_id=consumer.id,
             )
 
     # No ledger row was written.
@@ -440,7 +527,7 @@ async def test_verify_payment_refuses_short_amount(db_session):
 @pytest.mark.asyncio
 async def test_verify_payment_refuses_wrong_currency(db_session):
     """SVC-174 (G7): a USD-currency payment is refused even if signed correctly."""
-    _, _, _ = await _booking_for_verify(db_session, "order_usd")
+    consumer, _, _ = await _booking_for_verify(db_session, "order_usd")
     sig = _make_valid_signature("order_usd", "pay_usd")
     entity = _fake_razorpay_payment("pay_usd", amount_paise=10000, currency="USD")
 
@@ -450,6 +537,7 @@ async def test_verify_payment_refuses_wrong_currency(db_session):
                 razorpay_order_id="order_usd",
                 razorpay_payment_id="pay_usd",
                 razorpay_signature=sig,
+                consumer_id=consumer.id,
             )
 
 
@@ -457,7 +545,7 @@ async def test_verify_payment_refuses_wrong_currency(db_session):
 async def test_verify_payment_refuses_authorized_but_not_captured(db_session):
     """SVC-174 (G7): a payment stuck in 'authorized' has not moved the money.
     The signature alone would have flipped the booking to PAID."""
-    _, _, _ = await _booking_for_verify(db_session, "order_auth")
+    consumer, _, _ = await _booking_for_verify(db_session, "order_auth")
     sig = _make_valid_signature("order_auth", "pay_auth")
     entity = _fake_razorpay_payment("pay_auth", amount_paise=10000, status_="authorized")
 
@@ -467,6 +555,7 @@ async def test_verify_payment_refuses_authorized_but_not_captured(db_session):
                 razorpay_order_id="order_auth",
                 razorpay_payment_id="pay_auth",
                 razorpay_signature=sig,
+                consumer_id=consumer.id,
             )
 
 
@@ -475,7 +564,7 @@ async def test_verify_payment_records_card_method(db_session):
     """SVC-179 (G11): a card payment is recorded as CARD, not the old hard-coded UPI."""
     from app.models.payment import PaymentRecordMethod
 
-    _, _, _ = await _booking_for_verify(db_session, "order_card")
+    consumer, _, _ = await _booking_for_verify(db_session, "order_card")
     sig = _make_valid_signature("order_card", "pay_card")
     entity = _fake_razorpay_payment("pay_card", amount_paise=10000, method="card")
 
@@ -484,6 +573,7 @@ async def test_verify_payment_records_card_method(db_session):
             razorpay_order_id="order_card",
             razorpay_payment_id="pay_card",
             razorpay_signature=sig,
+            consumer_id=consumer.id,
         )
     assert payment.method == PaymentRecordMethod.CARD
 
@@ -493,7 +583,7 @@ async def test_verify_payment_records_netbanking_method(db_session):
     """SVC-179 (G11): netbanking maps to NETBANKING."""
     from app.models.payment import PaymentRecordMethod
 
-    _, _, _ = await _booking_for_verify(db_session, "order_nb")
+    consumer, _, _ = await _booking_for_verify(db_session, "order_nb")
     sig = _make_valid_signature("order_nb", "pay_nb")
     entity = _fake_razorpay_payment("pay_nb", amount_paise=10000, method="netbanking")
 
@@ -502,6 +592,7 @@ async def test_verify_payment_records_netbanking_method(db_session):
             razorpay_order_id="order_nb",
             razorpay_payment_id="pay_nb",
             razorpay_signature=sig,
+            consumer_id=consumer.id,
         )
     assert payment.method == PaymentRecordMethod.NETBANKING
 
@@ -512,7 +603,7 @@ async def test_verify_payment_unknown_method_falls_back_to_upi(db_session):
     recorded as UPI with a log warning — the row still writes."""
     from app.models.payment import PaymentRecordMethod
 
-    _, _, _ = await _booking_for_verify(db_session, "order_wallet")
+    consumer, _, _ = await _booking_for_verify(db_session, "order_wallet")
     sig = _make_valid_signature("order_wallet", "pay_wallet")
     entity = _fake_razorpay_payment("pay_wallet", amount_paise=10000, method="wallet")
 
@@ -521,6 +612,7 @@ async def test_verify_payment_unknown_method_falls_back_to_upi(db_session):
             razorpay_order_id="order_wallet",
             razorpay_payment_id="pay_wallet",
             razorpay_signature=sig,
+            consumer_id=consumer.id,
         )
     assert payment.method == PaymentRecordMethod.UPI
 
