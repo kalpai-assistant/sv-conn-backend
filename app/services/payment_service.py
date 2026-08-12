@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.exceptions import BookingNotFound, PaymentError
+from app.exceptions import BookingNotFound, PaymentError, UnauthorizedAction
 from app.models.booking import Booking, PaymentStatus
 from app.models.payment import Payment, PaymentRecordMethod, PaymentRecordStatus
 from app.models.provider_profile import ProviderProfile
@@ -33,7 +33,7 @@ class PaymentService:
     # Order creation
     # ------------------------------------------------------------------
 
-    async def create_order(self, booking_id: UUID) -> dict:
+    async def create_order(self, booking_id: UUID, consumer_id: UUID) -> dict:
         """
         Create a Razorpay order for the booking amount.
 
@@ -48,10 +48,23 @@ class PaymentService:
         at order-creation time only the discount applies. Before this fix, every
         coupon booking billed the consumer the full pre-discount amount while
         the coupon was recorded as redeemed.
+
+        SVC-39 G5: refuses when ``consumer_id`` doesn't own the booking. The
+        route used to take ``current_user`` only for authentication and pass it
+        nowhere, so any logged-in user could mint an order for any booking id —
+        reading back the amount, and (worse) overwriting the target booking's
+        ``razorpay_order_id`` so the legitimate consumer paid against an order
+        the booking no longer referenced. The ownership check lives in the
+        service, not the router, because the same invariant applies to every
+        caller (existing router today, future admin/backfill scripts, tests).
         """
         booking = await self.db.get(Booking, booking_id)
         if not booking:
             raise BookingNotFound(booking_id)
+        if booking.consumer_id != consumer_id:
+            # UnauthorizedAction maps to 403 — this is a "you should never have
+            # been able to do this" case, distinct from a 404 hiding existence.
+            raise UnauthorizedAction("You do not have access to this booking")
 
         # Numeric arithmetic (both operands are Decimal post-SVC-150 + G31), so
         # the subtraction is exact and ``to_paise`` rounds half-up — a ₹100.09
@@ -85,10 +98,16 @@ class PaymentService:
         razorpay_order_id: str,
         razorpay_payment_id: str,
         razorpay_signature: str,
+        consumer_id: UUID,
     ) -> Payment:
         """
         Verify the Razorpay HMAC-SHA256 signature.
         On success, create a Payment record and mark the booking as paid.
+
+        SVC-39 G5: also refuses if ``consumer_id`` doesn't own the booking the
+        order was created for. The signature check alone would let a caller
+        flip *someone else's* booking to PAID by relaying the victim's order
+        id + a valid signature (from a completed Razorpay session they saw).
         """
         expected = hmac.new(
             key=settings.RAZORPAY_KEY_SECRET.encode(),
@@ -100,6 +119,8 @@ class PaymentService:
             raise PaymentError("Payment signature verification failed")
 
         booking = await self._find_booking_by_order(razorpay_order_id)
+        if booking.consumer_id != consumer_id:
+            raise UnauthorizedAction("You do not have access to this booking")
 
         payment = Payment(
             booking_id=booking.id,
