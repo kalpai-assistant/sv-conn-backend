@@ -672,6 +672,212 @@ async def test_webhook_payment_captured_idempotent(client, db_session):
 
 
 # ------------------------------------------------------------------
+# SVC-176 (G8) — captured webhook writes ledger; unknown order acks; failed logs
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_captured_webhook_writes_ledger_row_when_verify_didnt(client, db_session):
+    """SVC-176 (G8): the load-bearing case — consumer paid, then killed the app
+    before verify_payment ran. The webhook is the only signal left. Before this
+    fix the booking flipped to PAID with **no ledger row at all** — no amount,
+    no payment_id, no method — and a later chargeback could not be matched.
+    Now the webhook upserts the same row verify would have written.
+    """
+    from app.models.payment import PaymentRecordMethod, PaymentRecordStatus
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+        razorpay_order_id="order_webhook_writes",
+    )
+
+    body = json.dumps(
+        {
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_webhook_writes",
+                        "order_id": "order_webhook_writes",
+                        "method": "card",
+                    }
+                }
+            },
+        }
+    ).encode()
+
+    response = await client.post(
+        "/api/v1/payments/webhook",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Razorpay-Signature": _sign_webhook(body, settings.RAZORPAY_WEBHOOK_SECRET),
+        },
+    )
+    assert response.status_code == 200
+
+    # A CAPTURED ledger row exists, keyed on the payment id, with resolved method.
+    payment_row = (
+        await db_session.execute(
+            select(Payment).where(Payment.razorpay_payment_id == "pay_webhook_writes")
+        )
+    ).scalar_one()
+    assert payment_row.booking_id == booking.id
+    assert payment_row.status == PaymentRecordStatus.CAPTURED
+    assert payment_row.method == PaymentRecordMethod.CARD
+
+    await db_session.refresh(booking)
+    assert booking.payment_status == PaymentStatus.PAID
+
+
+@pytest.mark.asyncio
+async def test_captured_webhook_is_idempotent_on_replay(client, db_session):
+    """Razorpay retries webhooks; a redelivery must not write a second row."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+        razorpay_order_id="order_webhook_replay",
+    )
+
+    body = json.dumps(
+        {
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_webhook_replay",
+                        "order_id": "order_webhook_replay",
+                        "method": "upi",
+                    }
+                }
+            },
+        }
+    ).encode()
+    headers = {
+        "Content-Type": "application/json",
+        "X-Razorpay-Signature": _sign_webhook(body, settings.RAZORPAY_WEBHOOK_SECRET),
+    }
+
+    for _ in range(2):
+        response = await client.post("/api/v1/payments/webhook", content=body, headers=headers)
+        assert response.status_code == 200
+
+    count = (
+        await db_session.execute(
+            select(func.count()).select_from(Payment).where(Payment.booking_id == booking.id)
+        )
+    ).scalar_one()
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_captured_webhook_unknown_order_acks_no_retry_storm(client, db_session):
+    """SVC-176 (G8): an unknown order_id must return 200 so Razorpay stops
+    retrying — a stray 402 kicks off the full retry schedule for a delivery
+    that can never succeed. Matches the dispute handler's policy."""
+    body = json.dumps(
+        {
+            "event": "payment.captured",
+            "payload": {
+                "payment": {"entity": {"id": "pay_unknown", "order_id": "order_does_not_exist"}}
+            },
+        }
+    ).encode()
+
+    response = await client.post(
+        "/api/v1/payments/webhook",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Razorpay-Signature": _sign_webhook(body, settings.RAZORPAY_WEBHOOK_SECRET),
+        },
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_failed_webhook_unknown_order_acks_no_retry_storm(client, db_session):
+    """Same policy for `payment.failed`: unknown order → 200, log, drop."""
+    body = json.dumps(
+        {
+            "event": "payment.failed",
+            "payload": {
+                "payment": {"entity": {"id": "pay_lost", "order_id": "order_does_not_exist"}}
+            },
+        }
+    ).encode()
+
+    response = await client.post(
+        "/api/v1/payments/webhook",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Razorpay-Signature": _sign_webhook(body, settings.RAZORPAY_WEBHOOK_SECRET),
+        },
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_failed_webhook_writes_failed_ledger_row(client, db_session):
+    """`payment.failed` writes a FAILED audit row for the booking (unchanged
+    behaviour; SVC-176 only added logging for exceptions, not new semantics)."""
+    from app.models.payment import PaymentRecordStatus
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.COMPLETED,
+        razorpay_order_id="order_failed_webhook",
+    )
+
+    body = json.dumps(
+        {
+            "event": "payment.failed",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_failed_1",
+                        "order_id": "order_failed_webhook",
+                        "method": "card",
+                    }
+                }
+            },
+        }
+    ).encode()
+
+    response = await client.post(
+        "/api/v1/payments/webhook",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Razorpay-Signature": _sign_webhook(body, settings.RAZORPAY_WEBHOOK_SECRET),
+        },
+    )
+    assert response.status_code == 200
+
+    row = (
+        await db_session.execute(
+            select(Payment).where(Payment.razorpay_payment_id == "pay_failed_1")
+        )
+    ).scalar_one()
+    assert row.booking_id == booking.id
+    assert row.status == PaymentRecordStatus.FAILED
+
+
+# ------------------------------------------------------------------
 # SVC-39 G3: webhook secret must not silently disable verification in prod
 # ------------------------------------------------------------------
 
