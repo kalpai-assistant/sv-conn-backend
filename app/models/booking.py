@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Index, Numeric, String, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -122,16 +122,19 @@ class Booking(Base):
     provider_payout: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     # Coupon reduction applied at booking creation. Comes out of the
     # platform side — provider_payout stays anchored to service_amount.
-    # See coupon module docstring for the money split.
-    # TODO(SVC-150 follow-up): ALTER to Numeric(12, 2) — introduced as Float on
-    # main after SVC-150 landed on this branch, kept as-is to keep this merge a
-    # pure graph join.
-    discount_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # See coupon module docstring for the money split. Numeric per SVC-150
+    # (see the field comment above); brought under the same rule as the
+    # rest of the money in SVC-39 G31.
+    discount_amount: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), default=Decimal("0.00"), nullable=False
+    )
     # Optional gratuity added by the consumer after completion. 100% flows
     # to the provider — added on top of provider_payout at payout time.
     # Kept on the booking row (rather than the review row) so a consumer
     # who tips but skips leaving a review is still tipping.
-    tip_amount: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    tip_amount: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), default=Decimal("0.00"), nullable=False
+    )
     payment_method: Mapped[PaymentMethod | None] = mapped_column(Enum(PaymentMethod))
     payment_status: Mapped[PaymentStatus] = mapped_column(
         Enum(PaymentStatus), default=PaymentStatus.PENDING

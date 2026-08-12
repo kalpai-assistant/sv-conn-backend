@@ -157,8 +157,93 @@ async def test_api_still_returns_money_as_numbers_not_strings(client, db_session
     assert resp.status_code == 200
 
     raw = json.loads(resp.text)
-    for field in ("service_amount", "platform_commission", "provider_payout"):
+    # discount_amount + tip_amount added to the assertion after SVC-39 G31
+    # widened SVC-150 to cover them.
+    for field in (
+        "service_amount",
+        "platform_commission",
+        "provider_payout",
+        "discount_amount",
+        "tip_amount",
+    ):
         assert isinstance(raw[field], int | float), (
             f"{field} serialised as {type(raw[field]).__name__} "
             f"({raw[field]!r}) — money must stay a JSON number"
         )
+
+
+# --- SVC-39 G31: tip_amount / discount_amount are Numeric on the model ------
+
+
+@pytest.mark.asyncio
+async def test_tip_amount_is_stored_as_decimal_after_svc39_g31(db_session):
+    """SVC-39 G31: tip_amount must land as Decimal, not float.
+
+    Before G31 `Booking.tip_amount` was `Float`, so `provider_payout + tip_amount`
+    in the earnings query returned `double precision` (Postgres promotes Numeric
+    to float when mixed) — routing every provider's tip-inclusive earnings
+    through the exact representation SVC-150 was written to eliminate.
+    """
+    import uuid
+
+    from app.models.address import Address
+    from app.models.category import Category
+    from app.models.service import Service
+    from app.services.booking_service import BookingService
+    from tests.factories.user_factory import UserFactory
+
+    suffix = uuid.uuid4().hex[:8]
+    category = Category(name=f"Tip {suffix}", slug=f"tip-{suffix}", is_active=True, sort_order=1)
+    db_session.add(category)
+    await db_session.flush()
+    service = Service(
+        category_id=category.id,
+        name=f"Svc {suffix}",
+        base_price=Decimal("500.00"),
+        duration_minutes=60,
+        is_active=True,
+    )
+    db_session.add(service)
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    address = Address(user_id=consumer.id, label="home", full_address="3 Test Rd")
+    db_session.add(address)
+    await db_session.flush()
+
+    from app.models.booking import BookingStatus
+    from app.schemas.booking import CreateBookingItemRequest
+
+    booking = await BookingService(db_session).create_booking(
+        consumer_id=consumer.id,
+        items=[CreateBookingItemRequest(service_id=service.id, quantity=1)],
+        address_id=address.id,
+    )
+    # Complete the booking so we can tip it.
+    booking.status = BookingStatus.COMPLETED
+    booking.provider_id = provider.id
+    await db_session.flush()
+
+    tipped = await BookingService(db_session).set_tip(
+        booking_id=booking.id, consumer_id=consumer.id, amount=80.07
+    )
+    assert isinstance(tipped.tip_amount, Decimal)
+    # Rounds half-up via to_decimal; the SVC-150 float-precision case flowing
+    # through cleanly is the reason it must be Decimal end-to-end.
+    assert tipped.tip_amount == Decimal("80.07")
+
+
+def test_booking_model_declares_discount_and_tip_as_numeric():
+    """A structural test that catches a "tidy up" reverting the type on the model.
+
+    Cheap sentinel — reading it is the specification of the invariant.
+    """
+    from app.models.booking import Booking
+
+    for column_name in ("discount_amount", "tip_amount"):
+        col = Booking.__table__.c[column_name]
+        # sqlalchemy.Numeric() is what we want; sqlalchemy.Float() would be the
+        # regression. Use type family rather than == because the mapped_column
+        # returns a NUMERIC/NUMERIC subclass instance.
+        assert (
+            col.type.python_type is Decimal
+        ), f"{column_name} declared as {type(col.type).__name__}; must be Numeric per SVC-39 G31"
