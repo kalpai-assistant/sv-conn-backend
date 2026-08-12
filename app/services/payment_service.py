@@ -41,14 +41,23 @@ class PaymentService:
         Route ``transfers`` split, so a provider does not need a linked account.
         Provider payouts are handled separately via RazorpayX. Returns order
         details for frontend checkout.
+
+        SVC-39 G22: charges ``service_amount − discount_amount``. The coupon
+        module docstring documents the rule (``effective charge = service_amount
+        − D + tip_amount``); tips are added post-completion via ``set_tip``, so
+        at order-creation time only the discount applies. Before this fix, every
+        coupon booking billed the consumer the full pre-discount amount while
+        the coupon was recorded as redeemed.
         """
         booking = await self.db.get(Booking, booking_id)
         if not booking:
             raise BookingNotFound(booking_id)
 
-        # This is what the customer is actually charged — rounds half up rather than
-        # truncating, so a ₹100.09 booking bills 10009 paise and not 10008 (SVC-150).
-        amount_paise = to_paise(booking.service_amount)
+        # Numeric arithmetic (both operands are Decimal post-SVC-150 + G31), so
+        # the subtraction is exact and ``to_paise`` rounds half-up — a ₹100.09
+        # booking with a ₹10 coupon bills 9009 paise, not 9008.
+        chargeable = booking.service_amount - booking.discount_amount
+        amount_paise = to_paise(chargeable)
 
         order_data = {
             "amount": amount_paise,
