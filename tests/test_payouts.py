@@ -25,7 +25,7 @@ from app.config import Settings, get_settings
 from app.database import Base
 from app.exceptions import PaymentError
 from app.models.address import Address
-from app.models.booking import Booking, BookingStatus, SettlementStatus
+from app.models.booking import Booking, BookingStatus, PaymentStatus, SettlementStatus
 from app.models.category import Category
 from app.models.payout_audit import PayoutAudit
 from app.models.provider_profile import PayoutMethod, ProviderProfile
@@ -119,6 +119,12 @@ async def _booking_for(db_session, consumer, provider, **kwargs):
 
     # Overridable so a test can vary the amount (ordering / summing cases).
     provider_payout = kwargs.pop("provider_payout", 80.0)
+    # After SVC-39 G1 "money owed to a provider" requires the consumer to have
+    # paid — completed + payment_status == PAID + settlement PENDING. This
+    # helper stages a booking that IS owed by default so payout tests keep the
+    # setup they were written against; tests that want to exercise the not-yet-
+    # paid branch pass payment_status=PENDING explicitly (see the G1 test below).
+    payment_status = kwargs.pop("payment_status", PaymentStatus.PAID)
 
     return await BookingFactory.create(
         db_session,
@@ -127,6 +133,7 @@ async def _booking_for(db_session, consumer, provider, **kwargs):
         service_id=service.id,
         address_id=address.id,
         status=BookingStatus.COMPLETED,
+        payment_status=payment_status,
         provider_payout=provider_payout,
         **kwargs,
     )
@@ -2200,6 +2207,47 @@ async def test_pending_settlements_excludes_everything_not_owed(db_session):
     (row,) = report["providers"]
     assert row["pending_booking_count"] == 1
     assert row["pending_payout_paise"] == int(owed.provider_payout * 100)
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_excludes_unpaid_bookings(db_session):
+    """SVC-39 G1: a completed booking the consumer never paid for is not owed.
+
+    Before G1 the platform paid providers out of its own float for any completed
+    booking the customer had abandoned, failed to pay for, or whose webhook was
+    lost. `_owed_filter` now requires `payment_status == PAID`.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    await _provider_with_payout_vpa(db_session, provider)
+
+    paid = await _booking_for(db_session, consumer, provider)  # default PAID
+    unpaid = await _booking_for(  # noqa: F841 — created to prove exclusion
+        db_session, consumer, provider, payment_status=PaymentStatus.PENDING
+    )
+    await db_session.flush()
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    (row,) = report["providers"]
+    assert row["pending_booking_count"] == 1
+    assert row["pending_payout_paise"] == int(paid.provider_payout * 100)
+
+
+@pytest.mark.asyncio
+async def test_create_provider_payout_refuses_unpaid_bookings(db_session):
+    """The payout path shares `_owed_filter`, so an unpaid completed booking
+    doesn't just hide from the admin list — it can't be paid at all."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+
+    await _booking_for(db_session, consumer, provider, payment_status=PaymentStatus.PENDING)
+    await db_session.flush()
+
+    with pytest.raises(PaymentError, match="No pending settlements for this provider"):
+        await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.exceptions import PaymentError, UserNotFound
-from app.models.booking import Booking, BookingStatus, SettlementStatus
+from app.models.booking import Booking, BookingStatus, PaymentStatus, SettlementStatus
 from app.models.payout_audit import PayoutAudit
 from app.models.provider_profile import PayoutMethod, ProviderProfile
 from app.models.user import User
@@ -891,9 +891,18 @@ class PayoutService:
         admin list (``list_pending_settlements``). If those two ever drift apart the
         admin sees one amount in the confirmation dialog and a different amount
         leaves the bank, so the condition lives in exactly one place.
+
+        ``payment_status == PAID`` was added for SVC-39 G1: before it, "owed"
+        meant only "job is done and we haven't paid yet", so the platform paid
+        providers for bookings the consumer never actually paid for (an
+        abandoned checkout, a failed payment, a webhook that never arrived).
+        Depends on SVC-39 G9 landing first — before G9, online bookings had
+        their PAID stamp wiped on COMPLETED and this filter would match nothing
+        for them.
         """
         return (
             Booking.status == BookingStatus.COMPLETED,
+            Booking.payment_status == PaymentStatus.PAID,
             Booking.settlement_status == SettlementStatus.PENDING,
         )
 
