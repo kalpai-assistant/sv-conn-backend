@@ -39,14 +39,15 @@ has to be an explicit override, not the default.
 import enum
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
     DateTime,
     Enum,
-    Float,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     UniqueConstraint,
     func,
@@ -91,13 +92,17 @@ class Coupon(Base):
     code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
 
     discount_type: Mapped[DiscountType] = mapped_column(Enum(DiscountType), nullable=False)
-    # For PERCENT this is a whole number 0–100. For FLAT, rupees.
-    discount_value: Mapped[float] = mapped_column(Float, nullable=False)
+    # For PERCENT this is a whole number 0–100. For FLAT, rupees. Numeric per
+    # SVC-150 (see the note on Booking's money columns); brought under the same
+    # rule as the rest of the money in SVC-181 so the discount that leaves
+    # `_compute_discount` and lands on the booking row goes through one type
+    # end-to-end.
+    discount_value: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     # Nullable = no cap. Only meaningful for PERCENT coupons; ignored for
     # FLAT (the flat amount is its own cap).
-    max_discount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_discount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     # Nullable = no minimum. Cart total must be at least this to qualify.
-    min_order_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_order_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     # Nullable = global coupon (anyone may use). Non-null = tied to one user
     # — this is how referral bonuses are represented (both giver and
@@ -152,7 +157,9 @@ class CouponRedemption(Base):
     )
     # The rupee amount actually deducted. Recorded rather than recomputed
     # so the ledger survives a later change to the coupon's discount rule.
-    discount_applied: Mapped[float] = mapped_column(Float, nullable=False)
+    # Numeric per SVC-181 (see the note on Coupon.discount_value); the ledger
+    # is money and must match the aggregates it justifies on the booking row.
+    discount_applied: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     redeemed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

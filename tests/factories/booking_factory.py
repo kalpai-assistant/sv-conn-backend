@@ -124,16 +124,23 @@ class BookingFactory:
             existing_by_id[svc_id] = fake_service
         await db.flush()
 
+        # BookingItem money columns are Numeric/Decimal since SVC-181; coerce
+        # here for the same reason as the booking aggregates above.
+        item_unit_price = to_decimal(per_item_amount)
+        item_total_price = to_decimal(per_item_amount)
+        item_commission = to_decimal(per_item_commission)
+        item_payout = to_decimal(per_item_payout)
+
         items: list[BookingItem] = []
         for svc_id in resolved_ids:
             item = BookingItem(
                 booking_id=booking.id,
                 service_id=svc_id,
                 quantity=1,
-                unit_price=per_item_amount,
-                total_price=per_item_amount,
-                platform_commission=per_item_commission,
-                provider_payout=per_item_payout,
+                unit_price=item_unit_price,
+                total_price=item_total_price,
+                platform_commission=item_commission,
+                provider_payout=item_payout,
             )
             db.add(item)
             # Preload the service relationship on this item so

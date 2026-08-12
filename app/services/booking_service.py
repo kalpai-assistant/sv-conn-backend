@@ -208,10 +208,11 @@ class BookingService:
         # Coupon application. Validated with the cart total *before* the
         # booking row is added so an invalid code refuses the request cleanly
         # (no orphan Booking rolled back). CouponInvalid propagates as 400.
-        # CouponService.validate is float-typed (coupon rules still store
-        # discount_value as float — outside the scope of G31); convert at the
-        # boundary rather than plumbing Decimal through it here.
-        discount_amount = 0.0
+        # SVC-181 moved coupon rules onto Decimal (was Float) so the discount
+        # threading from validate() → apply_to_booking → booking row is one
+        # exact-arithmetic type end to end — no more Decimal↔float round-trip
+        # at this boundary.
+        discount_amount: Decimal = Decimal("0.00")
         redeemed_coupon = None
         if coupon_code:
             from app.services.coupon_service import CouponService
@@ -219,7 +220,7 @@ class BookingService:
             redeemed_coupon, discount_amount = await CouponService(self.db).validate(
                 code=coupon_code,
                 user_id=consumer_id,
-                cart_amount=float(total_service_amount),
+                cart_amount=total_service_amount,
             )
 
         booking = Booking(
@@ -232,9 +233,9 @@ class BookingService:
             service_amount=total_service_amount,
             platform_commission=total_platform_commission,
             provider_payout=total_provider_payout,
-            # SVC-39 G31: discount_amount is now Numeric on the model; convert at
-            # the boundary so the ORM never receives a float for a Decimal column.
-            discount_amount=to_decimal(discount_amount),
+            # Decimal end to end since SVC-181 (was via float(); see the
+            # coupon-application block above).
+            discount_amount=discount_amount,
             payment_method=payment_method,
         )
         self.db.add(booking)

@@ -24,8 +24,9 @@ the totals and can't afford a subquery per read.
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -58,15 +59,20 @@ class BookingItem(Base):
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     # Price *at booking time*, not the live services.base_price. See module
     # docstring — a later catalogue price change must not retro-alter the bill.
-    unit_price: Mapped[float] = mapped_column(Float, nullable=False)
+    # Numeric per SVC-150 (see the note on Booking's money columns): item-level
+    # totals are summed into the booking's aggregates and then paid, so a float
+    # here would leak the same 80.07-can't-be-represented rounding bug into
+    # every multi-item cart. SVC-181 brought the last of the money columns
+    # onto the same rule.
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     # unit_price * quantity, denormalized. Cheaper than a derived column on read
     # and matches how the parent Booking stores its totals.
-    total_price: Mapped[float] = mapped_column(Float, nullable=False)
+    total_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     # Per-item split, so the earnings dashboard can attribute revenue back to a
     # specific service the provider performed (the current per-booking payout
     # would lump three services into one line, hiding which one earned what).
-    platform_commission: Mapped[float] = mapped_column(Float, nullable=False)
-    provider_payout: Mapped[float] = mapped_column(Float, nullable=False)
+    platform_commission: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    provider_payout: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     booking: Mapped["Booking"] = relationship("Booking", back_populates="items")

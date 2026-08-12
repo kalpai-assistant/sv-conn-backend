@@ -15,12 +15,14 @@ against the aware DB values before it silently produced wrong answers).
 
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import CouponInvalid
 from app.models.coupon import Coupon, CouponRedemption, DiscountType
+from app.utils.money import to_decimal
 
 
 class CouponService:
@@ -89,21 +91,24 @@ class CouponService:
     # ------------------------------------------------------------------
 
     async def validate(
-        self, code: str, user_id: uuid.UUID, cart_amount: float
-    ) -> tuple[Coupon, float]:
+        self, code: str, user_id: uuid.UUID, cart_amount: Decimal | float
+    ) -> tuple[Coupon, Decimal]:
         """Returns ``(coupon, discount_rupees)`` or raises ``CouponInvalid``.
 
-        Every reason to refuse is folded into one exception type — the
-        client renders "Coupon not applicable" for the whole class. A
-        finer-grained message could name why ("expired" vs "min ₹499"), but
-        beta doesn't need it and we're not building an enumeration ledger
-        that then has to stay in sync between server and client.
+        ``cart_amount`` accepts either ``Decimal`` (the service-layer caller
+        passes what it already has as Decimal — see ``BookingService.create``)
+        or ``float`` (the /coupons/validate endpoint accepts a JSON number).
+        Coerced to Decimal on entry so every comparison and every discount
+        computation below is exact; every reason to refuse is then folded into
+        one ``CouponInvalid`` type — the client renders "Coupon not
+        applicable" for the whole class.
         """
+        cart = to_decimal(cart_amount)
         coupon = await self._load_active(code, user_id)
         if coupon is None:
             raise CouponInvalid("Coupon not applicable")
 
-        if coupon.min_order_amount is not None and cart_amount < coupon.min_order_amount:
+        if coupon.min_order_amount is not None and cart < coupon.min_order_amount:
             raise CouponInvalid(
                 f"Minimum order ₹{int(coupon.min_order_amount)} required for this coupon"
             )
@@ -111,7 +116,7 @@ class CouponService:
         if not await self._has_remaining_uses(coupon, user_id):
             raise CouponInvalid("Coupon usage limit reached")
 
-        discount = self._compute_discount(coupon, cart_amount)
+        discount = self._compute_discount(coupon, cart)
         # A degenerate case that would otherwise pass — a percent coupon on
         # a ₹0 cart. Guarding at the boundary keeps the endpoint honest;
         # the cart already refuses empty item lists so this is defence in
@@ -130,7 +135,7 @@ class CouponService:
         coupon: Coupon,
         booking_id: uuid.UUID,
         user_id: uuid.UUID,
-        discount_amount: float,
+        discount_amount: Decimal | float,
     ) -> CouponRedemption:
         """Create the redemption row.
 
@@ -147,7 +152,10 @@ class CouponService:
             coupon_id=coupon.id,
             user_id=user_id,
             booking_id=booking_id,
-            discount_applied=discount_amount,
+            # to_decimal at the boundary — see SVC-181. Callers may hand us a
+            # float (e.g. the /coupons/validate endpoint's JSON number) and the
+            # column is Numeric.
+            discount_applied=to_decimal(discount_amount),
         )
         self.db.add(redemption)
         return redemption
@@ -203,21 +211,23 @@ class CouponService:
         return True
 
     @staticmethod
-    def _compute_discount(coupon: Coupon, cart_amount: float) -> float:
+    def _compute_discount(coupon: Coupon, cart_amount: Decimal) -> Decimal:
         """The rupee value the coupon reduces the cart by.
 
         - PERCENT: percent-of-cart, capped at ``max_discount`` if set,
           then capped at the cart amount itself.
         - FLAT: min(value, cart_amount). No refund of unused value.
 
-        Rounded to two decimal places — payments deal in paise but the
-        rest of this codebase keeps rupees as floats. Consistency here
-        rather than a lone integer money type.
+        Decimal arithmetic end to end (SVC-181): the columns are Numeric,
+        the booking's ``discount_amount`` is Numeric, and a float here would
+        route the discount through the very promotion-to-double-precision
+        that SVC-150 was written to eliminate. ``to_decimal`` re-quantises
+        to 2dp so the return value matches the storage on both sides.
         """
         if coupon.discount_type is DiscountType.PERCENT:
-            raw = cart_amount * (coupon.discount_value / 100.0)
+            raw = cart_amount * coupon.discount_value / Decimal(100)
             if coupon.max_discount is not None:
                 raw = min(raw, coupon.max_discount)
         else:
             raw = coupon.discount_value
-        return round(min(raw, cart_amount), 2)
+        return to_decimal(min(raw, cart_amount))
