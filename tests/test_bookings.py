@@ -231,6 +231,88 @@ async def test_complete_cash_booking_triggers_payment_task(client, auth_headers,
     mock_payment.delay.assert_called_once_with(booking_id=str(booking.id))
 
 
+@pytest.mark.asyncio
+async def test_completing_online_booking_preserves_paid_status(client, auth_headers, db_session):
+    """SVC-39 G9 regression: an online-paid booking must keep PAID on completion.
+
+    Before this fix the COMPLETED transition unconditionally reset
+    ``payment_status`` to PENDING, wiping the record that the consumer paid at
+    the exact moment the booking became payout-eligible. Now scoped to cash.
+    """
+    from app.models.provider_profile import ProviderProfile
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    db_session.add(ProviderProfile(user_id=provider.id))
+    await db_session.flush()
+
+    _, _, booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.IN_PROGRESS,
+        payment_method=PaymentMethod.ONLINE,
+        payment_status=PaymentStatus.PAID,
+    )
+
+    with patch("app.routers.bookings.send_booking_notification") as mock_notif:
+        mock_notif.delay = lambda **kwargs: None
+        response = await client.patch(
+            f"/api/v1/bookings/{booking.id}/complete",
+            headers=auth_headers(str(provider.id), "provider"),
+        )
+
+    assert response.status_code == 200
+    await db_session.refresh(booking)
+    assert booking.status is BookingStatus.COMPLETED
+    # The load-bearing assertion: PAID must survive the transition.
+    assert booking.payment_status is PaymentStatus.PAID
+
+
+@pytest.mark.asyncio
+async def test_completing_cash_booking_still_resets_payment_status(
+    client, auth_headers, db_session
+):
+    """The cash path still needs the reset — `process_cash_payment` early-returns
+    on PAID, so it depends on completion leaving the booking PENDING for the
+    task to move it to PAID. The fix scopes the reset to cash; it doesn't
+    remove it.
+    """
+    from app.models.provider_profile import ProviderProfile
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    db_session.add(ProviderProfile(user_id=provider.id))
+    await db_session.flush()
+
+    _, _, booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.IN_PROGRESS,
+        payment_method=PaymentMethod.CASH,
+        # Artificial — a cash booking normally reaches completion PENDING. Using
+        # PAID here proves the reset still fires for cash rather than merely
+        # no-op'ing on already-PENDING rows.
+        payment_status=PaymentStatus.PAID,
+    )
+
+    with (
+        patch("app.routers.bookings.send_booking_notification") as mock_notif,
+        patch("app.routers.bookings.process_cash_payment") as mock_payment,
+    ):
+        mock_notif.delay = lambda **kwargs: None
+        response = await client.patch(
+            f"/api/v1/bookings/{booking.id}/complete",
+            headers=auth_headers(str(provider.id), "provider"),
+        )
+
+    assert response.status_code == 200
+    await db_session.refresh(booking)
+    assert booking.payment_status is PaymentStatus.PENDING
+    mock_payment.delay.assert_called_once_with(booking_id=str(booking.id))
+
+
 # ------------------------------------------------------------------
 # SVC-21: GET /bookings/{booking_id}
 # ------------------------------------------------------------------
