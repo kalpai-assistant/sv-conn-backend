@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.config import get_settings
+from app.exceptions import PaymentError
 from app.models.booking import BookingStatus, PaymentStatus
 from app.models.payment import Payment
 from app.services.payment_service import PaymentService
@@ -64,6 +65,28 @@ def _make_valid_signature(order_id: str, payment_id: str) -> str:
 
 def _sign_webhook(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _fake_razorpay_payment(
+    razorpay_payment_id: str,
+    amount_paise: int,
+    method: str = "upi",
+    status_: str = "captured",
+    currency: str = "INR",
+) -> dict:
+    """A minimal Razorpay-shape payment entity for verify_payment tests.
+
+    Fields verify_payment (SVC-174 G7 + SVC-179 G11) actually reads: status,
+    currency, amount, method. Everything else stripped so a bad key in the
+    production code fails fast in the test rather than being papered over.
+    """
+    return {
+        "id": razorpay_payment_id,
+        "status": status_,
+        "currency": currency,
+        "amount": amount_paise,
+        "method": method,
+    }
 
 
 # ------------------------------------------------------------------
@@ -257,16 +280,20 @@ async def test_verify_payment_replayed_signature_creates_only_one_ledger_row(db_
     sig = _make_valid_signature("order_replay_test", "pay_replay_test")
     svc = PaymentService(db_session)
 
-    first = await svc.verify_payment(
-        razorpay_order_id="order_replay_test",
-        razorpay_payment_id="pay_replay_test",
-        razorpay_signature=sig,
-    )
-    second = await svc.verify_payment(
-        razorpay_order_id="order_replay_test",
-        razorpay_payment_id="pay_replay_test",
-        razorpay_signature=sig,
-    )
+    # SVC-174 (G7) fetches the payment entity for amount/currency/status checks;
+    # supply a matching-amount entity so the verify path proceeds normally.
+    entity = _fake_razorpay_payment("pay_replay_test", amount_paise=10000)
+    with patch("app.services.payment_service.razorpay_client.payment.fetch", return_value=entity):
+        first = await svc.verify_payment(
+            razorpay_order_id="order_replay_test",
+            razorpay_payment_id="pay_replay_test",
+            razorpay_signature=sig,
+        )
+        second = await svc.verify_payment(
+            razorpay_order_id="order_replay_test",
+            razorpay_payment_id="pay_replay_test",
+            razorpay_signature=sig,
+        )
 
     # Same row returned twice — the second call short-circuits on the existing lookup.
     assert first.id == second.id
@@ -323,11 +350,13 @@ async def test_verify_payment_leaves_failed_rows_alone(db_session):
     await db_session.flush()
 
     sig = _make_valid_signature("order_after_failure", "pay_finally_ok")
-    payment = await PaymentService(db_session).verify_payment(
-        razorpay_order_id="order_after_failure",
-        razorpay_payment_id="pay_finally_ok",
-        razorpay_signature=sig,
-    )
+    entity = _fake_razorpay_payment("pay_finally_ok", amount_paise=10000)
+    with patch("app.services.payment_service.razorpay_client.payment.fetch", return_value=entity):
+        payment = await PaymentService(db_session).verify_payment(
+            razorpay_order_id="order_after_failure",
+            razorpay_payment_id="pay_finally_ok",
+            razorpay_signature=sig,
+        )
 
     assert payment.status == PaymentRecordStatus.CAPTURED
     # Three rows total: two FAILED + one CAPTURED.
@@ -337,6 +366,163 @@ async def test_verify_payment_leaves_failed_rows_alone(db_session):
         )
     ).scalar_one()
     assert count == 3
+
+
+# ------------------------------------------------------------------
+# SVC-174 (G7) + SVC-179 (G11): verify_payment fetches the entity, checks it, resolves method
+# ------------------------------------------------------------------
+
+
+async def _booking_for_verify(db_session, order_id: str):
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    return (
+        consumer,
+        provider,
+        await _create_booking_with_deps(
+            db_session,
+            consumer,
+            provider,
+            status=BookingStatus.COMPLETED,
+            razorpay_order_id=order_id,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_order_sets_partial_payment_zero(db_session):
+    """SVC-174 (G7): create_order must set partial_payment=0 so Razorpay refuses
+    a short payment for this order — closes the door on the mismatch verify_payment
+    is (now) primed to catch."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session, consumer, provider, status=BookingStatus.COMPLETED
+    )
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        mock_rzp.order.create.return_value = {"id": "order_no_partial"}
+        await PaymentService(db_session).create_order(booking.id)
+
+    _, call_kwargs = mock_rzp.order.create.call_args
+    assert call_kwargs["data"]["partial_payment"] == 0
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_refuses_short_amount(db_session):
+    """SVC-174 (G7): a partial payment (amount < what the booking expects) is refused."""
+    _, _, booking = await _booking_for_verify(db_session, "order_short")
+    sig = _make_valid_signature("order_short", "pay_short")
+    # Booking is 100.00 rupees → 10000 paise. Razorpay reports 5000. Refuse.
+    entity = _fake_razorpay_payment("pay_short", amount_paise=5000)
+    svc = PaymentService(db_session)
+
+    with patch("app.services.payment_service.razorpay_client.payment.fetch", return_value=entity):
+        with pytest.raises(PaymentError, match="amount=5000"):
+            await svc.verify_payment(
+                razorpay_order_id="order_short",
+                razorpay_payment_id="pay_short",
+                razorpay_signature=sig,
+            )
+
+    # No ledger row was written.
+    count = (
+        await db_session.execute(
+            select(func.count()).select_from(Payment).where(Payment.booking_id == booking.id)
+        )
+    ).scalar_one()
+    assert count == 0
+    # And the booking is not flipped to PAID.
+    await db_session.refresh(booking)
+    assert booking.payment_status == PaymentStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_refuses_wrong_currency(db_session):
+    """SVC-174 (G7): a USD-currency payment is refused even if signed correctly."""
+    _, _, _ = await _booking_for_verify(db_session, "order_usd")
+    sig = _make_valid_signature("order_usd", "pay_usd")
+    entity = _fake_razorpay_payment("pay_usd", amount_paise=10000, currency="USD")
+
+    with patch("app.services.payment_service.razorpay_client.payment.fetch", return_value=entity):
+        with pytest.raises(PaymentError, match="currency='USD'"):
+            await PaymentService(db_session).verify_payment(
+                razorpay_order_id="order_usd",
+                razorpay_payment_id="pay_usd",
+                razorpay_signature=sig,
+            )
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_refuses_authorized_but_not_captured(db_session):
+    """SVC-174 (G7): a payment stuck in 'authorized' has not moved the money.
+    The signature alone would have flipped the booking to PAID."""
+    _, _, _ = await _booking_for_verify(db_session, "order_auth")
+    sig = _make_valid_signature("order_auth", "pay_auth")
+    entity = _fake_razorpay_payment("pay_auth", amount_paise=10000, status_="authorized")
+
+    with patch("app.services.payment_service.razorpay_client.payment.fetch", return_value=entity):
+        with pytest.raises(PaymentError, match="status='authorized'"):
+            await PaymentService(db_session).verify_payment(
+                razorpay_order_id="order_auth",
+                razorpay_payment_id="pay_auth",
+                razorpay_signature=sig,
+            )
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_records_card_method(db_session):
+    """SVC-179 (G11): a card payment is recorded as CARD, not the old hard-coded UPI."""
+    from app.models.payment import PaymentRecordMethod
+
+    _, _, _ = await _booking_for_verify(db_session, "order_card")
+    sig = _make_valid_signature("order_card", "pay_card")
+    entity = _fake_razorpay_payment("pay_card", amount_paise=10000, method="card")
+
+    with patch("app.services.payment_service.razorpay_client.payment.fetch", return_value=entity):
+        payment = await PaymentService(db_session).verify_payment(
+            razorpay_order_id="order_card",
+            razorpay_payment_id="pay_card",
+            razorpay_signature=sig,
+        )
+    assert payment.method == PaymentRecordMethod.CARD
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_records_netbanking_method(db_session):
+    """SVC-179 (G11): netbanking maps to NETBANKING."""
+    from app.models.payment import PaymentRecordMethod
+
+    _, _, _ = await _booking_for_verify(db_session, "order_nb")
+    sig = _make_valid_signature("order_nb", "pay_nb")
+    entity = _fake_razorpay_payment("pay_nb", amount_paise=10000, method="netbanking")
+
+    with patch("app.services.payment_service.razorpay_client.payment.fetch", return_value=entity):
+        payment = await PaymentService(db_session).verify_payment(
+            razorpay_order_id="order_nb",
+            razorpay_payment_id="pay_nb",
+            razorpay_signature=sig,
+        )
+    assert payment.method == PaymentRecordMethod.NETBANKING
+
+
+@pytest.mark.asyncio
+async def test_verify_payment_unknown_method_falls_back_to_upi(db_session):
+    """Regression guard: an unrecognized Razorpay method (e.g. wallet, emi) is
+    recorded as UPI with a log warning — the row still writes."""
+    from app.models.payment import PaymentRecordMethod
+
+    _, _, _ = await _booking_for_verify(db_session, "order_wallet")
+    sig = _make_valid_signature("order_wallet", "pay_wallet")
+    entity = _fake_razorpay_payment("pay_wallet", amount_paise=10000, method="wallet")
+
+    with patch("app.services.payment_service.razorpay_client.payment.fetch", return_value=entity):
+        payment = await PaymentService(db_session).verify_payment(
+            razorpay_order_id="order_wallet",
+            razorpay_payment_id="pay_wallet",
+            razorpay_signature=sig,
+        )
+    assert payment.method == PaymentRecordMethod.UPI
 
 
 # ------------------------------------------------------------------
