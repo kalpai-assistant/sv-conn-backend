@@ -36,7 +36,8 @@ class PaymentStatus(str, enum.Enum):
 
 
 class SettlementStatus(str, enum.Enum):
-    """Provider-payout lifecycle. Reserved for future use — not read at runtime yet."""
+    """Provider-payout lifecycle. Driven by ``PayoutService`` — every read/write of
+    ``bookings.settlement_status`` goes through it."""
 
     PENDING = "pending"
     PROCESSING = "processing"
@@ -139,7 +140,9 @@ class Booking(Base):
     payment_status: Mapped[PaymentStatus] = mapped_column(
         Enum(PaymentStatus), default=PaymentStatus.PENDING
     )
-    # Provider-payout lifecycle. Reserved for future use — not read at runtime yet.
+    # Provider-payout lifecycle. Driven by ``PayoutService`` — see the enum's
+    # docstring. ``_owed_filter`` gates on ``PENDING`` so a booking already in
+    # PROCESSING / COMPLETED / FAILED / REVERSED never re-enters the payout batch.
     settlement_status: Mapped[SettlementStatus] = mapped_column(
         Enum(SettlementStatus), default=SettlementStatus.PENDING, server_default="PENDING"
     )
