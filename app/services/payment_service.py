@@ -2,6 +2,7 @@
 Payment service: Razorpay order creation, signature verification, and webhook handling.
 """
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -77,6 +78,11 @@ class PaymentService:
             "amount": amount_paise,
             "currency": "INR",
             "receipt": str(booking.id),
+            # SVC-174 (G7): partial_payment=0 shuts the door on Razorpay accepting
+            # a short payment for this order. Coupled with the amount check in
+            # verify_payment, this makes "amount mismatch" impossible-then-caught
+            # rather than caught-only.
+            "partial_payment": 0,
         }
 
         order = razorpay_client.order.create(data=order_data)
@@ -110,6 +116,17 @@ class PaymentService:
         flip *someone else's* booking to PAID by relaying the victim's order
         id + a valid signature (from a completed Razorpay session they saw).
 
+        SVC-174 (G7): the signature only proves the (order, payment) pair was
+        signed by our key. It says nothing about the amount, the currency, or
+        whether the payment was actually captured — a partial payment, a
+        currency mismatch, or an authorized-but-not-captured payment would all
+        have flipped the booking to PAID. Now: fetch the payment entity from
+        Razorpay after signature verification and assert
+        ``status == "captured"``, ``currency == "INR"``, and
+        ``amount == to_paise(booking.service_amount - booking.discount_amount)``
+        (matches SVC-39 G22 charging). Fails 402 on any mismatch — the row is
+        not written.
+
         SVC-175 (G6): idempotent on ``razorpay_payment_id``. The signature is a
         pure function of ``order_id|payment_id`` and stays valid forever, so
         every re-submission of the same request used to write another CAPTURED
@@ -117,6 +134,10 @@ class PaymentService:
         on ``razorpay_payment_id`` (migration ``5b293fc63525``) is the tie-breaker
         against a concurrent double-call — the second caller's insert fails on
         the constraint and we re-query the winner.
+
+        SVC-179 (G11): reads ``method`` from the fetched entity instead of the
+        hard-coded UPI. Card / netbanking / UPI now get their real values on
+        the ledger row.
         """
         expected = hmac.new(
             key=settings.RAZORPAY_KEY_SECRET.encode(),
@@ -141,6 +162,12 @@ class PaymentService:
                 await self.db.flush()
             return existing
 
+        # SVC-174 (G7): confirm the payment entity BEFORE we write the ledger row.
+        # razorpay_client is sync; wrap in a thread so we don't block the loop.
+        entity = await asyncio.to_thread(razorpay_client.payment.fetch, razorpay_payment_id)
+        expected_paise = to_paise(booking.service_amount - booking.discount_amount)
+        self._assert_payment_matches(entity, expected_paise)
+
         payment = Payment(
             booking_id=booking.id,
             razorpay_payment_id=razorpay_payment_id,
@@ -149,7 +176,8 @@ class PaymentService:
             platform_fee=booking.platform_commission,
             provider_settlement=booking.provider_payout,
             status=PaymentRecordStatus.CAPTURED,
-            method=PaymentRecordMethod.UPI,  # Razorpay resolves method via webhook
+            # SVC-179 (G11): real method from the fetched entity.
+            method=self._resolve_method(entity.get("method")),
         )
         self.db.add(payment)
 
@@ -212,7 +240,8 @@ class PaymentService:
                         platform_fee=booking.platform_commission,
                         provider_settlement=booking.provider_payout,
                         status=PaymentRecordStatus.FAILED,
-                        method=PaymentRecordMethod.UPI,
+                        # SVC-179 (G11): real method from the webhook payload.
+                        method=self._resolve_method(payment_entity.get("method")),
                     )
                     self.db.add(payment)
                     await self.db.flush()
@@ -319,3 +348,54 @@ class PaymentService:
         if not booking:
             raise PaymentError(f"No booking found for order {order_id}")
         return booking
+
+    @staticmethod
+    def _assert_payment_matches(entity: dict, expected_paise: int) -> None:
+        """SVC-174 (G7): raise PaymentError if the fetched entity doesn't match what
+        the booking expects. The signature can't detect any of these on its own.
+
+        Every mismatch is a 402 (``PaymentError``) with the specific reason in the
+        message — deliberately not one merged "invalid payment" error so the admin
+        looking at logs knows whether Razorpay served a different currency, a
+        smaller amount, or an authorized-but-not-captured payment.
+        """
+        entity_status = entity.get("status")
+        if entity_status != "captured":
+            raise PaymentError(
+                f"Payment {entity.get('id')!r} status={entity_status!r}, expected 'captured'"
+            )
+        entity_currency = entity.get("currency")
+        if entity_currency != "INR":
+            raise PaymentError(
+                f"Payment {entity.get('id')!r} currency={entity_currency!r}, expected 'INR'"
+            )
+        entity_amount = entity.get("amount")
+        if entity_amount != expected_paise:
+            raise PaymentError(
+                f"Payment {entity.get('id')!r} amount={entity_amount} paise, "
+                f"expected {expected_paise} paise (partial payment or amount tampering)"
+            )
+
+    @staticmethod
+    def _resolve_method(razorpay_method: str | None) -> PaymentRecordMethod:
+        """SVC-179 (G11): map Razorpay's method string to our enum.
+
+        Razorpay uses lowercase ``upi`` / ``card`` / ``netbanking`` / ``wallet`` /
+        ``emi`` / etc. Our enum covers UPI / CARD / NETBANKING / CASH — the rest
+        collapse to UPI as a beta-safe fallback so the ledger row still writes;
+        the mislabel is a reporting problem, not a money problem, and adding an
+        ``OTHER`` enum member is a follow-up.
+        """
+        mapping = {
+            "upi": PaymentRecordMethod.UPI,
+            "card": PaymentRecordMethod.CARD,
+            "netbanking": PaymentRecordMethod.NETBANKING,
+        }
+        resolved = mapping.get((razorpay_method or "").lower())
+        if resolved is not None:
+            return resolved
+        logger.warning(
+            "Razorpay method=%r not in {upi, card, netbanking} — recording as UPI",
+            razorpay_method,
+        )
+        return PaymentRecordMethod.UPI
