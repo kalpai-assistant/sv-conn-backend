@@ -190,6 +190,19 @@ class PaymentService:
         """
         Handle Razorpay webhook events (idempotent).
         Primary events: payment.captured, payment.failed, payment.dispute.*.
+
+        SVC-176 (G8): the ``payment.captured`` branch now writes/upserts the
+        same ledger row ``verify_payment`` does. Before this, a consumer who
+        killed the app after paying had their booking flipped to PAID with
+        **no ledger row at all** — no amount, no payment id, no method — and
+        a chargeback on such a payment could never be matched (the dispute
+        handler keys on ``razorpay_payment_id``).
+
+        Also SVC-176: unknown ``order_id`` on ``payment.captured`` used to
+        raise ``PaymentError`` (→ 402), which Razorpay reads as a delivery
+        failure and re-sends on its full retry schedule *forever*, even
+        though no retry can ever succeed. Matches the dispute handler's
+        policy — log and ack (200) — instead.
         """
         if event.startswith("payment.dispute."):
             await self._handle_dispute(event, payload)
@@ -198,34 +211,75 @@ class PaymentService:
         if event == "payment.captured":
             payment_entity = payload.get("payment", {}).get("entity", {})
             order_id = payment_entity.get("order_id")
-            if order_id:
-                booking = await self._find_booking_by_order(order_id)
-                if booking and booking.payment_status != PaymentStatus.PAID:
-                    booking.payment_status = PaymentStatus.PAID
-                    await self.db.flush()
+            payment_id = payment_entity.get("id")
+            if not order_id:
+                logger.warning("payment.captured webhook missing order_id in payload")
+                return
+
+            booking = await self._find_booking_by_order_or_none(order_id)
+            if booking is None:
+                # SVC-176: an unknown order_id can never be resolved by retry.
+                # Ack and log (matches the dispute handler's policy) so
+                # Razorpay stops the retry storm.
+                logger.warning(
+                    "payment.captured for unknown order_id=%s payment_id=%s — acking",
+                    order_id,
+                    payment_id,
+                )
+                return
+
+            # SVC-176: upsert a CAPTURED ledger row so the ledger survives
+            # even when verify_payment never ran (consumer killed the app
+            # after paying). Same idempotency shape as verify_payment.
+            if payment_id:
+                await self._upsert_captured_ledger_row(booking, payment_entity)
+
+            if booking.payment_status != PaymentStatus.PAID:
+                booking.payment_status = PaymentStatus.PAID
+                await self.db.flush()
 
         elif event == "payment.failed":
             payment_entity = payload.get("payment", {}).get("entity", {})
             order_id = payment_entity.get("order_id")
-            if order_id:
-                try:
-                    booking = await self._find_booking_by_order(order_id)
-                    # Create a failed payment record for audit trail
-                    payment = Payment(
-                        booking_id=booking.id,
-                        razorpay_order_id=order_id,
-                        razorpay_payment_id=payment_entity.get("id", ""),
-                        amount=booking.service_amount,
-                        platform_fee=booking.platform_commission,
-                        provider_settlement=booking.provider_payout,
-                        status=PaymentRecordStatus.FAILED,
-                        # SVC-179 (G11): real method from the webhook payload.
-                        method=self._resolve_method(payment_entity.get("method")),
-                    )
-                    self.db.add(payment)
-                    await self.db.flush()
-                except Exception:
-                    pass  # Booking may not exist; log silently
+            payment_id = payment_entity.get("id")
+            if not order_id:
+                logger.warning("payment.failed webhook missing order_id in payload")
+                return
+
+            booking = await self._find_booking_by_order_or_none(order_id)
+            if booking is None:
+                logger.warning(
+                    "payment.failed for unknown order_id=%s payment_id=%s — acking",
+                    order_id,
+                    payment_id,
+                )
+                return
+
+            try:
+                # Create a failed payment record for audit trail.
+                payment = Payment(
+                    booking_id=booking.id,
+                    razorpay_order_id=order_id,
+                    razorpay_payment_id=payment_id or None,
+                    amount=booking.service_amount,
+                    platform_fee=booking.platform_commission,
+                    provider_settlement=booking.provider_payout,
+                    status=PaymentRecordStatus.FAILED,
+                    # SVC-179 (G11): real method from the webhook payload.
+                    method=self._resolve_method(payment_entity.get("method")),
+                )
+                self.db.add(payment)
+                await self.db.flush()
+            except Exception:
+                # SVC-176: was silently swallowed. Log so a broken FAILED-audit
+                # write is diagnosable — the failure is genuinely non-fatal
+                # (the payout path doesn't read from `payments`), but we
+                # shouldn't lose the signal.
+                logger.exception(
+                    "payment.failed ledger write raised for order_id=%s payment_id=%s",
+                    order_id,
+                    payment_id,
+                )
 
     # ------------------------------------------------------------------
     # Disputes / chargebacks
@@ -327,6 +381,53 @@ class PaymentService:
         if not booking:
             raise PaymentError(f"No booking found for order {order_id}")
         return booking
+
+    async def _find_booking_by_order_or_none(self, order_id: str) -> Booking | None:
+        """SVC-176 (G8): non-raising sibling of ``_find_booking_by_order``.
+
+        The webhook handlers want to log-and-ack an unknown order rather than
+        raise — otherwise Razorpay retries a delivery that can never succeed.
+        `verify_payment` still uses the raising version (a stranger's
+        payment_id there is a real 4xx to surface to the caller).
+        """
+        result = await self.db.execute(select(Booking).where(Booking.razorpay_order_id == order_id))
+        return result.scalar_one_or_none()
+
+    async def _upsert_captured_ledger_row(self, booking: Booking, payment_entity: dict) -> None:
+        """SVC-176 (G8): write/upsert a CAPTURED ledger row for a webhook-driven
+        successful payment. Same idempotency shape as `verify_payment`.
+
+        Called only from the `payment.captured` webhook branch — the verify
+        path already writes the row, and calling this on top would be a
+        second lookup-and-noop. Bytes-identical to the verify write for the
+        fields we know here; the entity's `method` beats a hard-coded UPI
+        (SVC-179 G11).
+        """
+        payment_id = payment_entity.get("id")
+        if not payment_id:
+            return
+        existing = await self._find_payment_by_razorpay_id(payment_id)
+        if existing is not None:
+            return
+
+        row = Payment(
+            booking_id=booking.id,
+            razorpay_payment_id=payment_id,
+            razorpay_order_id=payment_entity.get("order_id"),
+            amount=booking.service_amount,
+            platform_fee=booking.platform_commission,
+            provider_settlement=booking.provider_payout,
+            status=PaymentRecordStatus.CAPTURED,
+            method=self._resolve_method(payment_entity.get("method")),
+        )
+        self.db.add(row)
+        try:
+            await self.db.flush()
+        except IntegrityError:
+            # Concurrent webhook redelivery raced us. Rollback and re-query —
+            # same shape as verify_payment. The booking-flip that follows in
+            # handle_webhook is idempotent, so it re-applies safely.
+            await self.db.rollback()
 
     @staticmethod
     def _assert_payment_matches(entity: dict, expected_paise: int) -> None:
