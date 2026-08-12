@@ -187,4 +187,13 @@ class Booking(Base):
         "BookingStatusLog", back_populates="booking"
     )
     review: Mapped["Review"] = relationship("Review", back_populates="booking", uselist=False)
-    payment: Mapped["Payment"] = relationship("Payment", back_populates="booking", uselist=False)
+    # SVC-186 (G29): plural, not scalar. `44a9651a7ef8_drop_payment_unique_constraint`
+    # deliberately allowed multiple payment rows per booking (failed attempts +
+    # the captured one), and SVC-175 (G6) further pinned that shape at the DB
+    # level. A scalar relationship (`uselist=False`) would raise
+    # `MultipleResultsFound` on exactly the bookings that had a retry — the
+    # ones most likely to be under investigation for the refund flow.
+    # Consumers pick the CAPTURED row themselves: for the common case,
+    # `PaymentService._find_payment_by_razorpay_id` already keys on the
+    # Razorpay payment id, which is unique per SVC-175's partial index.
+    payments: Mapped[list["Payment"]] = relationship("Payment", back_populates="booking")
