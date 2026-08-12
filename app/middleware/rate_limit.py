@@ -6,7 +6,25 @@ from fastapi import HTTPException, Request, status
 from redis.asyncio import Redis
 from starlette.middleware.base import BaseHTTPMiddleware
 
-_SKIP_PATHS = frozenset({"/health", "/healthz", "/docs", "/openapi.json", "/redoc"})
+# SVC-185 (G12): webhook paths are exempt too. Razorpay and RazorpayX deliver
+# from a small, fixed set of source IPs all hitting the same path, so every
+# webhook shares one counter — the limiter is a per-(IP, path) bucket. If it
+# ever tripped, the endpoint would 429; Razorpay reads a non-2xx as a delivery
+# failure and re-sends on its full retry schedule. The payout leg partly
+# survives that via nightly reconciliation, but the collect leg does not — a
+# dropped ``payment.captured`` is lost permanently. Signature verification
+# already gates the endpoints (SVC-39 G3), so the per-IP quota adds nothing.
+_SKIP_PATHS = frozenset(
+    {
+        "/health",
+        "/healthz",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+        "/api/v1/payments/webhook",
+        "/api/v1/payments/payout-webhook",
+    }
+)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

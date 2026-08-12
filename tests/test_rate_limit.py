@@ -210,6 +210,28 @@ async def test_endpoint_returns_429_with_retry_after_header():
     assert handler_calls == 3
 
 
+# ---------------------------------------------------------------------------
+# SVC-185 (G12) — webhook paths are exempt from the per-IP middleware limiter
+# ---------------------------------------------------------------------------
+
+
+def test_webhook_paths_are_exempt_from_per_ip_middleware_limiter():
+    """SVC-185 (G12): Razorpay webhooks must not share a per-IP bucket with
+    browsing traffic. If either 429s, Razorpay reads a non-2xx as a delivery
+    failure and re-sends on its full retry schedule — the collect leg has no
+    reconciliation backstop, so a dropped ``payment.captured`` is lost.
+
+    Structural pin: the two webhook paths appear in the middleware's SKIP
+    set. Semantic verification (hammer the endpoint 700+ times, expect no
+    429) is what the middleware guarantees follows from this — pinning the
+    membership is enough to catch the regression cheaply.
+    """
+    from app.middleware.rate_limit import _SKIP_PATHS
+
+    assert "/api/v1/payments/webhook" in _SKIP_PATHS
+    assert "/api/v1/payments/payout-webhook" in _SKIP_PATHS
+
+
 @pytest.mark.asyncio
 async def test_within_limit_response_carries_rate_headers():
     """SVC-159 core: a 200 response includes X-RateLimit-* so clients can
