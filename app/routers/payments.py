@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -21,6 +22,8 @@ from app.services.payment_service import PaymentService
 from app.services.payout_service import PayoutService
 from app.utils.idempotency import IdempotencyStore, hash_body
 from app.utils.rate_limiter import rate_limit
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 settings = get_settings()
@@ -117,11 +120,34 @@ async def _verify_and_parse(request: Request, secret: str) -> RazorpayWebhookPay
     Razorpay sends X-Razorpay-Signature = HMAC(raw_body, webhook_secret). The
     payments and payouts (RazorpayX) products each have their own secret, so the
     caller passes the secret for the product that owns the endpoint.
+
+    SVC-39 G3: refuses when the secret is empty in any non-dev environment. The
+    endpoint is unauthenticated by design (Razorpay initiates), so an unset
+    secret used to leave the route open to forged webhooks — anyone could flip
+    a booking to PAID, mark settlements COMPLETED, or return a payout to
+    PENDING. Same discipline `AuthService._is_e2e_test_phone` applies to the
+    E2E OTP bypass. Dev keeps the old behaviour (log-warn and accept) so a
+    local `.env` without secrets doesn't need every test to fake a signature.
     """
     raw_body = await request.body()
     sig_header = request.headers.get("X-Razorpay-Signature", "")
 
-    if secret:
+    if not secret:
+        if settings.ENVIRONMENT != "dev":
+            logger.error(
+                "Webhook secret not configured for %s in environment=%s — refusing",
+                request.url.path,
+                settings.ENVIRONMENT,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Webhook secret not configured",
+            )
+        logger.warning(
+            "Webhook signature verification bypassed for %s (empty secret in dev)",
+            request.url.path,
+        )
+    else:
         expected = hmac.new(
             key=secret.encode(),
             msg=raw_body,
