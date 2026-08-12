@@ -86,7 +86,10 @@ class PayoutService:
         # between Python truthiness and SQL IS NOT NULL that this had to work around
         # no longer exists, because an enum column cannot hold "".
         payout_set = func.bool_or(ProviderProfile.payout_method.is_not(None))
-        total_rupees = func.sum(Booking.provider_payout)
+        # SVC-39 G23: include tip_amount — a tip is 100% provider and gets paid
+        # out with the base commission split. Both columns are Numeric post-G31,
+        # so the sum stays exact.
+        total_rupees = func.sum(Booking.provider_payout + Booking.tip_amount)
 
         rows = (
             await self.db.execute(
@@ -167,7 +170,8 @@ class PayoutService:
 
         # Decimal throughout: the columns are Numeric, so this sum is exact and
         # to_paise rounds half up instead of dropping a paisa (SVC-150).
-        total_rupees = sum((b.provider_payout for b in bookings), Decimal("0"))
+        # ``_owed_amount`` folds in tip_amount too (SVC-39 G23).
+        total_rupees = sum((self._owed_amount(b) for b in bookings), Decimal("0"))
         amount_paise = to_paise(total_rupees)
 
         # Key derived from the exact batch (sorted booking ids), so the same batch
@@ -295,7 +299,7 @@ class PayoutService:
             booking.settlement_status = SettlementStatus.PENDING
             booking.settlement_payout_id = None
 
-        amount_paise = to_paise(sum((b.provider_payout for b in stuck), Decimal("0")))
+        amount_paise = to_paise(sum((self._owed_amount(b) for b in stuck), Decimal("0")))
         self.db.add(
             PayoutAudit(
                 admin_user_id=admin_user_id,
@@ -719,9 +723,13 @@ class PayoutService:
 
     @staticmethod
     def _batch_amount_paise(payout: dict, bookings: list[Booking]) -> int:
-        """Payout amount in paise, falling back to the batch's own payout total."""
+        """Payout amount in paise, falling back to the batch's own owed total.
+
+        Uses ``_owed_amount`` so tips are included in the fallback estimate
+        (SVC-39 G23) — matches what ``create_provider_payout`` charges.
+        """
         return payout.get("amount") or to_paise(
-            sum((b.provider_payout for b in bookings), Decimal("0"))
+            sum((PayoutService._owed_amount(b) for b in bookings), Decimal("0"))
         )
 
     @staticmethod
@@ -888,6 +896,22 @@ class PayoutService:
             return None, account_number, ifsc
 
         raise PaymentError("Provider has no payout details on file")
+
+    @staticmethod
+    def _owed_amount(booking: Booking) -> Decimal:
+        """How much a settled booking is worth to its provider — the single
+        definition (SVC-39 G23).
+
+        Provider payout is the 80% commission split; ``tip_amount`` is 100%
+        provider (see ``Booking.tip_amount``). Both are ``Numeric`` post-G31,
+        so the sum is exact.
+
+        Shared across every payout-money site (create, requeue, reconcile,
+        admin list) so a change to what counts as "owed" doesn't require
+        edits in four places, and the amount the admin approves is the
+        amount that leaves the bank.
+        """
+        return booking.provider_payout + booking.tip_amount
 
     @staticmethod
     def _owed_filter() -> tuple:

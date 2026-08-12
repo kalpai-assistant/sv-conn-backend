@@ -2333,6 +2333,63 @@ async def test_create_provider_payout_refuses_cash_only_bookings(db_session):
         await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
 
 
+# ------------------------------------------------------------------
+# SVC-39 G23 — tips are paid out with the base commission split
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_payout_includes_tip_amount(db_session):
+    """SVC-39 G23: a tipped booking pays out `provider_payout + tip_amount`.
+
+    Before this fix, `provider_service.get_earnings` showed
+    `provider_payout + tip_amount` on the provider's earnings screen, but
+    `payout_service.create_provider_payout` summed only `provider_payout`.
+    Providers saw tips they would never be paid. This pins that the two
+    sides now agree.
+    """
+    from decimal import Decimal
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+
+    booking = await _booking_for(db_session, consumer, provider, provider_payout=80.0)
+    booking.tip_amount = Decimal("20.00")
+    await db_session.flush()
+
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
+        mock_payout.return_value = {"id": "pout_with_tip", "status": "processing"}
+        result = await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+    # ₹80 payout + ₹20 tip = ₹100 = 10000 paise.
+    assert result["amount"] == 10000
+    assert mock_payout.await_args.kwargs["amount_paise"] == 10000
+
+
+@pytest.mark.asyncio
+async def test_pending_settlements_total_includes_tip(db_session):
+    """The admin list surfaces the amount the payout will actually charge —
+    if the SQL and Python sums disagreed here the admin would approve one
+    number and a different one would leave the bank."""
+    from decimal import Decimal
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    await _provider_with_payout_vpa(db_session, provider)
+
+    booking = await _booking_for(db_session, consumer, provider, provider_payout=100.0)
+    booking.tip_amount = Decimal("15.50")
+    await db_session.flush()
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    (row,) = report["providers"]
+    # ₹100 + ₹15.50 = ₹115.50 = 11550 paise.
+    assert row["pending_payout_paise"] == 11550
+
+
 @pytest.mark.asyncio
 async def test_pending_settlements_orders_largest_debt_first(db_session):
     """The admin sees who is owed most at the top."""
