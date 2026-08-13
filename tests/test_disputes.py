@@ -11,8 +11,10 @@ import hashlib
 import hmac
 import json
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
+import sentry_sdk
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -307,6 +309,89 @@ async def test_dispute_webhook_rejects_invalid_signature(client, db_session):
 
     await db_session.refresh(payment)
     assert payment.disputed_at is None
+
+
+# ---------------------------------------------------------------------------
+# Sentry paging (SVC-187 / G15) — dispute.created + .lost page an admin
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispute_created_pages_via_sentry(db_session, monkeypatch):
+    """A chargeback fires a Sentry ERROR with tags for admin triage."""
+    await _booking_with_payment(db_session, "pay_page_created")
+    capture = MagicMock()
+    monkeypatch.setattr(sentry_sdk, "capture_message", capture)
+
+    await PaymentService(db_session).handle_webhook(
+        "payment.dispute.created", _dispute_payload("pay_page_created", "disp_page_1")
+    )
+
+    capture.assert_called_once()
+    _, kwargs = capture.call_args
+    # The message and level are the two things an alert rule reads.
+    assert kwargs["level"] == "error"
+    args, _ = capture.call_args
+    assert "payment.dispute.created" in args[0]
+    assert "pay_page_created" in args[0]
+    assert "disp_page_1" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_dispute_lost_pages_via_sentry(db_session, monkeypatch):
+    """A lost dispute (money gone) pages the same way as .created — clawback needed."""
+    await _booking_with_payment(db_session, "pay_page_lost")
+    # Prime with .created so disputed_at is stamped; then clear the mock and fire .lost.
+    await PaymentService(db_session).handle_webhook(
+        "payment.dispute.created", _dispute_payload("pay_page_lost", "disp_page_2")
+    )
+    capture = MagicMock()
+    monkeypatch.setattr(sentry_sdk, "capture_message", capture)
+
+    await PaymentService(db_session).handle_webhook(
+        "payment.dispute.lost", _dispute_payload("pay_page_lost", "disp_page_2")
+    )
+
+    capture.assert_called_once()
+    _, kwargs = capture.call_args
+    assert kwargs["level"] == "error"
+    args, _ = capture.call_args
+    assert "payment.dispute.lost" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_dispute_won_does_not_page(db_session, monkeypatch):
+    """A won dispute is informational — no money at risk, no page."""
+    await _booking_with_payment(db_session, "pay_page_won")
+    await PaymentService(db_session).handle_webhook(
+        "payment.dispute.created", _dispute_payload("pay_page_won", "disp_page_3")
+    )
+    capture = MagicMock()
+    monkeypatch.setattr(sentry_sdk, "capture_message", capture)
+
+    await PaymentService(db_session).handle_webhook(
+        "payment.dispute.won", _dispute_payload("pay_page_won", "disp_page_3")
+    )
+
+    capture.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unknown_payment_does_not_page(db_session, monkeypatch):
+    """A dispute for a payment we don't recognise logs and acks — but no Sentry page.
+
+    We don't want to spam Sentry on a Razorpay replay pointing at a payment id we
+    never wrote (config drift between environments, or a webhook meant for a
+    different account). The `logger.error` already surfaces it.
+    """
+    capture = MagicMock()
+    monkeypatch.setattr(sentry_sdk, "capture_message", capture)
+
+    await PaymentService(db_session).handle_webhook(
+        "payment.dispute.created", _dispute_payload("pay_never_seen_2")
+    )
+
+    capture.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
