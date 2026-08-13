@@ -12,7 +12,7 @@ import logging
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import String, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
@@ -25,7 +25,7 @@ from app.models.booking import (
     SettlementStatus,
 )
 from app.models.payout_audit import PayoutAudit
-from app.models.provider_profile import PayoutMethod, ProviderProfile
+from app.models.provider_profile import KYCStatus, PayoutMethod, ProviderProfile
 from app.models.user import User
 from app.utils.encryption import decrypt
 from app.utils.money import to_paise
@@ -86,6 +86,18 @@ class PayoutService:
         # between Python truthiness and SQL IS NOT NULL that this had to work around
         # no longer exists, because an enum column cannot hold "".
         payout_set = func.bool_or(ProviderProfile.payout_method.is_not(None))
+        # SVC-189 (G16): surface KYC on the admin list so the person authorising
+        # money can see it inline. Aggregate over the (at most one) profile
+        # row via max_agg — `bool_or(payout_set)` above collapses the same
+        # way. A provider with no profile row at all (LEFT join miss) gets
+        # NULL, which coalesces below to the PENDING label.
+        #
+        # Cast → lower(): Postgres stores the enum by its Python member name
+        # (`VERIFIED`), while the Python-side `KYCStatus.VERIFIED.value` is
+        # `"verified"`. The admin UI keys off the enum value string, so
+        # lowercasing here keeps client and server aligned without teaching
+        # the frontend two spellings.
+        kyc_status_col = func.max(func.lower(func.cast(ProviderProfile.kyc_status, String)))
         # SVC-39 G23: include tip_amount — a tip is 100% provider and gets paid
         # out with the base commission split. Both columns are Numeric post-G31,
         # so the sum stays exact.
@@ -101,6 +113,7 @@ class PayoutService:
                     func.count(Booking.id),
                     total_rupees,
                     payout_set,
+                    kyc_status_col,
                     func.count().over().label("total_providers"),
                 )
                 .select_from(Booking)
@@ -128,8 +141,12 @@ class PayoutService:
                 # in the confirmation dialog matches what is actually sent.
                 "pending_payout_paise": to_paise(rupees),
                 "payout_set": bool(has_payout),
+                # A provider with no profile row (LEFT join miss) shows up as
+                # PENDING — matches the KYCStatus default and reads as "not
+                # verified yet" on the admin badge.
+                "kyc_status": kyc_status or KYCStatus.PENDING.value,
             }
-            for provider_id, name, phone, is_active, booking_count, rupees, has_payout, _ in rows
+            for provider_id, name, phone, is_active, booking_count, rupees, has_payout, kyc_status, _ in rows  # noqa: E501
         ]
 
         # The window count is identical on every row; no rows means nothing is owed.
@@ -195,6 +212,21 @@ class PayoutService:
         leaves a locatable record for reconciliation.
         """
         profile = await self._get_provider_profile(provider_id)
+
+        # SVC-189 (G16): re-check KYC at payout time even though the write
+        # path is gated. Two independent gates because the two events happen
+        # in different sessions (a provider whose KYC is REJECTED after their
+        # payout details were saved would otherwise still be payable), and
+        # because the payout call is the last chance to catch a pre-existing
+        # profile that predates the write-side gate. Distinct error from the
+        # "no payout details" 402 so the admin knows exactly which fix
+        # unblocks the payout.
+        if profile.kyc_status is not KYCStatus.VERIFIED:
+            raise PaymentError(
+                "Provider KYC is not verified — cannot pay out. "
+                f"Current KYC status: {profile.kyc_status.value}."
+            )
+
         vpa, account_number, ifsc = self._decrypt_payout_details(profile)
 
         bookings = await self._pending_settlements(provider_id)

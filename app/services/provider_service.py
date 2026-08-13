@@ -113,6 +113,18 @@ class ProviderService:
         # Removal is an explicit action, never a side effect of saving.
         # The schema rejects sending both methods at once, so at most one of these
         # branches makes itself active — no arbitrary tie-break.
+        #
+        # SVC-189 (G16): payout destinations can only be added once KYC is
+        # verified. Before this, a provider could register, skip KYC entirely,
+        # and land money in `PENDING` settlements that an admin might then pay
+        # out without knowing KYC never happened. Non-payout fields on this
+        # request (KYC docs, service area, languages) stay writable — the gate
+        # is scoped to *payout* fields only.
+        if payout_vpa is not None or payout_account_number is not None or payout_ifsc is not None:
+            self._require_kyc_verified(
+                profile,
+                "Payout details can only be added once KYC is verified.",
+            )
         if payout_vpa is not None:
             profile.payout_vpa_encrypted = encrypt(payout_vpa)
             profile.payout_method = PayoutMethod.UPI
@@ -173,6 +185,22 @@ class ProviderService:
         return profile
 
     @staticmethod
+    def _require_kyc_verified(profile: ProviderProfile, reason: str) -> None:
+        """Refuse a payout-related mutation unless KYC is verified (SVC-189 / G16).
+
+        Kept as a shared helper so every path that writes or activates payout
+        details enforces the same rule (update_profile's payout branch,
+        set_active_payout_method, and the payout side in PayoutService). One
+        rule, one message shape — a caller cannot slip through by using a
+        different entry point.
+        """
+        if profile.kyc_status is not KYCStatus.VERIFIED:
+            raise AppException(
+                f"{reason} Current KYC status: {profile.kyc_status.value}.",
+                status_code=400,
+            )
+
+    @staticmethod
     def _mask_account(account_number: str) -> str:
         """Bank account as shown back to its owner: last 4 visible, rest masked.
 
@@ -222,6 +250,15 @@ class ProviderService:
                 if method is PayoutMethod.UPI
                 else "No bank account on file to switch to"
             )
+
+        # SVC-189 (G16): activating a payout destination is the last step
+        # before money can flow — subject to the same KYC gate as writing new
+        # details. Removing the active method is deliberately NOT gated (see
+        # remove_payout_method): a provider can always withdraw their PII.
+        self._require_kyc_verified(
+            profile,
+            "Payout method can only be activated once KYC is verified.",
+        )
 
         profile.payout_method = method
         # The display label follows the active method, so it must be recomputed from

@@ -21,6 +21,13 @@ class PendingSettlementProvider(BaseModel):
     # A deactivated provider who earned money is still owed it, so they stay in the
     # list — flagged rather than hidden, which would conceal a real debt.
     is_active: bool
+    # KYCStatus value (pending / submitted / verified / rejected). Surfaces the
+    # SVC-189 (G16) gate on the admin payouts screen: the same admin who
+    # authorises real money needs to see whether the recipient passed KYC
+    # without opening the provider profile in another tab. The admin UI both
+    # renders this as a badge and disables the Pay out button unless
+    # `kyc_status == "verified"` — mirroring the existing `payout_set` pattern.
+    kyc_status: str
 
 
 class PendingSettlementsResponse(BaseModel):
