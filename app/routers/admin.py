@@ -5,7 +5,7 @@ All endpoints require the "admin" role.
 
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -251,29 +251,48 @@ async def list_pending_settlements(db: AsyncSession = Depends(get_db)):
     return await PayoutService(db).list_pending_settlements()
 
 
-@router.post("/providers/{user_id}/payout", status_code=status.HTTP_200_OK)
+@router.post("/providers/{user_id}/payout", status_code=status.HTTP_202_ACCEPTED)
 async def pay_out_provider(
     user_id: UUID,
-    background_tasks: BackgroundTasks,
     admin: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Settle a provider's completed-but-unsettled bookings via a RazorpayX payout.
+    """Enqueue a RazorpayX payout for a provider's completed-but-unsettled bookings.
 
-    The triggering admin is injected (not just role-checked) so the payout can be
-    written to the audit trail. The transaction is committed by ``get_db`` on a
-    clean response, so the payout's booking writes and the commit are owned in one
-    place rather than committed here.
+    Returns 202 with a summary of what will be paid and the Celery task id. The
+    payout itself runs asynchronously (SVC-188 / G30): before this, the endpoint
+    awaited a 30-90s RazorpayX HTTP call while holding a DB connection and a
+    ``SELECT … FOR UPDATE`` lock on the provider's pending bookings, which
+    puts pool pressure on the same workers serving consumer traffic during a
+    RazorpayX slowdown.
 
-    The provider's push is dispatched as a background task, which FastAPI runs
-    *after* that dependency commits — and skips entirely if the commit raises. The
-    money has already left RazorpayX by then, so announcing a payout the database
-    failed to record would be worse than a missing push.
+    The upfront reads compute the batch total + booking count without a row
+    lock, so the admin gets an accurate estimate immediately. The task then
+    runs the full flow (record audit → lock rows → RazorpayX → resolve audit
+    → update bookings → drain pushes) — every guarantee from the synchronous
+    path is preserved because the task calls the same
+    ``PayoutService.create_provider_payout``.
+
+    Every attempt is still recorded in ``payout_audits`` before the RazorpayX
+    call fires; the admin payouts screen surfaces the outcome from there, and
+    ``reconcile_payouts`` (nightly) resolves any breadcrumb whose task
+    process died mid-flight.
     """
+    from app.tasks.payment_tasks import execute_provider_payout
+
     service = PayoutService(db)
-    result = await service.create_provider_payout(user_id, admin.id)
-    background_tasks.add_task(service.dispatch_pending_notifications)
-    return result
+    # Cheap read-only estimate — no FOR UPDATE, so no lock is held across the
+    # enqueue. The task's own SELECT is the authoritative one; this is only for
+    # the 202 response body so the UI can show "queued ₹X for N bookings"
+    # rather than "queued ...something".
+    estimate = await service.estimate_pending_payout(user_id)
+    task = execute_provider_payout.delay(str(user_id), str(admin.id))
+    return {
+        "status": "queued",
+        "task_id": task.id,
+        "amount_paise": estimate["amount_paise"],
+        "booking_count": estimate["booking_count"],
+    }
 
 
 @router.post("/providers/{user_id}/payout/requeue-failed", status_code=status.HTTP_200_OK)

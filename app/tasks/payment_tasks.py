@@ -43,6 +43,58 @@ def process_cash_payment(self, booking_id: str):
         self.retry(exc=exc)
 
 
+@celery_app.task(
+    bind=True,
+    max_retries=0,
+    name="app.tasks.payment_tasks.execute_provider_payout",
+)
+def execute_provider_payout(self, provider_id: str, admin_user_id: str):
+    """
+    SVC-188 (G30): actually run the RazorpayX payout, off the request path.
+
+    The admin endpoint enqueues this task and returns 202 immediately, so the
+    web worker no longer holds a DB connection through the 30-90s RazorpayX
+    HTTP call and the SELECT-FOR-UPDATE lock on the provider's pending bookings.
+    Everything else about the flow is unchanged: this task calls the same
+    ``PayoutService.create_provider_payout`` the endpoint used to call
+    synchronously, so the audit-then-Razorpay-then-DB write ordering (and
+    every guarantee that hangs off it — SVC-172's open-attempt gate, the
+    idempotency key derived from the batch, the ``unknown`` audit outcome
+    on exception) is identical.
+
+    ``max_retries=0``: Celery-level retry would fire a fresh attempt against
+    a possibly-completed payout. The reconciliation loop
+    (``reconcile_payouts``, nightly) is the safe recovery path — it queries
+    RazorpayX by ``reference_id`` (= our idempotency key) and reflects the
+    real outcome into the audit and booking rows.
+    """
+    import asyncio
+    import uuid
+
+    from app.database import AsyncSessionLocal
+    from app.services.payout_service import PayoutService
+
+    async def _run():
+        async with AsyncSessionLocal() as session:
+            service = PayoutService(session)
+            try:
+                result = await service.create_provider_payout(
+                    uuid.UUID(provider_id), uuid.UUID(admin_user_id)
+                )
+                await session.commit()
+                # Only drain pushes after the transaction is durable — matches the
+                # comment in create_provider_payout: money already moved at RazorpayX,
+                # so a push before commit could tell the provider about a payout the
+                # DB failed to record.
+                await service.dispatch_pending_notifications()
+                return result
+            except Exception:
+                await session.rollback()
+                raise
+
+    return asyncio.run(_run())
+
+
 @celery_app.task(name="app.tasks.payment_tasks.reconcile_payouts")
 def reconcile_payouts():
     """
