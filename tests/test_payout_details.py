@@ -185,3 +185,139 @@ async def test_non_digit_account_rejected(client, auth_headers, db_session):
     assert response.status_code == 422
     await db_session.refresh(profile)
     assert profile.payout_account_number_encrypted is None
+
+
+# ---------------------------------------------------------------------------
+# SVC-189 (G16) — KYC gate on payout writes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kyc",
+    [KYCStatus.PENDING, KYCStatus.SUBMITTED, KYCStatus.REJECTED],
+)
+async def test_payout_vpa_refused_when_kyc_not_verified(client, auth_headers, db_session, kyc):
+    """PATCH /providers/me refuses payout_vpa unless KYC is VERIFIED (SVC-189).
+
+    Before this a provider could register, skip KYC entirely, and store a
+    UPI destination — landing money in PENDING settlements an admin might
+    then pay out without knowing KYC never happened.
+    """
+    user, profile = await _seed_provider(db_session, kyc_status=kyc)
+
+    response = await client.patch(
+        "/api/v1/providers/me",
+        json={"payout_vpa": "provider@okhdfcbank"},
+        headers=auth_headers(str(user.id), "provider"),
+    )
+
+    assert response.status_code == 400, response.text
+    # Message should say what to fix — the current status is more actionable
+    # than a generic "not allowed".
+    assert kyc.value in response.text.lower() or kyc.value in response.text
+    await db_session.refresh(profile)
+    assert profile.payout_vpa_encrypted is None
+    assert profile.payout_method is None
+
+
+@pytest.mark.asyncio
+async def test_payout_bank_refused_when_kyc_not_verified(client, auth_headers, db_session):
+    """Same gate applies to bank-account writes — one rule, both destinations."""
+    user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.SUBMITTED)
+
+    response = await client.patch(
+        "/api/v1/providers/me",
+        json={"payout_account_number": "1234567890", "payout_ifsc": "HDFC0001234"},
+        headers=auth_headers(str(user.id), "provider"),
+    )
+
+    assert response.status_code == 400, response.text
+    await db_session.refresh(profile)
+    assert profile.payout_account_number_encrypted is None
+    assert profile.payout_ifsc_encrypted is None
+    assert profile.payout_method is None
+
+
+@pytest.mark.asyncio
+async def test_non_payout_fields_still_writable_before_kyc(client, auth_headers, db_session):
+    """The gate is scoped to *payout* fields; KYC-in-progress providers must
+    still be able to update KYC docs, service area, languages, etc.
+
+    Regression guard: an overly wide gate would strand providers half-way
+    through onboarding, which is exactly the flow this ticket needs to
+    stay open.
+    """
+    user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.PENDING)
+
+    response = await client.patch(
+        "/api/v1/providers/me",
+        json={"service_area_radius_km": 12, "languages": ["en", "hi"]},
+        headers=auth_headers(str(user.id), "provider"),
+    )
+
+    assert response.status_code == 200, response.text
+    await db_session.refresh(profile)
+    assert profile.service_area_radius_km == 12
+    assert profile.languages == ["en", "hi"]
+
+
+@pytest.mark.asyncio
+async def test_switch_active_payout_method_refused_when_kyc_not_verified(
+    client, auth_headers, db_session
+):
+    """PATCH /providers/me/payout-method refuses when KYC isn't verified.
+
+    Edge case: a profile that predates the SVC-189 write-side gate could hold
+    stored details from before. Activating them defeats the point — the payout
+    call itself will refuse (see the PayoutService test), but blocking here
+    saves the admin from seeing a payable-looking provider that will 402 at
+    payout time.
+    """
+    # Seed with both destinations stored (bypassing the API gate via direct
+    # profile mutation — simulates pre-gate state), then drop KYC back.
+    user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.VERIFIED)
+    from app.utils.encryption import encrypt as _enc
+
+    profile.payout_vpa_encrypted = _enc("provider@upi")
+    profile.payout_account_number_encrypted = _enc("1234567890")
+    profile.payout_ifsc_encrypted = _enc("HDFC0001234")
+    profile.payout_method = None
+    profile.kyc_status = KYCStatus.REJECTED
+    await db_session.flush()
+
+    response = await client.patch(
+        "/api/v1/providers/me/payout-method",
+        json={"method": "upi"},
+        headers=auth_headers(str(user.id), "provider"),
+    )
+
+    assert response.status_code == 400, response.text
+    await db_session.refresh(profile)
+    assert profile.payout_method is None
+
+
+@pytest.mark.asyncio
+async def test_remove_payout_method_allowed_regardless_of_kyc(client, auth_headers, db_session):
+    """DELETE /providers/me/payout-method is NOT gated: a provider can always
+    withdraw their PII, KYC or no.
+
+    The rule is symmetric — we won't accept new payout data until KYC is
+    verified, but we won't hold old data hostage either.
+    """
+    user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.VERIFIED)
+    from app.utils.encryption import encrypt as _enc
+
+    profile.payout_vpa_encrypted = _enc("provider@upi")
+    profile.payout_method = None  # inactive but stored
+    profile.kyc_status = KYCStatus.REJECTED
+    await db_session.flush()
+
+    response = await client.delete(
+        "/api/v1/providers/me/payout-method",
+        headers=auth_headers(str(user.id), "provider"),
+    )
+
+    assert response.status_code == 200, response.text
+    await db_session.refresh(profile)
+    assert profile.payout_vpa_encrypted is None

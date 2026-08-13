@@ -34,7 +34,7 @@ from app.models.booking import (
 )
 from app.models.category import Category
 from app.models.payout_audit import PayoutAudit
-from app.models.provider_profile import PayoutMethod, ProviderProfile
+from app.models.provider_profile import KYCStatus, PayoutMethod, ProviderProfile
 from app.models.service import Service
 from app.models.user import User
 from app.routers import payments as payments_router
@@ -157,7 +157,7 @@ async def _booking_for(db_session, consumer, provider, **kwargs):
     )
 
 
-async def _provider_with_payout_vpa(db_session, provider):
+async def _provider_with_payout_vpa(db_session, provider, *, kyc_status=None):
     profile = ProviderProfile(
         user_id=provider.id,
         payout_vpa_encrypted=encrypt("provider@upi"),
@@ -165,6 +165,11 @@ async def _provider_with_payout_vpa(db_session, provider):
         # built directly (bypassing ProviderService) must set it or the provider
         # looks unpayable.
         payout_method=PayoutMethod.UPI,
+        # SVC-189 (G16): the payout side now refuses when kyc_status !=
+        # VERIFIED. Default to VERIFIED here so every existing test that
+        # expects a payout to succeed keeps working; tests exercising the
+        # KYC gate pass an explicit non-verified value.
+        kyc_status=kyc_status if kyc_status is not None else KYCStatus.VERIFIED,
     )
     db_session.add(profile)
     await db_session.flush()
@@ -284,13 +289,16 @@ async def test_payout_webhook_only_affects_its_own_batch(db_session):
     assert b_b.settlement_status == SettlementStatus.PROCESSING  # untouched by A
 
 
-async def _provider_with_bank_account(db_session, provider):
+async def _provider_with_bank_account(db_session, provider, *, kyc_status=None):
     """Provider with a bank account but no VPA → forces the IMPS payout path."""
     profile = ProviderProfile(
         user_id=provider.id,
         payout_account_number_encrypted=encrypt("1234567890"),
         payout_ifsc_encrypted=encrypt("HDFC0001234"),
         payout_method=PayoutMethod.BANK,
+        # Default VERIFIED for the same reason as _provider_with_payout_vpa
+        # (SVC-189 / G16): existing tests expect the payout to succeed.
+        kyc_status=kyc_status if kyc_status is not None else KYCStatus.VERIFIED,
     )
     db_session.add(profile)
     await db_session.flush()
@@ -485,6 +493,8 @@ async def test_concurrent_payouts_do_not_double_pay():
                 user_id=provider.id,
                 payout_vpa_encrypted=encrypt("provider@upi"),
                 payout_method=PayoutMethod.UPI,
+                # SVC-189 (G16): payout gate requires VERIFIED KYC.
+                kyc_status=KYCStatus.VERIFIED,
             )
         )
         booking = await _booking_for(s, consumer, provider)
@@ -2936,3 +2946,101 @@ async def test_admin_payout_endpoint_still_enqueues_when_estimate_is_empty(
     body = resp.json()
     assert body["amount_paise"] == 0
     assert body["booking_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# SVC-189 (G16) — KYC gate at payout time + kyc_status on the admin list
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kyc",
+    [KYCStatus.PENDING, KYCStatus.SUBMITTED, KYCStatus.REJECTED],
+)
+async def test_create_provider_payout_refuses_when_kyc_not_verified(db_session, kyc):
+    """The payout call re-checks KYC even if the profile has payout details.
+
+    Two independent gates (write-side gate lives in ProviderService, this is
+    the payout-side) because the two events happen in different sessions:
+    a provider whose KYC gets REJECTED after saving payout details would
+    otherwise stay payable. Distinct error message so an admin knows the
+    exact fix — this is not the "no payout details" 402.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider, kyc_status=kyc)
+    await _booking_for(db_session, consumer, provider, provider_payout=80.0)
+
+    with pytest.raises(PaymentError) as exc_info:
+        await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+    msg = str(exc_info.value)
+    assert "KYC" in msg
+    assert kyc.value in msg
+
+
+@pytest.mark.asyncio
+async def test_create_provider_payout_succeeds_when_kyc_verified(db_session):
+    """The happy path is untouched — a VERIFIED provider pays out normally.
+
+    Regression guard for the KYC gate not being over-broad.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    # Default is VERIFIED — same as every existing payout test.
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider, provider_payout=80.0)
+
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
+        mock_payout.return_value = {"id": "pout_kyc_ok", "status": "processing"}
+        result = await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+    assert result["booking_count"] == 1
+    mock_payout.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_list_pending_settlements_exposes_kyc_status(db_session):
+    """SVC-189 (G16): the admin sees KYC alongside payout_set on each row.
+
+    Two providers — one VERIFIED, one PENDING — surface with their real
+    status so the admin UI can render a badge and gate Pay out on
+    kyc_status == 'verified' without opening the provider profile.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+
+    verified = await UserFactory.create(db_session, role="provider")
+    await _provider_with_payout_vpa(db_session, verified, kyc_status=KYCStatus.VERIFIED)
+    await _booking_for(db_session, consumer, verified, provider_payout=100.0)
+
+    pending = await UserFactory.create(db_session, role="provider")
+    await _provider_with_payout_vpa(db_session, pending, kyc_status=KYCStatus.PENDING)
+    await _booking_for(db_session, consumer, pending, provider_payout=50.0)
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    by_id = {p["provider_id"]: p for p in report["providers"]}
+    assert by_id[verified.id]["kyc_status"] == "verified"
+    assert by_id[pending.id]["kyc_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_list_pending_settlements_missing_profile_row_reports_pending_kyc(db_session):
+    """A provider with completed bookings but no profile row at all (LEFT
+    join miss) reads as PENDING — matches the KYCStatus default and reads
+    as "not verified" on the admin badge, so the admin is never told
+    someone is verified when we simply don't know.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    # No ProviderProfile row on purpose.
+    await _booking_for(db_session, consumer, provider, provider_payout=25.0)
+
+    report = await PayoutService(db_session).list_pending_settlements()
+
+    assert len(report["providers"]) == 1
+    assert report["providers"][0]["kyc_status"] == "pending"
+    assert report["providers"][0]["payout_set"] is False
