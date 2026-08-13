@@ -141,6 +141,39 @@ class PayoutService:
             "truncated": total > len(providers),
         }
 
+    async def estimate_pending_payout(self, provider_id: UUID) -> dict:
+        """Booking-count + rupee sum for a single provider's PENDING bookings.
+
+        SVC-188 (G30): the admin endpoint returns 202 with this estimate so
+        the UI can show "queued ₹X for N bookings" immediately. Deliberately
+        does not take ``FOR UPDATE``: the authoritative lock lives inside
+        ``_pending_settlements`` (called from ``create_provider_payout`` in
+        the task). Cheap enough to run on the request path even under
+        contention.
+
+        Shares ``_owed_filter`` with the payout path — same reason the admin
+        list does: the amount an admin approves and the amount the task
+        computes must be one number, so both must key off the same filter
+        set. A small drift is still possible if a booking completes between
+        the endpoint and the task, but that just makes the actual paid total
+        marginally larger than the estimate; the audit records the real
+        figure either way.
+        """
+        result = await self.db.execute(
+            select(
+                func.count(Booking.id),
+                func.coalesce(
+                    func.sum(Booking.provider_payout + Booking.tip_amount),
+                    Decimal("0"),
+                ),
+            ).where(Booking.provider_id == provider_id, *self._owed_filter())
+        )
+        booking_count, total_rupees = result.one()
+        return {
+            "booking_count": booking_count,
+            "amount_paise": to_paise(total_rupees),
+        }
+
     async def create_provider_payout(self, provider_id: UUID, admin_user_id: UUID) -> dict:
         """
         Pay out all of a provider's completed bookings whose settlement is still

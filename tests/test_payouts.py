@@ -2824,3 +2824,115 @@ async def test_total_and_rows_come_from_one_snapshot(db_session):
     assert capped["truncated"] is True
     # The invariant that two snapshots could violate.
     assert capped["total"] >= len(capped["providers"])
+
+
+# ---------------------------------------------------------------------------
+# SVC-188 (G30) — POST /admin/providers/{id}/payout enqueues a Celery task
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_estimate_pending_payout_returns_batch_summary(db_session):
+    """`estimate_pending_payout` sums PENDING bookings + tip without a row lock.
+
+    Powers the 202 response body — must agree with what the payout task
+    ultimately charges (same _owed_filter, same rupees→paise conversion).
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider, provider_payout=80.0)
+    tipped = await _booking_for(db_session, consumer, provider, provider_payout=80.0)
+    # Tip lives on the row post-creation (matches how the consumer tip endpoint
+    # writes it — see test_payout_includes_tip_amount for the same pattern).
+    from decimal import Decimal as _Decimal
+
+    tipped.tip_amount = _Decimal("5.00")
+    await db_session.flush()
+
+    est = await PayoutService(db_session).estimate_pending_payout(provider.id)
+
+    assert est["booking_count"] == 2
+    # (80 + 80 + 5) * 100 — matches the batch total create_provider_payout would send.
+    assert est["amount_paise"] == 16500
+
+
+@pytest.mark.asyncio
+async def test_estimate_pending_payout_empty_provider(db_session):
+    """A provider with nothing pending returns zero — not None, not an error."""
+    provider = await UserFactory.create(db_session, role="provider")
+
+    est = await PayoutService(db_session).estimate_pending_payout(provider.id)
+
+    assert est == {"booking_count": 0, "amount_paise": 0}
+
+
+@pytest.mark.asyncio
+async def test_admin_payout_endpoint_returns_202_and_enqueues_task(
+    client, db_session, auth_headers
+):
+    """POST /admin/providers/{id}/payout enqueues the payout task and returns 202.
+
+    The endpoint no longer does the RazorpayX call inline (SVC-188 / G30) —
+    the response body carries the queued estimate + Celery task id, and the
+    actual money movement happens in the worker.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider, provider_payout=80.0)
+    await _booking_for(db_session, consumer, provider, provider_payout=80.0)
+    await db_session.flush()
+
+    headers = auth_headers(str(admin.id), "admin")
+
+    # `.delay` on the real task would try to reach a broker; patch it with an
+    # AsyncMock stand-in that returns a fake task id, so we can assert what was
+    # enqueued with what args.
+    fake_task = type("T", (), {"id": "task_abc123"})()
+    with patch(
+        "app.tasks.payment_tasks.execute_provider_payout.delay",
+        return_value=fake_task,
+    ) as mock_delay:
+        resp = await client.post(f"/api/v1/admin/providers/{provider.id}/payout", headers=headers)
+
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["status"] == "queued"
+    assert body["task_id"] == "task_abc123"
+    assert body["amount_paise"] == 16000  # (80 + 80) * 100
+    assert body["booking_count"] == 2
+
+    # Task was enqueued with the two ids the worker needs.
+    mock_delay.assert_called_once_with(str(provider.id), str(admin.id))
+
+
+@pytest.mark.asyncio
+async def test_admin_payout_endpoint_still_enqueues_when_estimate_is_empty(
+    client, db_session, auth_headers
+):
+    """Endpoint returns 202 even for zero pending — matches the existing behaviour
+    that the task itself raises "No pending settlements" (surfaced via reconcile
+    / the audit trail), not the request.
+
+    Rejecting on empty here would be defensible, but would also mean the endpoint
+    has to lock or re-read the same rows the task will read — which is exactly
+    the coupling this ticket exists to break.
+    """
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await db_session.flush()
+
+    headers = auth_headers(str(admin.id), "admin")
+    fake_task = type("T", (), {"id": "task_empty"})()
+    with patch(
+        "app.tasks.payment_tasks.execute_provider_payout.delay",
+        return_value=fake_task,
+    ):
+        resp = await client.post(f"/api/v1/admin/providers/{provider.id}/payout", headers=headers)
+
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["amount_paise"] == 0
+    assert body["booking_count"] == 0
