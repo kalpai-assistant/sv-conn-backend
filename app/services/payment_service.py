@@ -24,6 +24,47 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 
+def _capture_dispute_alert(
+    *,
+    event: str,
+    payment_id: str,
+    booking_id: UUID,
+    dispute_entity: dict,
+) -> None:
+    """Page an admin via Sentry for a dispute we care about (SVC-187 / G15).
+
+    Guarded on ``sentry_sdk`` being importable — SENTRY_DSN is unset in dev,
+    matching the pattern in ``dependencies.py`` and ``middleware/request_id.py``.
+    Fingerprint keys on ``(event, dispute_id)`` so Razorpay webhook redeliveries
+    collapse into one Sentry issue per real dispute event; tags carry the ids
+    triage needs without opening the payload.
+    """
+    try:
+        import sentry_sdk
+    except ImportError:  # pragma: no cover — sentry_sdk is a runtime dep in prod
+        return
+
+    dispute_id = dispute_entity.get("id")
+    # `new_scope` is the sentry-sdk 2.x replacement for the deprecated
+    # `push_scope`; both push a scope that pops on exit, but new_scope is
+    # the one that survives the eventual 3.x removal.
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("payment_id", payment_id)
+        scope.set_tag("booking_id", str(booking_id))
+        scope.set_tag("dispute_id", dispute_id or "unknown")
+        scope.set_tag("dispute_event", event)
+        if reason := dispute_entity.get("reason_code"):
+            scope.set_tag("dispute_reason_code", reason)
+        # Fingerprint on (event, dispute_id) — redeliveries of the same event
+        # for the same dispute collapse into one alert; distinct dispute
+        # events for the same payment stay separate.
+        scope.fingerprint = [event, dispute_id or payment_id]
+        sentry_sdk.capture_message(
+            f"{event} payment={payment_id} dispute={dispute_id}",
+            level="error",
+        )
+
+
 class PaymentService:
     """Manages Razorpay order lifecycle and payment verification."""
 
@@ -354,12 +395,36 @@ class PaymentService:
                 dispute_entity.get("reason_code"),
                 dispute_entity.get("respond_by"),
             )
-            # TODO(SVC-134): Sentry alert + Slack notification. Neither is wired up in
-            # the backend yet (the HLD schedules Sentry for Phase 2), so the warning
-            # above is the interim signal until that infra lands.
+            # SVC-187 (G15): page an admin. Sentry event with tags so the alert
+            # rule can filter and the message so triage sees the identifiers
+            # without opening the payload. Fingerprint groups by event kind so
+            # a redelivery collapses into one alert per (kind, dispute).
+            _capture_dispute_alert(
+                event=event,
+                payment_id=payment_id,
+                booking_id=payment.booking_id,
+                dispute_entity=dispute_entity,
+            )
 
-        elif event in ("payment.dispute.won", "payment.dispute.lost"):
-            # Deliberately no state change: beta AC leaves refund/settlement to admin.
+        elif event == "payment.dispute.lost":
+            logger.warning(
+                "%s payment=%s booking=%s dispute=%s (no automated state change)",
+                event,
+                payment_id,
+                payment.booking_id,
+                dispute_entity.get("id"),
+            )
+            # SVC-187 (G15): lost means money went out and an admin needs to
+            # decide on a clawback out of band — paged same as .created.
+            _capture_dispute_alert(
+                event=event,
+                payment_id=payment_id,
+                booking_id=payment.booking_id,
+                dispute_entity=dispute_entity,
+            )
+
+        elif event == "payment.dispute.won":
+            # No money at risk — log only, do not page.
             logger.warning(
                 "%s payment=%s booking=%s dispute=%s (no automated state change)",
                 event,
