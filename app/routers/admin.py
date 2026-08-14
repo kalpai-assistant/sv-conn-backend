@@ -278,7 +278,11 @@ async def pay_out_provider(
     ``reconcile_payouts`` (nightly) resolves any breadcrumb whose task
     process died mid-flight.
     """
+    from app.config import get_settings
+    from app.exceptions import PaymentError
     from app.tasks.payment_tasks import execute_provider_payout
+
+    settings = get_settings()
 
     service = PayoutService(db)
     # Cheap read-only estimate — no FOR UPDATE, so no lock is held across the
@@ -286,6 +290,19 @@ async def pay_out_provider(
     # the 202 response body so the UI can show "queued ₹X for N bookings"
     # rather than "queued ...something".
     estimate = await service.estimate_pending_payout(user_id)
+
+    # SVC-191 (G18 half): refuse over-cap batches at the wire, before enqueue.
+    # The task also enforces the same cap (defence in depth), but catching
+    # here gives the admin immediate feedback instead of a delayed
+    # audit-only failure they only see later on the audits screen.
+    if estimate["amount_paise"] > settings.PAYOUT_MAX_BATCH_PAISE:
+        raise PaymentError(
+            f"Payout batch of {estimate['amount_paise']} paise exceeds cap of "
+            f"{settings.PAYOUT_MAX_BATCH_PAISE} paise "
+            "(PAYOUT_MAX_BATCH_PAISE). Wait for the backlog to drain or "
+            "ask ops to lift the cap."
+        )
+
     task = execute_provider_payout.delay(str(user_id), str(admin.id))
     return {
         "status": "queued",
