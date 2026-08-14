@@ -3044,3 +3044,167 @@ async def test_list_pending_settlements_missing_profile_row_reports_pending_kyc(
     assert len(report["providers"]) == 1
     assert report["providers"][0]["kyc_status"] == "pending"
     assert report["providers"][0]["payout_set"] is False
+
+
+# ---------------------------------------------------------------------------
+# SVC-192 (G33) — cache RazorpayX fund_account_id + contact_id on the profile
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_first_payout_caches_razorpayx_ids(db_session):
+    """First payout goes through the composite call and captures the returned
+    fund_account_id + contact_id onto the profile. Every subsequent payout
+    for the same provider uses the fund-account-reference shape.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    profile = await _provider_with_payout_vpa(db_session, provider)
+    assert profile.razorpayx_fund_account_id is None
+    assert profile.razorpayx_contact_id is None
+    await _booking_for(db_session, consumer, provider, provider_payout=100.0)
+
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
+        mock_payout.return_value = {
+            "id": "pout_first",
+            "status": "processing",
+            "fund_account_id": "fa_first_seen",
+            "fund_account": {"id": "fa_first_seen", "contact_id": "cont_first_seen"},
+        }
+        await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+    _, call_kwargs = mock_payout.call_args
+    # First payout — no cached id, so client is invoked without fund_account_id.
+    assert call_kwargs["fund_account_id"] is None
+
+    await db_session.refresh(profile)
+    assert profile.razorpayx_fund_account_id == "fa_first_seen"
+    assert profile.razorpayx_contact_id == "cont_first_seen"
+
+
+@pytest.mark.asyncio
+async def test_second_payout_reuses_cached_fund_account_id(db_session):
+    """Second payout passes the cached id through so the client uses the
+    fund-account-reference shape — no fresh contact created at RazorpayX.
+    """
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    profile = await _provider_with_payout_vpa(db_session, provider)
+    # Simulate a prior payout that populated the cache.
+    profile.razorpayx_fund_account_id = "fa_cached"
+    profile.razorpayx_contact_id = "cont_cached"
+    await db_session.flush()
+
+    await _booking_for(db_session, consumer, provider, provider_payout=50.0)
+
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
+        # Reference-shape response doesn't need to return the ids again.
+        mock_payout.return_value = {"id": "pout_second", "status": "processing"}
+        await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+    _, call_kwargs = mock_payout.call_args
+    assert call_kwargs["fund_account_id"] == "fa_cached"
+
+    # Cache is not mutated on a reference-shape call — nothing to overwrite it with.
+    await db_session.refresh(profile)
+    assert profile.razorpayx_fund_account_id == "fa_cached"
+    assert profile.razorpayx_contact_id == "cont_cached"
+
+
+@pytest.mark.asyncio
+async def test_update_payout_vpa_invalidates_fund_account_cache(client, db_session, auth_headers):
+    """Editing payout_vpa clears the cached fund_account_id — reusing it would
+    send money to the previous handle. Contact id survives (same person).
+    """
+    from app.models.provider_profile import ProviderProfile
+
+    user = await UserFactory.create(db_session, role="provider")
+    profile = ProviderProfile(
+        user_id=user.id,
+        kyc_status=KYCStatus.VERIFIED,
+        razorpayx_fund_account_id="fa_stale",
+        razorpayx_contact_id="cont_same_person",
+    )
+    db_session.add(profile)
+    await db_session.flush()
+
+    resp = await client.patch(
+        "/api/v1/providers/me",
+        json={"payout_vpa": "new@upi"},
+        headers=auth_headers(str(user.id), "provider"),
+    )
+    assert resp.status_code == 200, resp.text
+
+    await db_session.refresh(profile)
+    assert profile.razorpayx_fund_account_id is None
+    assert profile.razorpayx_contact_id == "cont_same_person"
+
+
+@pytest.mark.asyncio
+async def test_switch_active_payout_method_invalidates_fund_account_cache(
+    client, db_session, auth_headers
+):
+    """Switching UPI ↔ bank points at a different destination — the cached
+    fund_account was for the previous one, so it must be cleared.
+    """
+    from app.models.provider_profile import ProviderProfile
+    from app.utils.encryption import encrypt as _enc
+
+    user = await UserFactory.create(db_session, role="provider")
+    profile = ProviderProfile(
+        user_id=user.id,
+        kyc_status=KYCStatus.VERIFIED,
+        payout_vpa_encrypted=_enc("provider@upi"),
+        payout_account_number_encrypted=_enc("1234567890"),
+        payout_ifsc_encrypted=_enc("HDFC0001234"),
+        payout_method=PayoutMethod.UPI,
+        razorpayx_fund_account_id="fa_upi_cached",
+        razorpayx_contact_id="cont_same_person",
+    )
+    db_session.add(profile)
+    await db_session.flush()
+
+    resp = await client.patch(
+        "/api/v1/providers/me/payout-method",
+        json={"method": "bank"},
+        headers=auth_headers(str(user.id), "provider"),
+    )
+    assert resp.status_code == 200, resp.text
+
+    await db_session.refresh(profile)
+    assert profile.payout_method is PayoutMethod.BANK
+    assert profile.razorpayx_fund_account_id is None
+    assert profile.razorpayx_contact_id == "cont_same_person"
+
+
+@pytest.mark.asyncio
+async def test_remove_payout_method_clears_both_razorpayx_ids(client, db_session, auth_headers):
+    """Removing all payout data clears both cached ids. If the provider adds
+    destinations back later they get a fresh contact + fund account.
+    """
+    from app.models.provider_profile import ProviderProfile
+    from app.utils.encryption import encrypt as _enc
+
+    user = await UserFactory.create(db_session, role="provider")
+    profile = ProviderProfile(
+        user_id=user.id,
+        kyc_status=KYCStatus.VERIFIED,
+        payout_vpa_encrypted=_enc("provider@upi"),
+        payout_method=PayoutMethod.UPI,
+        razorpayx_fund_account_id="fa_present",
+        razorpayx_contact_id="cont_present",
+    )
+    db_session.add(profile)
+    await db_session.flush()
+
+    resp = await client.delete(
+        "/api/v1/providers/me/payout-method",
+        headers=auth_headers(str(user.id), "provider"),
+    )
+    assert resp.status_code == 200, resp.text
+
+    await db_session.refresh(profile)
+    assert profile.razorpayx_fund_account_id is None
+    assert profile.razorpayx_contact_id is None

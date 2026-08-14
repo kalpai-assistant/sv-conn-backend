@@ -288,6 +288,12 @@ class PayoutService:
                 vpa=vpa,
                 account_number=account_number,
                 ifsc=ifsc,
+                # SVC-192 (G33): reuse the cached RazorpayX fund account if we
+                # have one. On a hit the client sends the fund-account-reference
+                # shape and RazorpayX doesn't create another duplicate contact.
+                # On a miss (None) the client falls back to the composite call
+                # and we cache the returned ids below.
+                fund_account_id=profile.razorpayx_fund_account_id,
             )
         except Exception as exc:
             # SVC-172 (G28): "failed" claimed positive knowledge the payout
@@ -312,6 +318,19 @@ class PayoutService:
         # this write fails, the safe retry above recovers (same key -> same payout).
         payout_id = payout.get("id")
         status = payout.get("status")
+
+        # SVC-192 (G33): cache the RazorpayX ids on the profile so subsequent
+        # payouts take the fund-account-reference path. Only populated on the
+        # first-payout branch — the composite response carries these; the
+        # reference-shape response returns the same ids we already had.
+        if profile.razorpayx_fund_account_id is None:
+            fa_id = payout.get("fund_account_id")
+            contact_id = (payout.get("fund_account") or {}).get("contact_id")
+            if fa_id:
+                profile.razorpayx_fund_account_id = fa_id
+            if contact_id:
+                profile.razorpayx_contact_id = contact_id
+
         for booking in bookings:
             booking.settlement_status = SettlementStatus.PROCESSING
             booking.settlement_payout_id = payout_id

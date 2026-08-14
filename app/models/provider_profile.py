@@ -60,6 +60,25 @@ class ProviderProfile(Base):
     # VPA in full. Stored in the clear on purpose — it holds only what we have agreed
     # is safe to display, which keeps decryption off the profile read path entirely.
     payout_display: Mapped[str | None] = mapped_column(String(120))
+    # SVC-192 (G33): RazorpayX-side identifiers cached from the composite payout
+    # response. Reused on subsequent payouts so we don't create a fresh contact
+    # + fund account each time (the composite call would otherwise leave one
+    # duplicate contact per payout in RazorpayX's contact book — cosmetic debt
+    # per the gap analysis, but debt).
+    #
+    # Nullable + populated lazily: the first payout for a provider still runs
+    # the composite call and stores the ids returned in the response. Every
+    # subsequent payout uses the fund-account-reference shape.
+    #
+    # Invalidation: `razorpayx_fund_account_id` is cleared whenever the
+    # provider's payout destination mutates (`update_profile` payout branch,
+    # `set_active_payout_method`) because the cached fund account no longer
+    # points at the current destination. `razorpayx_contact_id` is only
+    # cleared on `remove_payout_method`: the contact represents the person,
+    # not the account, so a UPI ↔ bank switch keeps it valid. RazorpayX ids
+    # are short (~20 chars in practice) but padded here for future-proofing.
+    razorpayx_contact_id: Mapped[str | None] = mapped_column(String(64))
+    razorpayx_fund_account_id: Mapped[str | None] = mapped_column(String(64))
     profile_photo_url: Mapped[str | None] = mapped_column(String(512))
     # Languages the provider speaks (e.g. ["Hindi", "English"]). text[] so we can
     # filter discovery by language (`'Hindi' = ANY(languages)`); defaults to empty.
