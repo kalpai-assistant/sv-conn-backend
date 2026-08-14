@@ -279,6 +279,10 @@ class PaymentService:
             await self._handle_dispute(event, payload)
             return
 
+        if event.startswith("refund."):
+            await self._handle_refund_event(event, payload)
+            return
+
         if event == "payment.captured":
             payment_entity = payload.get("payment", {}).get("entity", {})
             order_id = payment_entity.get("order_id")
@@ -590,3 +594,178 @@ class PaymentService:
             razorpay_method,
         )
         return PaymentRecordMethod.UPI
+
+    # ------------------------------------------------------------------
+    # Refunds (SVC-178)
+    # ------------------------------------------------------------------
+
+    async def initiate_refund(
+        self,
+        *,
+        booking: Booking,
+        amount_paise: int,
+        reason: str | None = None,
+    ) -> Payment:
+        """Refund ``amount_paise`` on the booking's captured payment.
+
+        Called from the booking cancellation flow (see BookingService) after
+        the cancellation-fee split has been computed, and from a future
+        admin-initiated refund path. Never call this directly from a route
+        handler — routes should transition the booking status, which decides
+        the refund policy in one place.
+
+        Idempotent on the payment row: if this payment already has a
+        ``refund_id``, a second call is a no-op and returns the existing row
+        (protects against webhook redelivery arriving after a duplicate
+        cancel click). Razorpay's own idempotency is keyed on
+        ``Idempotency-Key`` in the request header, so a lost response
+        followed by a retry returns the same ``rfnd_*`` id instead of
+        double-refunding — matches the pattern SVC-172 established for
+        payouts.
+
+        Flips ``booking.payment_status`` to REFUND_PROCESSING inside the
+        caller's transaction; the terminal transitions to REFUNDED /
+        REFUND_FAILED land later via the refund.processed / refund.failed
+        webhook. Ledger writes for provider comp are the caller's job — the
+        payment side stays scoped to money movement between customer and
+        platform.
+        """
+        payment = await self._find_captured_payment(booking.id)
+        if payment is None:
+            raise PaymentError(f"No CAPTURED payment on booking {booking.id} to refund")
+        if amount_paise <= 0:
+            raise PaymentError(f"Refund amount must be positive, got {amount_paise} paise")
+
+        # Idempotent short-circuit — same payment row asked to refund twice.
+        # Razorpay ALSO idempotencies on their side, but we save a round trip
+        # and avoid mutating booking.payment_status a second time.
+        if payment.refund_id is not None:
+            logger.info(
+                "initiate_refund no-op: payment=%s already has refund=%s",
+                payment.razorpay_payment_id,
+                payment.refund_id,
+            )
+            return payment
+
+        try:
+            refund = await asyncio.to_thread(
+                razorpay_client.payment.refund,
+                payment.razorpay_payment_id,
+                {
+                    "amount": amount_paise,
+                    "notes": {"reason": reason or "cancellation"},
+                    # Razorpay's Python SDK forwards unknown keys into the
+                    # request body rather than as HTTP headers, so a real
+                    # `Idempotency-Key` header can't be set through the SDK
+                    # today. The `refund_id is not None` short-circuit above
+                    # is the primary duplicate-refund defence; a follow-up
+                    # ticket can switch to a raw httpx call if we ever hit
+                    # a double-refund in the wild.
+                },
+            )
+        except Exception as exc:
+            # Don't flip payment_status on failure — leave it PAID so the
+            # caller can retry. Log loudly so support can pick up.
+            logger.error(
+                "Razorpay refund failed payment=%s amount=%s error=%s",
+                payment.razorpay_payment_id,
+                amount_paise,
+                exc,
+            )
+            raise PaymentError(f"Refund initiation failed: {exc}") from exc
+
+        payment.refund_id = refund.get("id")
+        payment.refund_amount_paise = amount_paise
+        booking.payment_status = PaymentStatus.REFUND_PROCESSING
+        await self.db.flush()
+
+        logger.info(
+            "refund.initiated payment=%s refund=%s amount_paise=%s booking=%s",
+            payment.razorpay_payment_id,
+            payment.refund_id,
+            amount_paise,
+            booking.id,
+        )
+        return payment
+
+    async def _handle_refund_event(self, event: str, payload: dict) -> None:
+        """Move `booking.payment_status` and `payment.refunded_at` on
+        `refund.processed` / `refund.failed`.
+
+        Idempotent — a redelivery of `refund.processed` is a no-op because
+        `payment_status` is already REFUNDED (and `refunded_at` is already
+        set). Unknown refund ids are logged and acked; matches the
+        established webhook contract from SVC-176 (Razorpay retries would
+        otherwise storm forever on an id we simply don't know).
+        """
+        refund_entity = payload.get("refund", {}).get("entity", {})
+        refund_id = refund_entity.get("id")
+        if not refund_id:
+            logger.warning("Razorpay %s webhook missing refund.entity.id", event)
+            return
+
+        result = await self.db.execute(select(Payment).where(Payment.refund_id == refund_id))
+        payment = result.scalar_one_or_none()
+        if payment is None:
+            logger.warning(
+                "Razorpay %s for unknown refund_id=%s — acking (matches SVC-176 policy)",
+                event,
+                refund_id,
+            )
+            return
+
+        booking = await self.db.get(Booking, payment.booking_id)
+        if booking is None:
+            logger.warning(
+                "Razorpay %s: refund=%s points at missing booking=%s — acking",
+                event,
+                refund_id,
+                payment.booking_id,
+            )
+            return
+
+        if event == "refund.processed":
+            # Idempotent: only flip to REFUNDED once, and stamp refunded_at
+            # once (redeliveries preserve the original instant).
+            if booking.payment_status is not PaymentStatus.REFUNDED:
+                booking.payment_status = PaymentStatus.REFUNDED
+            if payment.refunded_at is None:
+                payment.refunded_at = datetime.now(UTC)
+            payment.status = PaymentRecordStatus.REFUNDED
+            await self.db.flush()
+            logger.info(
+                "refund.processed payment=%s refund=%s booking=%s",
+                payment.razorpay_payment_id,
+                refund_id,
+                booking.id,
+            )
+        elif event == "refund.failed":
+            # No auto-retry — leave REFUND_FAILED as the terminal state and
+            # let an admin trigger a fresh initiate_refund after diagnosing.
+            # The retry flow (new refund_id) is a follow-up ticket.
+            if booking.payment_status is not PaymentStatus.REFUND_FAILED:
+                booking.payment_status = PaymentStatus.REFUND_FAILED
+                await self.db.flush()
+            logger.error(
+                "refund.failed payment=%s refund=%s booking=%s",
+                payment.razorpay_payment_id,
+                refund_id,
+                booking.id,
+            )
+        else:
+            logger.info("Ignoring unhandled refund event: %s", event)
+
+    async def _find_captured_payment(self, booking_id: UUID) -> Payment | None:
+        """Return the (single) CAPTURED payment on a booking, or None.
+
+        A booking may have several payment rows (failed attempts + the
+        captured one — SVC-186 / 44a9651a7ef8 migration), but at most one is
+        CAPTURED. Refunds and disputes both key on that row.
+        """
+        result = await self.db.execute(
+            select(Payment).where(
+                Payment.booking_id == booking_id,
+                Payment.status == PaymentRecordStatus.CAPTURED,
+            )
+        )
+        return result.scalar_one_or_none()

@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String, func
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, Numeric, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -74,6 +74,16 @@ class Payment(Base):
     # this as a flag only: status/settlement are never moved automatically, an admin
     # resolves the dispute out of band.
     disputed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # SVC-178: refund identifiers, populated when a cancel-driven or
+    # admin-driven refund is initiated. `refund_id` is Razorpay's `rfnd_*` —
+    # set as soon as their API returns from the create call; `refund_amount_paise`
+    # is what we asked to refund (customer-facing amount, so paise BigInt like
+    # everywhere else money touches the wire); `refunded_at` is set only when
+    # the `refund.processed` webhook lands (the terminal-success signal). All
+    # three nullable because most payment rows never refund.
+    refund_id: Mapped[str | None] = mapped_column(String(255))
+    refund_amount_paise: Mapped[int | None] = mapped_column(BigInteger)
+    refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships

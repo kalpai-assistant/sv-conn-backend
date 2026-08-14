@@ -117,6 +117,16 @@ class Settings(BaseSettings):
     BOOKING_REQUEST_TIMEOUT_SECONDS: int = 120  # 2 minutes
     CANCELLATION_FEE: float = 50.0
 
+    # SVC-178 (§11 Q3 resolved: flat ₹49, 100% to provider). Cancellation fee
+    # deducted from the consumer's refund when the booking is cancelled after
+    # a provider has accepted — the fee goes to the provider as compensation
+    # for the time they blocked out. Pre-acceptance cancels refund 100%.
+    # Kept as an env-tunable int paise so the number can be adjusted without
+    # a code change; the existing CANCELLATION_FEE above is unused runtime
+    # state left from an earlier proposal and stays for now (SVC-178 does not
+    # remove it — separate cleanup ticket).
+    CANCELLATION_FEE_PAISE: int = 4900
+
     # SVC-190 (G14) — abandoned-payment expiry. `PAYMENT_ORDER_EXPIRY_SECONDS`
     # is the checkout window we hand Razorpay via `expire_by` on order
     # creation; Razorpay itself refuses payment after that instant. The

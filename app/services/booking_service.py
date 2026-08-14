@@ -543,6 +543,14 @@ class BookingService:
         old_status = booking.status
         booking.status = new_status
 
+        # SVC-178: cancel → refund + provider-comp policy.
+        # Ordering matters — the refund initiation reads `old_status` to
+        # decide whether to charge the cancellation fee. Runs BEFORE the OTP
+        # wipe and the completed-side hooks below so a failure here rolls
+        # back the whole transition (kept atomic with the state change).
+        if new_status == BookingStatus.CANCELLED:
+            await self._apply_cancellation_policy(booking, old_status)
+
         # Zero the doorstep OTP as soon as the transition it protects has
         # happened. Consumer's view of the OTP is stale from this point
         # anyway, and there's no legitimate reason to keep a plaintext
@@ -734,6 +742,86 @@ class BookingService:
     @staticmethod
     def _generate_doorstep_otp() -> str:
         return "".join(str(secrets.randbelow(10)) for _ in range(4))
+
+    async def _apply_cancellation_policy(
+        self,
+        booking: Booking,
+        old_status: BookingStatus,
+    ) -> None:
+        """Refund + provider-comp on cancel (SVC-178 / PAYMENT_FLOW §7).
+
+        Policy (Q3 resolved: flat ₹49, 100% to provider):
+
+        - Pre-acceptance (`REQUESTED` → CANCELLED): full refund, no fee, no
+          provider comp — provider never blocked out their time.
+        - Post-acceptance (`ACCEPTED` / `EN_ROUTE` → CANCELLED): partial
+          refund (`captured − CANCELLATION_FEE_PAISE`), fee credits the
+          provider's wallet in full.
+        - `IN_PROGRESS+` → CANCELLED: unreachable via VALID_TRANSITIONS (only
+          from REQUESTED/ACCEPTED/EN_ROUTE), but defensive: no auto-refund,
+          admin handles.
+
+        Cash bookings: no online payment to refund; no ledger writes here
+        (SVC-180 handles cash-commission netting for the platform side).
+        Refund path is skipped entirely.
+        """
+        # Cash: no money to refund customer-side. Nothing to do here.
+        if booking.payment_method is not PaymentMethod.ONLINE:
+            return
+        # Only PAID bookings have money captured to refund. If the consumer
+        # never paid (PENDING) the cancel is a pure state change.
+        if booking.payment_status is not PaymentStatus.PAID:
+            return
+
+        # Captured amount = what create_order actually charged (SVC-39 G22:
+        # service_amount − discount_amount, not the full service_amount).
+        from app.utils.money import to_paise
+
+        captured_paise = to_paise(booking.service_amount - booking.discount_amount)
+
+        # Fee policy by from-status.
+        if old_status is BookingStatus.REQUESTED:
+            fee_paise = 0
+        elif old_status in (BookingStatus.ACCEPTED, BookingStatus.EN_ROUTE):
+            fee_paise = settings.CANCELLATION_FEE_PAISE
+            # Cap the fee at the captured amount — a coupon-heavy booking
+            # can have captured < fee; charging more than we hold would
+            # produce a negative refund we can't send.
+            fee_paise = min(fee_paise, captured_paise)
+        else:
+            # Defensive — VALID_TRANSITIONS blocks this today, but if it ever
+            # opens up (admin cancel, say), fail closed rather than refund
+            # the full amount for a job that had already started.
+            return
+
+        refund_paise = captured_paise - fee_paise
+
+        # Fee credit: 100% of the fee goes to the provider (Q3 resolved).
+        # Runs before the refund call so the ledger stays consistent even if
+        # the Razorpay call raises — the caller's transaction rolls both
+        # back atomically. Only fires when there's an assigned provider,
+        # which post-acceptance always is.
+        if fee_paise > 0 and booking.provider_id is not None:
+            from app.services.ledger_service import credit_booking_completed
+
+            await credit_booking_completed(
+                self.db,
+                provider_id=booking.provider_id,
+                booking_id=booking.id,
+                amount_paise=fee_paise,
+                note=(
+                    f"cancellation fee: booking {booking.id} cancelled from " f"{old_status.value}"
+                ),
+            )
+
+        if refund_paise > 0:
+            from app.services.payment_service import PaymentService
+
+            await PaymentService(self.db).initiate_refund(
+                booking=booking,
+                amount_paise=refund_paise,
+                reason=f"cancellation from {old_status.value}",
+            )
 
 
 def _summarise_service_names(items: Iterable) -> str:
