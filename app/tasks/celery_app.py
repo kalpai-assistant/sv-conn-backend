@@ -44,6 +44,14 @@ celery_app.conf.update(
             "task": "app.tasks.cleanup_tasks.expire_stale_bookings",
             "schedule": 30.0,  # Every 30 seconds
         },
+        # SVC-190 (G14): the local mirror of Razorpay's order-expiry. Runs
+        # every 5 min — much coarser than the 30s fulfilment sweep because
+        # the window itself is 15 min and Razorpay already refuses payment
+        # at the wire.
+        "expire-abandoned-payments": {
+            "task": "app.tasks.cleanup_tasks.expire_abandoned_payments",
+            "schedule": 300.0,
+        },
         "reconcile-payouts": {
             "task": "app.tasks.payment_tasks.reconcile_payouts",
             "schedule": crontab(hour=2, minute=0),  # Nightly at 02:00 (hits RazorpayX API)
