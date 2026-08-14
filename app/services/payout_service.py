@@ -15,6 +15,7 @@ from uuid import UUID
 from sqlalchemy import String, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.exceptions import PaymentError, UserNotFound
 from app.models.booking import (
@@ -32,6 +33,7 @@ from app.utils.money import to_paise
 from app.utils.razorpayx_client import create_payout, list_payouts
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 # RazorpayX terminal payout statuses → our settlement state, for reconciliation.
 _RECONCILE_MAP = {
@@ -255,6 +257,21 @@ class PayoutService:
         # ``_owed_amount`` folds in tip_amount too (SVC-39 G23).
         total_rupees = sum((self._owed_amount(b) for b in bookings), Decimal("0"))
         amount_paise = to_paise(total_rupees)
+
+        # SVC-191 (G18 half): hard cap on the batch amount. The endpoint
+        # already refuses before enqueuing (see admin router); this is the
+        # defence-in-depth check for a caller that bypasses the endpoint
+        # (tests, a future queued-elsewhere entry point, or a bug in the
+        # endpoint gate). Distinct message names both the cap and the batch
+        # so an admin can act — either wait for natural drain, split
+        # manually via requeue-then-pay, or ask ops to lift the cap.
+        if amount_paise > settings.PAYOUT_MAX_BATCH_PAISE:
+            raise PaymentError(
+                f"Payout batch of {amount_paise} paise exceeds cap of "
+                f"{settings.PAYOUT_MAX_BATCH_PAISE} paise "
+                "(PAYOUT_MAX_BATCH_PAISE). Wait for the backlog to drain or "
+                "ask ops to lift the cap."
+            )
 
         # Key derived from the exact batch (sorted booking ids), so the same batch
         # always produces the same key. If create_payout succeeds but the DB write

@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     # for high value). RTGS clears faster but is a distinct rail — switch here without
     # a code change.
     BANK_PAYOUT_ABOVE_CAP_MODE: str = "NEFT"  # "NEFT" | "RTGS"
+    # SVC-191 (G18 half): hard ceiling on a single payout batch. A provider
+    # with a long backlog can otherwise produce an arbitrarily large payout
+    # from one click — a fat-finger admin, a compromised session, or a data
+    # bug that inflates the batch all move unbounded money. IMPS_MAX_PAYOUT_PAISE
+    # above selects the rail, not the cap; this is the policy cap. Refused
+    # at the endpoint (before enqueue) *and* in the task path (defence in
+    # depth). Tune via env — increasing here is a deliberate call, not a
+    # code change buried in a PR.
+    PAYOUT_MAX_BATCH_PAISE: int = 10_000_000  # ₹1,00,000 (₹1 lakh)
 
     # CORS (B4). Comma-separated origins the browser is allowed to send
     # `Origin:` from. Default covers dev + Capacitor + prod web; staging

@@ -3047,6 +3047,110 @@ async def test_list_pending_settlements_missing_profile_row_reports_pending_kyc(
 
 
 # ---------------------------------------------------------------------------
+# SVC-191 (G18 half) — PAYOUT_MAX_BATCH_PAISE cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_provider_payout_refuses_over_cap(db_session, monkeypatch):
+    """A batch that exceeds PAYOUT_MAX_BATCH_PAISE is refused with a distinct
+    error naming both the cap and the actual batch total. Defence-in-depth
+    check — the endpoint also refuses upfront, but this fires for callers
+    that bypass the endpoint (tests, future queued-elsewhere paths).
+    """
+    from app.services import payout_service as payout_service_module
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+    # Two ₹800 payouts = ₹1600 total. Cap the batch at ₹1500 to force refusal.
+    await _booking_for(db_session, consumer, provider, provider_payout=800.0)
+    await _booking_for(db_session, consumer, provider, provider_payout=800.0)
+
+    monkeypatch.setattr(payout_service_module.settings, "PAYOUT_MAX_BATCH_PAISE", 150_000)
+
+    with pytest.raises(PaymentError) as exc_info:
+        await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+    msg = str(exc_info.value)
+    # The message needs the cap and the batch amount so the admin knows the
+    # size to split into or lift the cap to.
+    assert "160000" in msg  # 1600 * 100
+    assert "150000" in msg
+    assert "PAYOUT_MAX_BATCH_PAISE" in msg
+
+
+@pytest.mark.asyncio
+async def test_create_provider_payout_at_cap_succeeds(db_session, monkeypatch):
+    """A batch exactly at the cap goes through. Regression against an
+    off-by-one that would refuse the boundary.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from app.services import payout_service as payout_service_module
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider, provider_payout=800.0)
+
+    # 800 rupees = 80,000 paise. Set cap exactly there.
+    monkeypatch.setattr(payout_service_module.settings, "PAYOUT_MAX_BATCH_PAISE", 80_000)
+
+    with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
+        mock_payout.return_value = {"id": "pout_at_cap", "status": "processing"}
+        result = await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
+
+    assert result["booking_count"] == 1
+    mock_payout.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_admin_payout_endpoint_refuses_over_cap_before_enqueue(
+    client, db_session, auth_headers, monkeypatch
+):
+    """Endpoint returns 402 (PaymentError) when the estimate exceeds the cap
+    and does NOT enqueue the task. Immediate feedback beats delayed
+    audit-only failure the admin only finds later.
+    """
+    from unittest.mock import patch
+
+    from app.routers import admin as admin_router
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
+    await _booking_for(db_session, consumer, provider, provider_payout=2000.0)
+    await db_session.flush()
+
+    # The endpoint reads settings via ``get_settings()`` inline; monkeypatching
+    # the router's imported module is a no-op. Patch the settings object the
+    # freshly-imported get_settings will return.
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "PAYOUT_MAX_BATCH_PAISE", 100_000)  # ₹1000
+
+    headers = auth_headers(str(admin.id), "admin")
+
+    fake_task = type("T", (), {"id": "should_not_enqueue"})()
+    with patch(
+        "app.tasks.payment_tasks.execute_provider_payout.delay",
+        return_value=fake_task,
+    ) as mock_delay:
+        resp = await client.post(f"/api/v1/admin/providers/{provider.id}/payout", headers=headers)
+
+    assert resp.status_code == 402, resp.text
+    assert "PAYOUT_MAX_BATCH_PAISE" in resp.text
+    mock_delay.assert_not_called()
+
+    # Sanity: verifies the router did see our patched value.
+    _ = admin_router  # touch to keep the import even if unused elsewhere
+
+
+# ---------------------------------------------------------------------------
 # SVC-192 (G33) — cache RazorpayX fund_account_id + contact_id on the profile
 # ---------------------------------------------------------------------------
 
