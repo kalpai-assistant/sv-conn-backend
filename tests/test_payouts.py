@@ -544,6 +544,14 @@ async def test_concurrent_payouts_do_not_double_pay():
             cat_id = (
                 await s.execute(select(Service.category_id).where(Service.id == ids["service"]))
             ).scalar()
+            # SVC-193: ledger entries FK to users(id), delete before the user cleanup.
+            from app.models.provider_ledger_entry import ProviderLedgerEntry
+
+            await s.execute(
+                delete(ProviderLedgerEntry).where(
+                    ProviderLedgerEntry.provider_id == ids["provider"]
+                )
+            )
             await s.execute(delete(PayoutAudit).where(PayoutAudit.provider_id == ids["provider"]))
             await s.execute(delete(Booking).where(Booking.id == ids["booking"]))
             await s.execute(delete(Address).where(Address.id == ids["address"]))

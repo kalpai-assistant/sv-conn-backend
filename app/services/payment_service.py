@@ -432,6 +432,31 @@ class PaymentService:
                 booking_id=payment.booking_id,
                 dispute_entity=dispute_entity,
             )
+            # SVC-193: write the clawback debit on the provider's wallet.
+            # Amount is the provider's share of the disputed booking
+            # (`provider_payout + tip_amount`), not the whole payment — a
+            # dispute reverses the customer charge, but the platform's cut
+            # was ours to lose, and the tip was optional consumer generosity
+            # that vanishes with the reversal. Wallet is likely to go
+            # negative (provider was already paid out); the next credit or
+            # an admin correction clears it.
+            booking = await self.db.get(Booking, payment.booking_id)
+            if booking is not None and booking.provider_id is not None:
+                from app.services.ledger_service import debit_dispute_loss
+                from app.utils.money import to_paise
+
+                clawback_paise = to_paise(booking.provider_payout + booking.tip_amount)
+                if clawback_paise > 0:
+                    await debit_dispute_loss(
+                        self.db,
+                        provider_id=booking.provider_id,
+                        payment_id=payment.id,
+                        amount_paise=clawback_paise,
+                        note=(
+                            f"dispute.lost payment={payment_id} "
+                            f"dispute={dispute_entity.get('id')}"
+                        ),
+                    )
 
         elif event == "payment.dispute.won":
             # No money at risk — log only, do not page.

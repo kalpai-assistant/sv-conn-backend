@@ -357,6 +357,23 @@ class PayoutService:
 
         # Resolve the breadcrumb to the real outcome + payout id.
         await self._resolve_audit(audit_id, outcome=status or "initiated", payout_id=payout_id)
+
+        # SVC-193: debit the wallet by the paid amount. Runs in the same
+        # transaction as the audit resolution + booking transitions above,
+        # so a rollback anywhere below unwinds all three. We only reach here
+        # after RazorpayX has accepted the payout, so the debit reflects
+        # money that either has moved or is en route (matches the pre-SVC-193
+        # backfill's rule of debiting on outcome ∈ {initiated, processing,
+        # processed}).
+        from app.services.ledger_service import debit_payout
+
+        await debit_payout(
+            self.db,
+            provider_id=provider_id,
+            payout_audit_id=audit_id,
+            amount_paise=amount_paise,
+            note=f"payout {payout_id or 'pending-id'}",
+        )
         await self.db.flush()
 
         logger.info(

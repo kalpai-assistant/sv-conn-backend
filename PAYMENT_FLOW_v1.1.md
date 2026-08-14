@@ -298,14 +298,46 @@ order-expiry signal.
 | 8 | Reconciliation job | 🔴 new |
 | 9 | Abandoned-payment expiry | 🟡 replace wallclock with order-expiry signal |
 
-## 11. Open questions for Lead (blocking implementation tickets)
+## 11. Lead decisions (RESOLVED — 2026-08-14)
 
-1. **Trigger timing** (§1): pay-to-book vs. pay-on-completion for online?
-2. **Wallet table** (§4): build the ledger now, or keep deriving "owed" from bookings?
-3. **Cancellation fee** (§7): exact fee (flat vs %) and the provider's compensation share.
-4. **Tips collection** (§6): second-order capture vs. defer to payout — which path?
-5. **Cash receivable netting** (§8): net cash-commission against payouts, or invoice
-   providers separately?
+Answers below unblock the tickets listed. Each is the terse form of the
+Lead's decision — the reasoning behind each choice lives on the ticket or
+in the section it references.
+
+1. **Trigger timing** (§1) — **Pay-at-booking, as-built.** No change to the
+   current shape. Ripples: refunds and cancellation-fee logic (SVC-178)
+   assume the consumer has already been charged when the cancel button is
+   pressed, which matches this decision.
+2. **Wallet table** (§4) — **Build the ledger.** Shipped as SVC-193
+   (`provider_ledger_entries`, append-only, signed amounts). Balance =
+   `SUM(amount_paise) WHERE provider_id = ?`. Foundation for SVC-178
+   (refund debit), SVC-180 (cash-commission debit), SVC-177 (T+1 gate
+   reads wallet), G13 (collect-leg reconcile joins wallet against
+   settlement report).
+3. **Cancellation fee** (§7) — **Flat ₹49**, kept configurable via a new
+   `CANCELLATION_FEE_PAISE` env var. Provider's share of the fee: 100%
+   (they blocked the slot). Refund policy uses this fee as the deduction
+   in the "post-acceptance" row of the table in §7. SVC-178 implements.
+4. **Tips collection** (§6) — **Defer to payout (Option B).** Already
+   shipped: tips live on `booking.tip_amount`, the payout math sums
+   `provider_payout + tip_amount` (SVC-39 G23 + G31). No second-capture
+   flow; the platform absorbs the tip against the provider payout out of
+   existing operating capital. Revisit for scale.
+5. **Cash receivable netting** (§8) — **Hybrid, auto-net at payout, always
+   generate a settlement invoice.**
+   - Every payout produces a settlement statement (invoice document):
+     amount owed to provider on top, cash-commission deduction line
+     below, net = money moved.
+   - If cash-commission ≤ payout: money moved is `payout − cash_commission`,
+     invoice shows the deduction (net-invoiced amount to platform = ₹0 from
+     the provider's side; the platform got its share out of the deduction).
+   - If cash-commission > payout: no money moved via payout, invoice
+     shows `cash_commission − payout` owed to platform, provider pays via
+     UPI/bank transfer (out of band for beta; a future ticket may
+     automate).
+   - Zero-value invoices are still generated on every settlement cycle so
+     the artifact stream is regular and matches provider expectations.
+   SVC-180 implements.
 
 ---
 
