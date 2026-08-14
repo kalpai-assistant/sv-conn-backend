@@ -5,12 +5,18 @@ RazorpayX (payouts) is a separate product from Razorpay (payments) and is not
 covered by the ``razorpay`` Python SDK, so payouts are made via direct REST calls
 to the RazorpayX API using the same key/secret credentials.
 
-The composite Payout API creates the contact, fund account, and payout in a single
-call, so we don't need to pre-create and store contact/fund-account IDs.
+Two payload shapes supported:
 
-NOTE (v1.1): the composite call creates a fresh RazorpayX contact + fund account on
-every payout, which accumulates duplicate contacts over time. Acceptable for beta;
-the v1.1 plan is to create+cache a contact id + fund account id once per provider.
+- **Composite** (no cached ``fund_account_id``): create contact + fund account +
+  payout in one call. Used only for a provider's first-ever payout.
+- **Fund-account-reference** (cached id passed in): payout against an existing
+  fund account id — no contact/fund-account create side effect.
+
+SVC-192 (G33): the caller (``PayoutService.create_provider_payout``) caches
+``fund_account_id`` + ``contact_id`` from the composite response onto
+``ProviderProfile`` and passes the id back on subsequent payouts. Kept in the
+client rather than the service so the same wire-shape decision — "do I know the
+fund account?" — lives in one place.
 """
 
 import asyncio
@@ -42,14 +48,29 @@ async def create_payout(
     account_number: str | None = None,
     ifsc: str | None = None,
     contact_name: str = "Service Provider",
+    fund_account_id: str | None = None,
 ) -> dict:
     """
-    Create a RazorpayX payout to a provider via the composite API.
+    Create a RazorpayX payout to a provider.
 
-    Pass either ``vpa`` (UPI) or ``account_number`` + ``ifsc`` (bank). The payout
-    is funded from ``RAZORPAYX_ACCOUNT_NUMBER``. ``idempotency_key`` makes the
-    call safe to retry — RazorpayX will not create a duplicate payout for the same
-    key. Returns the RazorpayX payout entity (includes ``id`` and ``status``).
+    Two shapes:
+
+    - ``fund_account_id`` set — payout against an existing RazorpayX fund
+      account, no contact/fund-account create side effect. The caller must
+      still pass ``vpa`` or ``account_number + ifsc`` so we can pick the
+      rail (UPI vs IMPS/NEFT/RTGS); the wire payload does not resend them.
+    - ``fund_account_id`` unset — composite call: create contact + fund
+      account + payout in one shot. The response carries
+      ``fund_account_id`` and ``fund_account.contact_id``, which the caller
+      is expected to cache on ``ProviderProfile`` so subsequent payouts take
+      the first branch (SVC-192 / G33).
+
+    Pass either ``vpa`` (UPI) or ``account_number`` + ``ifsc`` (bank) —
+    required for rail selection in both shapes. The payout is funded from
+    ``RAZORPAYX_ACCOUNT_NUMBER``. ``idempotency_key`` makes the call safe
+    to retry — RazorpayX will not create a duplicate payout for the same
+    key. Returns the RazorpayX payout entity (includes ``id`` and
+    ``status``).
     """
     if vpa:
         fund_account = {
@@ -77,7 +98,7 @@ async def create_payout(
     else:
         raise ValueError("Payout requires a VPA or an account_number + IFSC")
 
-    payload = {
+    payload: dict = {
         "account_number": settings.RAZORPAYX_ACCOUNT_NUMBER,
         "amount": amount_paise,
         "currency": "INR",
@@ -85,11 +106,21 @@ async def create_payout(
         "purpose": purpose,
         # Echoed back on payout webhooks so we can map the payout to a provider.
         "reference_id": reference_id,
-        "fund_account": {
+    }
+    if fund_account_id is not None:
+        # Fast path — reference the cached fund account. No contact/fund-account
+        # side effect at RazorpayX. This is the shape used from the second
+        # payout onward for any provider whose destination hasn't changed
+        # since the last one.
+        payload["fund_account_id"] = fund_account_id
+    else:
+        # First payout for this destination — composite shape. The response
+        # will carry `fund_account_id` and `fund_account.contact_id` for the
+        # caller to cache.
+        payload["fund_account"] = {
             "contact": {"name": contact_name, "type": "vendor"},
             **fund_account,
-        },
-    }
+        }
 
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:

@@ -125,6 +125,12 @@ class ProviderService:
                 profile,
                 "Payout details can only be added once KYC is verified.",
             )
+            # SVC-192 (G33): any destination write invalidates the cached
+            # RazorpayX fund account — the fund_account_id points at the
+            # previous destination and using it after a change would send
+            # money to the old VPA/bank. Contact id represents the person and
+            # stays valid across destination edits.
+            profile.razorpayx_fund_account_id = None
         if payout_vpa is not None:
             profile.payout_vpa_encrypted = encrypt(payout_vpa)
             profile.payout_method = PayoutMethod.UPI
@@ -225,6 +231,13 @@ class ProviderService:
         profile.payout_ifsc_encrypted = None
         profile.payout_method = None
         profile.payout_display = None
+        # SVC-192 (G33): removing all payout data invalidates both cached
+        # RazorpayX ids. If the provider later adds destinations back, they'll
+        # get a fresh contact + fund account — safer than reusing ids for a
+        # relationship that was explicitly torn down (removal is the one
+        # user-driven path where the person could conceptually change too).
+        profile.razorpayx_fund_account_id = None
+        profile.razorpayx_contact_id = None
         await self.db.flush()
         return profile
 
@@ -259,6 +272,12 @@ class ProviderService:
             profile,
             "Payout method can only be activated once KYC is verified.",
         )
+
+        # SVC-192 (G33): switching UPI ↔ bank points at a different destination,
+        # so the cached fund_account_id (bound to the previous one) is no
+        # longer valid. Contact stays — same person.
+        if profile.payout_method is not method:
+            profile.razorpayx_fund_account_id = None
 
         profile.payout_method = method
         # The display label follows the active method, so it must be recomputed from
