@@ -567,6 +567,28 @@ class BookingService:
             # G9. Gate on CASH so online payments survive completion.
             if booking.payment_method is PaymentMethod.CASH:
                 booking.payment_status = PaymentStatus.PENDING
+            else:
+                # SVC-193: online booking completing → provider is owed their
+                # payout share (plus any tip already on the row; a later tip
+                # is an update on booking.tip_amount, not a separate ledger
+                # entry — Q4 "defer to payout" means the payout math sums
+                # provider_payout + tip_amount from the booking directly).
+                # Only fired for online because a cash provider was paid at
+                # the door — no platform debt was ever incurred. Rides the
+                # request transaction with the transition write above.
+                if booking.provider_id is not None:
+                    from app.services.ledger_service import credit_booking_completed
+                    from app.utils.money import to_paise
+
+                    amount_paise = to_paise(booking.provider_payout + booking.tip_amount)
+                    if amount_paise > 0:
+                        await credit_booking_completed(
+                            self.db,
+                            provider_id=booking.provider_id,
+                            booking_id=booking.id,
+                            amount_paise=amount_paise,
+                            note=f"booking {booking.id} completed",
+                        )
             # Fix #6: increment provider completed jobs counter
             await self._increment_completed_jobs(booking.provider_id)
 
