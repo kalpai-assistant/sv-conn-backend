@@ -941,3 +941,228 @@ async def test_webhook_accepts_empty_secret_in_dev(client, db_session):
             headers={"Content-Type": "application/json"},
         )
     assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# SVC-190 (G14) — abandoned-payment expiry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_order_includes_expire_by(db_session):
+    """`create_order` hands Razorpay an `expire_by` Unix second, so a client
+    that cached the order id can't submit it days later.
+
+    Razorpay refuses payment after that instant, so this is the belt half of
+    the abandoned-payment defence; the local sweep is the braces.
+    """
+    import time as _time
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(db_session, consumer, provider)
+
+    before = int(_time.time())
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        mock_rzp.order.create.return_value = {"id": "order_expiry_test"}
+        await PaymentService(db_session).create_order(booking.id, consumer.id)
+
+    _, call_kwargs = mock_rzp.order.create.call_args
+    order_data = call_kwargs["data"]
+    assert "expire_by" in order_data
+    # The value is `now + PAYMENT_ORDER_EXPIRY_SECONDS`; allow a couple of
+    # seconds of test-scheduling jitter on either side.
+    expected = before + settings.PAYMENT_ORDER_EXPIRY_SECONDS
+    assert expected - 2 <= order_data["expire_by"] <= expected + 3
+
+
+@pytest.mark.asyncio
+async def test_expire_abandoned_payments_flips_stale_pending(db_session):
+    """A booking with a Razorpay order older than expiry+grace, still PENDING,
+    gets its payment_status flipped to EXPIRED.
+
+    Simulates the abandoned-modal flow: order created, no capture, wall time
+    passed the window. Runs the task's query directly against the async test
+    session (bypasses the sync Celery wiring) so the test can inspect the
+    result without spinning up a worker.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from app.models.booking import Booking, PaymentStatus
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        payment_status=PaymentStatus.PENDING,
+        razorpay_order_id="order_stale_abandoned",
+    )
+    # Backdate created_at past the window + grace.
+    stale_at = datetime.now(UTC) - timedelta(
+        seconds=settings.PAYMENT_ORDER_EXPIRY_SECONDS
+        + settings.PAYMENT_ORDER_EXPIRY_GRACE_SECONDS
+        + 60,
+    )
+    booking.created_at = stale_at
+    await db_session.flush()
+
+    # Same query the Celery task runs.
+    cutoff = datetime.now(UTC) - timedelta(
+        seconds=settings.PAYMENT_ORDER_EXPIRY_SECONDS + settings.PAYMENT_ORDER_EXPIRY_GRACE_SECONDS,
+    )
+    result = await db_session.execute(
+        update(Booking)
+        .where(Booking.razorpay_order_id.is_not(None))
+        .where(Booking.payment_status == PaymentStatus.PENDING)
+        .where(Booking.created_at < cutoff)
+        .values(payment_status=PaymentStatus.EXPIRED)
+    )
+    assert result.rowcount == 1
+
+    await db_session.refresh(booking)
+    assert booking.payment_status is PaymentStatus.EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_expire_abandoned_payments_leaves_fresh_pending_alone(db_session):
+    """A booking whose order is still inside the window is not touched — the
+    consumer might still be on the modal. Regression against an over-broad
+    filter that would flip live checkouts to EXPIRED.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from app.models.booking import Booking, PaymentStatus
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        payment_status=PaymentStatus.PENDING,
+        razorpay_order_id="order_still_live",
+    )
+    # created_at defaults to "now" — well inside the window.
+
+    cutoff = datetime.now(UTC) - timedelta(
+        seconds=settings.PAYMENT_ORDER_EXPIRY_SECONDS + settings.PAYMENT_ORDER_EXPIRY_GRACE_SECONDS,
+    )
+    result = await db_session.execute(
+        update(Booking)
+        .where(Booking.razorpay_order_id.is_not(None))
+        .where(Booking.payment_status == PaymentStatus.PENDING)
+        .where(Booking.created_at < cutoff)
+        .values(payment_status=PaymentStatus.EXPIRED)
+    )
+    assert result.rowcount == 0
+
+    await db_session.refresh(booking)
+    assert booking.payment_status is PaymentStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_expire_abandoned_payments_ignores_paid_and_cash(db_session):
+    """PAID bookings (captured before expiry) and cash bookings (no order id)
+    are never touched. The two negative filters are the ones a bug would
+    accidentally omit — this test pins both.
+
+    Uses two consumers so each booking gets its own address (and each
+    ``_create_booking_with_deps`` call seeds its own service/category with
+    unique names to avoid the shared-slug collision).
+    """
+    import uuid as _uuid
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from app.models.address import Address
+    from app.models.booking import Booking, PaymentStatus
+    from app.models.category import Category
+    from app.models.service import Service
+
+    provider = await UserFactory.create(db_session, role="provider")
+
+    async def _seed_booking(**booking_kwargs):
+        consumer = await UserFactory.create(db_session, role="consumer")
+        suffix = _uuid.uuid4().hex[:8]
+        cat = Category(
+            name=f"Home Repair {suffix}",
+            slug=f"home-repair-{suffix}",
+            is_active=True,
+            sort_order=1,
+        )
+        db_session.add(cat)
+        await db_session.flush()
+        svc = Service(
+            category_id=cat.id,
+            name=f"AC Service {suffix}",
+            base_price=500.0,
+            duration_minutes=60,
+            is_active=True,
+        )
+        db_session.add(svc)
+        addr = Address(user_id=consumer.id, label="home", full_address="789 Test Ave")
+        db_session.add(addr)
+        await db_session.flush()
+        return await BookingFactory.create(
+            db_session,
+            consumer_id=consumer.id,
+            provider_id=provider.id,
+            service_id=svc.id,
+            address_id=addr.id,
+            **booking_kwargs,
+        )
+
+    # (a) Old + PAID — must not flip.
+    paid = await _seed_booking(
+        payment_status=PaymentStatus.PAID,
+        razorpay_order_id="order_old_paid",
+    )
+    paid.created_at = datetime.now(UTC) - timedelta(days=7)
+
+    # (b) Old + cash (no order id) — must not flip.
+    cash = await _seed_booking(
+        payment_status=PaymentStatus.PENDING,
+        razorpay_order_id=None,
+    )
+    cash.created_at = datetime.now(UTC) - timedelta(days=7)
+
+    await db_session.flush()
+
+    cutoff = datetime.now(UTC) - timedelta(
+        seconds=settings.PAYMENT_ORDER_EXPIRY_SECONDS + settings.PAYMENT_ORDER_EXPIRY_GRACE_SECONDS,
+    )
+    result = await db_session.execute(
+        update(Booking)
+        .where(Booking.razorpay_order_id.is_not(None))
+        .where(Booking.payment_status == PaymentStatus.PENDING)
+        .where(Booking.created_at < cutoff)
+        .values(payment_status=PaymentStatus.EXPIRED)
+    )
+    assert result.rowcount == 0
+
+    await db_session.refresh(paid)
+    await db_session.refresh(cash)
+    assert paid.payment_status is PaymentStatus.PAID
+    assert cash.payment_status is PaymentStatus.PENDING
+
+
+def test_expire_abandoned_payments_task_registered_on_beat():
+    """SVC-190: the sweep task is on the Celery Beat schedule.
+
+    Structural pin — a Beat entry that never got registered would silently
+    never run. Keeps the wiring honest without spinning up a worker.
+    """
+    from app.tasks.celery_app import celery_app
+
+    schedule = celery_app.conf.beat_schedule
+    assert "expire-abandoned-payments" in schedule
+    entry = schedule["expire-abandoned-payments"]
+    assert entry["task"] == "app.tasks.cleanup_tasks.expire_abandoned_payments"

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import time
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -123,6 +124,15 @@ class PaymentService:
             # verify_payment, this makes "amount mismatch" impossible-then-caught
             # rather than caught-only.
             "partial_payment": 0,
+            # SVC-190 (G14): the checkout window. Razorpay refuses payment
+            # after `expire_by`, so a client that cached this order id and
+            # tries to submit it days later gets a hard refusal at the wire
+            # rather than reaching our verify path against an EXPIRED
+            # booking. The local sweep (`expire_abandoned_payments`) flips
+            # `payment_status = EXPIRED` after this + grace so the two views
+            # of the world agree. `expire_by` is a Unix second, per Razorpay's
+            # spec.
+            "expire_by": int(time.time()) + settings.PAYMENT_ORDER_EXPIRY_SECONDS,
         }
 
         order = razorpay_client.order.create(data=order_data)

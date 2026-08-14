@@ -108,6 +108,17 @@ class Settings(BaseSettings):
     BOOKING_REQUEST_TIMEOUT_SECONDS: int = 120  # 2 minutes
     CANCELLATION_FEE: float = 50.0
 
+    # SVC-190 (G14) — abandoned-payment expiry. `PAYMENT_ORDER_EXPIRY_SECONDS`
+    # is the checkout window we hand Razorpay via `expire_by` on order
+    # creation; Razorpay itself refuses payment after that instant. The
+    # sweep task (`expire_abandoned_payments`) waits an extra
+    # `PAYMENT_ORDER_EXPIRY_GRACE_SECONDS` before flipping the local
+    # `payment_status = EXPIRED`, so we never flip locally on a payment
+    # Razorpay would still accept. 15 min matches the typical checkout
+    # window; keep the grace larger than webhook redelivery jitter.
+    PAYMENT_ORDER_EXPIRY_SECONDS: int = 900
+    PAYMENT_ORDER_EXPIRY_GRACE_SECONDS: int = 60
+
     # Encryption (AES-256) for PII at rest
     ENCRYPTION_KEY: str = ""
 
