@@ -19,10 +19,12 @@ booking completion + its ledger credit land atomically: a crash between the
 two would roll both back, not leave one orphaned.
 """
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from app.models.provider_ledger_entry import (
     LedgerEntryType,
@@ -110,6 +112,32 @@ async def debit_dispute_loss(
     )
 
 
+async def statement_window_sum_paise(
+    db: AsyncSession,
+    *,
+    provider_id: UUID,
+    entry_types: list[LedgerEntryType],
+    since: datetime | None,
+) -> int:
+    """SVC-180: sum entries of the given types for a provider, since ``since``.
+
+    Used to compose the settlement statement's per-period breakdown
+    (BOOKING_COMPLETED credits, CASH_COMMISSION debits, other adjustments).
+    ``since`` is the previous statement's ``created_at`` — for a provider's
+    first statement it is ``None`` and the window is all of history. Returned
+    as a signed int; callers absorb the sign into the specific column (e.g.
+    ``cash_commission_deducted_paise`` is stored positive but ``entry_type ==
+    CASH_COMMISSION`` sums come back negative).
+    """
+    stmt = select(func.coalesce(func.sum(ProviderLedgerEntry.amount_paise), 0)).where(
+        ProviderLedgerEntry.provider_id == provider_id,
+        ProviderLedgerEntry.entry_type.in_(entry_types),
+    )
+    if since is not None:
+        stmt = stmt.where(ProviderLedgerEntry.created_at > since)
+    return int((await db.execute(stmt)).scalar_one())
+
+
 async def wallet_balance_paise(db: AsyncSession, provider_id: UUID) -> int:
     """Live wallet balance for a provider.
 
@@ -149,4 +177,49 @@ async def _append(
     )
     db.add(entry)
     await db.flush()
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# Sync variants — for Celery tasks that use SyncSessionLocal.
+#
+# Celery workers run against a sync session (see app.database.SyncSessionLocal
+# and the reasoning in payment_tasks.process_cash_payment). Async helpers
+# above can't be awaited from that context, so we mirror the small subset of
+# writers those tasks need. Kept as a thin duplicate of `_append`'s shape
+# rather than a helper that dispatches on session type, so the sync tests
+# stay simple and there is no hidden async smuggled into a sync task.
+# ---------------------------------------------------------------------------
+
+
+def sync_debit_cash_commission(
+    db: Session,
+    *,
+    provider_id: UUID,
+    booking_id: UUID,
+    amount_paise: int,
+    note: str | None = None,
+) -> ProviderLedgerEntry:
+    """SVC-180: cash-commission debit written from `process_cash_payment`.
+
+    Cash booking: the provider collected the full amount at the door and
+    owes the platform its 20% commission. This is the debit side of the
+    settlement — it will be netted against future online payouts (see
+    ``PayoutService.create_provider_payout``).
+
+    Sync twin of ``debit_dispute_loss`` shaped for the Celery worker's
+    session. Rides the task's commit — Celery tasks own their transaction,
+    so this returns after `add` + `flush` (like the async helpers) and lets
+    the caller commit as part of its own success path.
+    """
+    entry = ProviderLedgerEntry(
+        provider_id=provider_id,
+        amount_paise=-abs(amount_paise),
+        entry_type=LedgerEntryType.CASH_COMMISSION,
+        reference_type=LedgerReferenceType.BOOKING,
+        reference_id=booking_id,
+        note=note,
+    )
+    db.add(entry)
+    db.flush()
     return entry

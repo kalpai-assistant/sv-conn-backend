@@ -17,9 +17,16 @@ def process_cash_payment(self, booking_id: str):
     """
     Record a cash payment after provider confirms collection.
     Called when booking is completed with payment_method=cash.
-    Platform commission is tracked as a running balance deduction.
+
+    SVC-180: the provider collected the full booking amount at the door
+    and owes the platform its 20% commission. Write a `CASH_COMMISSION`
+    debit on the provider's wallet ledger so that debt lands somewhere
+    the payout flow can auto-net against — matches Q5 of PAYMENT_FLOW §11
+    ("auto-net at payout, always generate a settlement invoice").
     """
     from app.database import SyncSessionLocal
+    from app.services.ledger_service import sync_debit_cash_commission
+    from app.utils.money import to_paise
 
     try:
         with SyncSessionLocal() as db:
@@ -37,6 +44,21 @@ def process_cash_payment(self, booking_id: str):
             )
             db.add(payment)
             booking.payment_status = PaymentStatus.PAID
+
+            # SVC-180: cash-commission debit. Runs inside the same
+            # transaction as the CAPTURED payment write and the PAID flip
+            # so a crash after either would roll all three back — either
+            # the cash booking is fully paid-and-accounted, or none of it
+            # is (a retry re-runs from scratch, idempotent on the PAID
+            # early-return above).
+            if booking.provider_id is not None and booking.platform_commission > 0:
+                sync_debit_cash_commission(
+                    db,
+                    provider_id=booking.provider_id,
+                    booking_id=booking.id,
+                    amount_paise=to_paise(booking.platform_commission),
+                    note=f"cash commission: booking {booking.id}",
+                )
             db.commit()
 
     except Exception as exc:

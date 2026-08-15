@@ -25,13 +25,26 @@ payout.
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+
+
+def _now_utc() -> datetime:
+    """Distinct wall-clock timestamp per row.
+
+    SVC-180 windows statement periods on ``created_at > previous_statement.created_at``.
+    Postgres ``NOW()`` returns transaction-start time, so multiple rows
+    written inside one transaction share a timestamp and windowing misses
+    them. Client-side ``datetime.now(UTC)`` gives microsecond-distinct
+    values per call, matching what production request boundaries would
+    produce naturally.
+    """
+    return datetime.now(UTC)
 
 
 class LedgerEntryType(str, enum.Enum):
@@ -111,4 +124,12 @@ class ProviderLedgerEntry(Base):
     # Free-text hint for operator triage. Never machine-parsed — every rule
     # that needs to distinguish entries reads ``entry_type`` instead.
     note: Mapped[str | None] = mapped_column(String(500))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Python-side default (see `_now_utc` docstring): SVC-180 statement
+    # windowing needs distinct timestamps per row, which Postgres NOW()
+    # can't provide inside a single transaction. `server_default` kept as
+    # a belt-and-braces for any direct SQL insert that bypasses the ORM.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_now_utc,
+        server_default=func.now(),
+    )

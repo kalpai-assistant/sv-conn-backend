@@ -26,7 +26,9 @@ from app.models.booking import (
     SettlementStatus,
 )
 from app.models.payout_audit import PayoutAudit
+from app.models.provider_ledger_entry import LedgerEntryType
 from app.models.provider_profile import KYCStatus, PayoutMethod, ProviderProfile
+from app.models.settlement_statement import SettlementStatement
 from app.models.user import User
 from app.utils.encryption import decrypt
 from app.utils.money import to_paise
@@ -161,7 +163,7 @@ class PayoutService:
         }
 
     async def estimate_pending_payout(self, provider_id: UUID) -> dict:
-        """Booking-count + rupee sum for a single provider's PENDING bookings.
+        """Booking count + net payable for a single provider's PENDING bookings.
 
         SVC-188 (G30): the admin endpoint returns 202 with this estimate so
         the UI can show "queued ₹X for N bookings" immediately. Deliberately
@@ -170,27 +172,31 @@ class PayoutService:
         the task). Cheap enough to run on the request path even under
         contention.
 
-        Shares ``_owed_filter`` with the payout path — same reason the admin
-        list does: the amount an admin approves and the amount the task
-        computes must be one number, so both must key off the same filter
-        set. A small drift is still possible if a booking completes between
-        the endpoint and the task, but that just makes the actual paid total
-        marginally larger than the estimate; the audit records the real
-        figure either way.
+        SVC-180: ``amount_paise`` is now the **net** amount — the wallet
+        balance (positive part), which auto-nets cash commission +
+        adjustments against the booking-sum credits. Shown as 0 when the
+        provider actually owes the platform more than they've earned; the
+        admin sees the accurate wire-amount rather than the pre-netting
+        booking sum.
         """
         result = await self.db.execute(
-            select(
-                func.count(Booking.id),
-                func.coalesce(
-                    func.sum(Booking.provider_payout + Booking.tip_amount),
-                    Decimal("0"),
-                ),
-            ).where(Booking.provider_id == provider_id, *self._owed_filter())
+            select(func.count(Booking.id)).where(
+                Booking.provider_id == provider_id, *self._owed_filter()
+            )
         )
-        booking_count, total_rupees = result.one()
+        booking_count = result.scalar_one() or 0
+
+        # Wallet balance is the source of truth post-SVC-180; the booking
+        # sum was only a proxy before the ledger existed. Show max(0, wallet)
+        # so a negative wallet doesn't render as a scary negative amount on
+        # the admin screen — it means "no payout this cycle" and the task
+        # will surface the exact owed number via PaymentError.
+        from app.services.ledger_service import wallet_balance_paise
+
+        wallet = await wallet_balance_paise(self.db, provider_id)
         return {
             "booking_count": booking_count,
-            "amount_paise": to_paise(total_rupees),
+            "amount_paise": max(0, wallet),
         }
 
     async def create_provider_payout(self, provider_id: UUID, admin_user_id: UUID) -> dict:
@@ -256,7 +262,50 @@ class PayoutService:
         # to_paise rounds half up instead of dropping a paisa (SVC-150).
         # ``_owed_amount`` folds in tip_amount too (SVC-39 G23).
         total_rupees = sum((self._owed_amount(b) for b in bookings), Decimal("0"))
-        amount_paise = to_paise(total_rupees)
+        booking_sum_paise = to_paise(total_rupees)
+
+        # SVC-180 (§11 Q5): auto-net cash commission against the payout.
+        # Wallet balance is the source of truth for "what do we actually
+        # owe this provider right now" — booking-sum credits already
+        # landed in the wallet, cash-commission debits from `process_cash_payment`
+        # are also there, so the wallet reflects the net.
+        #
+        # Two cases:
+        # - wallet > 0: pay the wallet (may be less than booking sum if
+        #   cash commission has accumulated). Statement records the split.
+        # - wallet <= 0: provider owes the platform more than they've
+        #   earned. No RazorpayX call; still generate a statement so the
+        #   provider gets a continuous artifact stream + knows what they
+        #   owe.
+        from app.services.ledger_service import wallet_balance_paise
+
+        wallet = await wallet_balance_paise(self.db, provider_id)
+
+        if wallet <= 0:
+            # No money to pay out. Generate the "invoice" statement so the
+            # provider sees the deducted commission and any leftover
+            # balance owed. Does NOT mark bookings PROCESSING — they stay
+            # PENDING and will roll into the next cycle when the wallet
+            # goes positive again.
+            statement = await self._generate_settlement_statement(
+                provider_id=provider_id,
+                payout_audit_id=None,
+                net_paid_paise=0,
+                platform_balance_owed_paise=-wallet,
+            )
+            raise PaymentError(
+                f"No payout: provider owes platform {-wallet} paise "
+                f"(cash commission > online earnings this cycle). "
+                f"Settlement statement {statement.id} generated."
+            )
+
+        # net_paise for the RazorpayX call: whichever is smaller between the
+        # wallet balance and the current booking sum. In practice the wallet
+        # will typically equal booking_sum − cash_commission, so this is
+        # `wallet`. Capping at booking_sum defends against paying more than
+        # the current-cycle credits cover (a historical over-credit shouldn't
+        # be paid out in one big chunk against a small current batch).
+        amount_paise = min(wallet, booking_sum_paise)
 
         # SVC-191 (G18 half): hard cap on the batch amount. The endpoint
         # already refuses before enqueuing (see admin router); this is the
@@ -373,6 +422,18 @@ class PayoutService:
             payout_audit_id=audit_id,
             amount_paise=amount_paise,
             note=f"payout {payout_id or 'pending-id'}",
+        )
+
+        # SVC-180: settlement statement — the artifact of what we told the
+        # provider this cycle. Runs AFTER the payout debit so the "wallet
+        # balance owed" snapshot reflects the just-settled amount (should
+        # be ≥ 0 on the success path since we already gated on wallet > 0
+        # above).
+        await self._generate_settlement_statement(
+            provider_id=provider_id,
+            payout_audit_id=audit_id,
+            net_paid_paise=amount_paise,
+            platform_balance_owed_paise=0,
         )
         await self.db.flush()
 
@@ -698,6 +759,88 @@ class PayoutService:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _generate_settlement_statement(
+        self,
+        *,
+        provider_id: UUID,
+        payout_audit_id: UUID | None,
+        net_paid_paise: int,
+        platform_balance_owed_paise: int,
+    ) -> SettlementStatement:
+        """SVC-180: produce the per-payout artifact — the "invoice" the
+        provider sees each settlement cycle (§11 Q5).
+
+        Breakdown is derived from the ledger window since the provider's
+        previous statement: BOOKING_COMPLETED credits are gross earnings,
+        CASH_COMMISSION debits are the deduction line, DISPUTE_LOSS +
+        REFUND debits get lumped as "other adjustments". Signs are absorbed
+        into positive columns (a -₹20 CASH_COMMISSION debit is stored as
+        ``cash_commission_deducted_paise = 20`` on the statement).
+
+        ``payout_audit_id`` is None on the no-payout branch (wallet ≤ 0)
+        — statement is still generated so the provider keeps a continuous
+        artifact stream and knows what they owe.
+        """
+        from app.services.ledger_service import statement_window_sum_paise
+
+        # Find the previous statement to bound the window. First-ever
+        # statement gets `since=None` and windows over all history.
+        prev = (
+            await self.db.execute(
+                select(SettlementStatement)
+                .where(SettlementStatement.provider_id == provider_id)
+                .order_by(SettlementStatement.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        since = prev.created_at if prev is not None else None
+
+        gross_credit = await statement_window_sum_paise(
+            self.db,
+            provider_id=provider_id,
+            entry_types=[LedgerEntryType.BOOKING_COMPLETED],
+            since=since,
+        )
+        # CASH_COMMISSION sums come back negative (debits); flip to positive
+        # for the ``deducted`` column so the display value is what the
+        # provider is being charged, not the ledger's signed representation.
+        cash_commission_sum = await statement_window_sum_paise(
+            self.db,
+            provider_id=provider_id,
+            entry_types=[LedgerEntryType.CASH_COMMISSION],
+            since=since,
+        )
+        other_sum = await statement_window_sum_paise(
+            self.db,
+            provider_id=provider_id,
+            entry_types=[LedgerEntryType.DISPUTE_LOSS, LedgerEntryType.REFUND],
+            since=since,
+        )
+
+        statement = SettlementStatement(
+            provider_id=provider_id,
+            payout_audit_id=payout_audit_id,
+            gross_credit_paise=max(0, gross_credit),
+            cash_commission_deducted_paise=abs(cash_commission_sum),
+            other_adjustments_paise=abs(other_sum),
+            net_paid_paise=net_paid_paise,
+            platform_balance_owed_paise=platform_balance_owed_paise,
+        )
+        self.db.add(statement)
+        await self.db.flush()
+        logger.info(
+            "settlement.statement provider=%s payout_audit=%s "
+            "gross=%s cash_commission=%s other_adj=%s net_paid=%s owed=%s",
+            provider_id,
+            payout_audit_id,
+            statement.gross_credit_paise,
+            statement.cash_commission_deducted_paise,
+            statement.other_adjustments_paise,
+            statement.net_paid_paise,
+            statement.platform_balance_owed_paise,
+        )
+        return statement
 
     async def _find_open_attempt(self, provider_id: UUID) -> PayoutAudit | None:
         """Return the most recent unresolved payout audit for this provider, or None.
