@@ -143,8 +143,14 @@ async def _booking_for(db_session, consumer, provider, **kwargs):
     # setup they were written against; tests that want to exercise the not-yet-
     # paid branch pass payment_status=PENDING explicitly (see the G1 test below).
     payment_status = kwargs.pop("payment_status", PaymentStatus.PAID)
+    payment_method = kwargs.pop("payment_method", PaymentMethod.ONLINE)
+    # BookingFactory doesn't expose tip_amount, so accept and set post-hoc so
+    # SVC-180's wallet-derived payout tests can seed a booking with a tip
+    # already on the row (matches production where the consumer sets the
+    # tip via /bookings/{id}/tip after completion).
+    tip_amount = kwargs.pop("tip_amount", None)
 
-    return await BookingFactory.create(
+    booking = await BookingFactory.create(
         db_session,
         consumer_id=consumer.id,
         provider_id=provider.id,
@@ -152,9 +158,40 @@ async def _booking_for(db_session, consumer, provider, **kwargs):
         address_id=address.id,
         status=BookingStatus.COMPLETED,
         payment_status=payment_status,
+        payment_method=payment_method,
         provider_payout=provider_payout,
         **kwargs,
     )
+    if tip_amount is not None:
+        booking.tip_amount = tip_amount
+        await db_session.flush()
+
+    # SVC-193 + SVC-180: the payout path now reads wallet balance, not just
+    # bookings. Production writes a BOOKING_COMPLETED credit when the
+    # booking transitions to COMPLETED (online) via BookingService, but this
+    # factory bypasses the transition — so mirror the credit here for the
+    # common case (COMPLETED + PAID + ONLINE) so tests that expect payouts
+    # to succeed keep working. Tip is added by the caller post-hoc for
+    # tip-inclusive tests; those tests write their own extra credit.
+    if (
+        booking.status is BookingStatus.COMPLETED
+        and booking.payment_status is PaymentStatus.PAID
+        and booking.payment_method is PaymentMethod.ONLINE
+    ):
+        from app.services.ledger_service import credit_booking_completed
+        from app.utils.money import to_paise as _to_paise
+
+        credit_paise = _to_paise(booking.provider_payout + booking.tip_amount)
+        if credit_paise > 0:
+            await credit_booking_completed(
+                db_session,
+                provider_id=provider.id,
+                booking_id=booking.id,
+                amount_paise=credit_paise,
+                note=f"test factory: booking {booking.id}",
+            )
+
+    return booking
 
 
 async def _provider_with_payout_vpa(db_session, provider, *, kyc_status=None):
@@ -546,10 +583,17 @@ async def test_concurrent_payouts_do_not_double_pay():
             ).scalar()
             # SVC-193: ledger entries FK to users(id), delete before the user cleanup.
             from app.models.provider_ledger_entry import ProviderLedgerEntry
+            from app.models.settlement_statement import SettlementStatement
 
             await s.execute(
                 delete(ProviderLedgerEntry).where(
                     ProviderLedgerEntry.provider_id == ids["provider"]
+                )
+            )
+            # SVC-180: settlement_statements FK to users(id) too.
+            await s.execute(
+                delete(SettlementStatement).where(
+                    SettlementStatement.provider_id == ids["provider"]
                 )
             )
             await s.execute(delete(PayoutAudit).where(PayoutAudit.provider_id == ids["provider"]))
@@ -2536,9 +2580,13 @@ async def test_payout_includes_tip_amount(db_session):
     admin = await UserFactory.create(db_session, role="admin")
     await _provider_with_payout_vpa(db_session, provider)
 
-    booking = await _booking_for(db_session, consumer, provider, provider_payout=80.0)
-    booking.tip_amount = Decimal("20.00")
-    await db_session.flush()
+    await _booking_for(
+        db_session,
+        consumer,
+        provider,
+        provider_payout=80.0,
+        tip_amount=Decimal("20.00"),
+    )
 
     with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
         mock_payout.return_value = {"id": "pout_with_tip", "status": "processing"}
@@ -2560,9 +2608,13 @@ async def test_pending_settlements_total_includes_tip(db_session):
     provider = await UserFactory.create(db_session, role="provider")
     await _provider_with_payout_vpa(db_session, provider)
 
-    booking = await _booking_for(db_session, consumer, provider, provider_payout=100.0)
-    booking.tip_amount = Decimal("15.50")
-    await db_session.flush()
+    await _booking_for(
+        db_session,
+        consumer,
+        provider,
+        provider_payout=100.0,
+        tip_amount=Decimal("15.50"),
+    )
 
     report = await PayoutService(db_session).list_pending_settlements()
 
@@ -2859,14 +2911,16 @@ async def test_estimate_pending_payout_returns_batch_summary(db_session):
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     await _provider_with_payout_vpa(db_session, provider)
-    await _booking_for(db_session, consumer, provider, provider_payout=80.0)
-    tipped = await _booking_for(db_session, consumer, provider, provider_payout=80.0)
-    # Tip lives on the row post-creation (matches how the consumer tip endpoint
-    # writes it — see test_payout_includes_tip_amount for the same pattern).
     from decimal import Decimal as _Decimal
 
-    tipped.tip_amount = _Decimal("5.00")
-    await db_session.flush()
+    await _booking_for(db_session, consumer, provider, provider_payout=80.0)
+    await _booking_for(
+        db_session,
+        consumer,
+        provider,
+        provider_payout=80.0,
+        tip_amount=_Decimal("5.00"),
+    )
 
     est = await PayoutService(db_session).estimate_pending_payout(provider.id)
 
