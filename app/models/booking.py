@@ -154,6 +154,15 @@ class Booking(Base):
     settlement_failure_reason: Mapped[str | None] = mapped_column(String(500))
     razorpay_order_id: Mapped[str | None] = mapped_column(String(255))
     cancellation_reason: Mapped[str | None] = mapped_column(String(500))
+    # SVC-177 (§4 T+1 gate): timestamp of when Razorpay settled this booking's
+    # payment to our bank account. NULL until the settlement webhook
+    # (`settlement.processed`) confirms the money is in our hands. The wallet
+    # gate excludes credits whose backing booking has `settled_at IS NULL` so
+    # we never pay a provider out of money we haven't received yet. Cash
+    # bookings stay NULL indefinitely (the money went to the provider at the
+    # door — there's no Razorpay settlement) but they never credit the wallet
+    # either, so the gate is a no-op for them.
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

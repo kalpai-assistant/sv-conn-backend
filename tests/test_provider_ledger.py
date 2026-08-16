@@ -137,13 +137,30 @@ async def test_wallet_balance_is_zero_when_no_entries(db_session):
 
 @pytest.mark.asyncio
 async def test_credit_debit_sum(db_session):
-    provider = await UserFactory.create(db_session, role="provider")
     import uuid as _uuid
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+
+    # SVC-177: BOOKING_COMPLETED credits only count when the backing
+    # booking has settled_at set (T+1 gate).
+    booking = await _seed_booking(
+        db_session,
+        consumer=consumer,
+        provider=provider,
+        status=BookingStatus.COMPLETED,
+        payment_method=PaymentMethod.ONLINE,
+        payment_status=PaymentStatus.PAID,
+    )
+    booking.settled_at = _dt.now(UTC)
+    await db_session.flush()
 
     await ledger_service.credit_booking_completed(
         db_session,
         provider_id=provider.id,
-        booking_id=_uuid.uuid4(),
+        booking_id=booking.id,
         amount_paise=40000,
     )
     await ledger_service.debit_payout(
@@ -295,6 +312,12 @@ async def test_successful_payout_debits_wallet(db_session):
         booking_id=booking.id,
         amount_paise=8000,
     )
+    # SVC-177: stamp settled_at so wallet_balance counts the credit.
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    booking.settled_at = _dt.now(UTC)
+    await db_session.flush()
     assert await ledger_service.wallet_balance_paise(db_session, provider.id) == 8000
 
     with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
@@ -453,13 +476,32 @@ async def test_backfill_sum_matches_derived_formula(db_session):
 
     provider = await UserFactory.create(db_session, role="provider")
 
+    consumer = await UserFactory.create(db_session, role="consumer")
+
     # Simulated history: 3 completed online bookings @ ₹80 each; one payout
-    # of ₹160 already sent (settling 2 of them).
+    # of ₹160 already sent (settling 2 of them). SVC-177: bookings need
+    # real rows with settled_at set for the T+1-gated wallet_balance
+    # query to count their credits.
     for _ in range(3):
+        booking = await _seed_booking(
+            db_session,
+            consumer=consumer,
+            provider=provider,
+            status=BookingStatus.COMPLETED,
+            payment_method=PaymentMethod.ONLINE,
+            payment_status=PaymentStatus.PAID,
+            provider_payout=80.0,
+        )
+        # Backfill-sim: stamp settled_at as the migration would.
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        booking.settled_at = _dt.now(UTC)
+        await db_session.flush()
         await ledger_service.credit_booking_completed(
             db_session,
             provider_id=provider.id,
-            booking_id=_uuid.uuid4(),
+            booking_id=booking.id,
             amount_paise=8000,
             note="backfill-sim: booking",
         )

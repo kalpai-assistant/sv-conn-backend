@@ -597,6 +597,15 @@ class BookingService:
                             amount_paise=amount_paise,
                             note=f"booking {booking.id} completed",
                         )
+
+                # SVC-177 (§4 T+1 gate) — dev-mode escape hatch. When the
+                # setting is on (beta default), stamp settled_at here so the
+                # credit above starts counting toward the wallet immediately.
+                # Prod flips this off once Razorpay's `settlement.processed`
+                # webhook is subscribed; that handler stamps settled_at when
+                # the money actually reaches our bank account.
+                if settings.AUTO_SETTLE_ON_COMPLETION and booking.settled_at is None:
+                    booking.settled_at = datetime.now(UTC)
             # Fix #6: increment provider completed jobs counter
             await self._increment_completed_jobs(booking.provider_id)
 
