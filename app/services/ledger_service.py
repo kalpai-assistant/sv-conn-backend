@@ -139,22 +139,58 @@ async def statement_window_sum_paise(
 
 
 async def wallet_balance_paise(db: AsyncSession, provider_id: UUID) -> int:
-    """Live wallet balance for a provider.
+    """Live wallet balance for a provider, gated on T+1 settlement (SVC-177).
 
     Positive = platform owes them; negative = they owe us (dispute loss,
-    unbalanced cash commission after SVC-180). Uses ``COALESCE`` so a
-    provider with no entries reads 0 rather than None.
+    unbalanced cash commission after SVC-180).
 
-    Consumers should treat the returned int as authoritative; it is the
-    single source of truth for "what is this provider owed" now that the
-    wallet exists.
+    **T+1 gate**: BOOKING_COMPLETED credits whose backing booking has
+    ``settled_at IS NULL`` are excluded — Razorpay hasn't deposited that
+    money in our account yet, and paying a provider from platform float
+    breaks the RBI PA rule (see PAYMENT_FLOW_v1.1.md §4). All other entry
+    types count immediately: PAYOUT debits (money we already sent),
+    CASH_COMMISSION debits (owed to platform regardless of Razorpay
+    settlement), DISPUTE_LOSS (already-lost money we're clawing back),
+    REFUND (already-refunded money).
+
+    Two queries — one for the non-credit rows and one for the
+    settlement-gated credits — rather than a single query with a
+    conditional sum, because ``settled_at`` lives on ``bookings`` and
+    reaching it needs a join only for the BOOKING_COMPLETED subset.
+    Both are cheap: `(provider_id, created_at)` index + small per-provider
+    row counts at beta scale.
     """
-    result = await db.execute(
-        select(func.coalesce(func.sum(ProviderLedgerEntry.amount_paise), 0)).where(
-            ProviderLedgerEntry.provider_id == provider_id
-        )
+    from app.models.booking import Booking
+
+    # Non-credit entries: sum unconditionally.
+    non_credit_sum = int(
+        (
+            await db.execute(
+                select(func.coalesce(func.sum(ProviderLedgerEntry.amount_paise), 0)).where(
+                    ProviderLedgerEntry.provider_id == provider_id,
+                    ProviderLedgerEntry.entry_type != LedgerEntryType.BOOKING_COMPLETED,
+                )
+            )
+        ).scalar_one()
     )
-    return int(result.scalar_one())
+    # BOOKING_COMPLETED credits: only count those whose backing booking has
+    # settled. Join on reference_id → bookings.id (BOOKING_COMPLETED entries
+    # always have reference_type = BOOKING).
+    settled_credit_sum = int(
+        (
+            await db.execute(
+                select(func.coalesce(func.sum(ProviderLedgerEntry.amount_paise), 0))
+                .select_from(ProviderLedgerEntry)
+                .join(Booking, Booking.id == ProviderLedgerEntry.reference_id)
+                .where(
+                    ProviderLedgerEntry.provider_id == provider_id,
+                    ProviderLedgerEntry.entry_type == LedgerEntryType.BOOKING_COMPLETED,
+                    Booking.settled_at.is_not(None),
+                )
+            )
+        ).scalar_one()
+    )
+    return non_credit_sum + settled_credit_sum
 
 
 async def _append(

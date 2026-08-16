@@ -98,6 +98,12 @@ async def _seed_online_booking(db, *, consumer, provider, provider_payout=80.0):
         booking_id=booking.id,
         amount_paise=to_paise(booking.provider_payout + booking.tip_amount),
     )
+    # SVC-177: stamp settled_at so the T+1-gated wallet counts this credit.
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    booking.settled_at = _dt.now(UTC)
+    await db.flush()
     return booking
 
 

@@ -127,6 +127,17 @@ class Settings(BaseSettings):
     # remove it — separate cleanup ticket).
     CANCELLATION_FEE_PAISE: int = 4900
 
+    # SVC-177 (§4 T+1 gate) — dev-mode escape hatch. When True, the
+    # booking-completion writer stamps `bookings.settled_at = now` at the
+    # same time as the wallet credit, effectively disabling the T+1 gate.
+    # Beta default is True so the tester runbook / dev happy path works
+    # without needing Razorpay's `settlement.processed` webhook wired.
+    # Flip to False in prod ONCE the webhook is subscribed in the
+    # RazorpayX dashboard — leaving it True in prod means the platform
+    # pays providers out of its own float on the day of the booking, which
+    # breaks the RBI PA rule the T+1 gate exists to enforce.
+    AUTO_SETTLE_ON_COMPLETION: bool = True
+
     # SVC-190 (G14) — abandoned-payment expiry. `PAYMENT_ORDER_EXPIRY_SECONDS`
     # is the checkout window we hand Razorpay via `expire_by` on order
     # creation; Razorpay itself refuses payment after that instant. The

@@ -178,6 +178,9 @@ async def _booking_for(db_session, consumer, provider, **kwargs):
         and booking.payment_status is PaymentStatus.PAID
         and booking.payment_method is PaymentMethod.ONLINE
     ):
+        from datetime import UTC
+        from datetime import datetime as _dt
+
         from app.services.ledger_service import credit_booking_completed
         from app.utils.money import to_paise as _to_paise
 
@@ -190,6 +193,13 @@ async def _booking_for(db_session, consumer, provider, **kwargs):
                 amount_paise=credit_paise,
                 note=f"test factory: booking {booking.id}",
             )
+        # SVC-177: stamp settled_at so the T+1-gated wallet_balance query
+        # counts this credit. Mirrors what transition_status does when
+        # `AUTO_SETTLE_ON_COMPLETION` is on (the beta default) — tests
+        # want the same "COMPLETED+PAID means payable" shape.
+        if booking.settled_at is None:
+            booking.settled_at = _dt.now(UTC)
+            await db_session.flush()
 
     return booking
 

@@ -283,6 +283,10 @@ class PaymentService:
             await self._handle_refund_event(event, payload)
             return
 
+        if event == "settlement.processed":
+            await self._handle_settlement_processed(payload)
+            return
+
         if event == "payment.captured":
             payment_entity = payload.get("payment", {}).get("entity", {})
             order_id = payment_entity.get("order_id")
@@ -769,3 +773,75 @@ class PaymentService:
             )
         )
         return result.scalar_one_or_none()
+
+    async def _handle_settlement_processed(self, payload: dict) -> None:
+        """SVC-177: Razorpay's `settlement.processed` webhook — money hit our
+        bank account, so all captured payments in this batch are cleared for
+        payout to providers.
+
+        Payload shape (Razorpay X-Settlement webhook):
+        - `settlement.entity.id`: RazorpayX settlement id (informational).
+        - `settlement.entity.payment_ids`: list of Razorpay payment ids
+          settled in this batch.
+
+        For each payment id we can resolve, stamp `bookings.settled_at = now`
+        so the wallet-balance query starts counting those credits. Payments
+        we don't recognise are logged + acked (SVC-176 policy — Razorpay
+        retries otherwise).
+
+        Idempotent: `settled_at` is only stamped when NULL, so a webhook
+        redelivery preserves the original settlement instant.
+        """
+        settlement_entity = payload.get("settlement", {}).get("entity", {})
+        settlement_id = settlement_entity.get("id")
+        payment_ids = settlement_entity.get("payment_ids") or []
+        if not payment_ids:
+            logger.warning(
+                "settlement.processed webhook missing payment_ids (settlement=%s)",
+                settlement_id,
+            )
+            return
+
+        # Resolve every payment id to its booking in one query — a settlement
+        # batch can be hundreds of payments, N per-row lookups would be silly.
+        result = await self.db.execute(
+            select(Payment).where(Payment.razorpay_payment_id.in_(payment_ids))
+        )
+        payments = list(result.scalars().all())
+        seen_ids = {p.razorpay_payment_id for p in payments}
+        unknown = set(payment_ids) - seen_ids
+        if unknown:
+            logger.warning(
+                "settlement.processed unknown payment_ids=%s settlement=%s — acking",
+                sorted(unknown),
+                settlement_id,
+            )
+
+        # Group by booking so we stamp each unique booking once. Multiple
+        # payment rows per booking (retries + captured — SVC-186) is
+        # possible; we settle the booking as long as ANY of its payments
+        # was in the batch.
+        booking_ids = {p.booking_id for p in payments}
+        if not booking_ids:
+            return
+
+        now = datetime.now(UTC)
+        stamped = 0
+        booking_rows = (
+            (await self.db.execute(select(Booking).where(Booking.id.in_(booking_ids))))
+            .scalars()
+            .all()
+        )
+        for booking in booking_rows:
+            # Idempotent: only stamp when NULL. Preserves the original
+            # settlement instant across webhook redeliveries.
+            if booking.settled_at is None:
+                booking.settled_at = now
+                stamped += 1
+        await self.db.flush()
+        logger.info(
+            "settlement.processed settlement=%s bookings_stamped=%s payment_ids=%s",
+            settlement_id,
+            stamped,
+            len(payment_ids),
+        )
