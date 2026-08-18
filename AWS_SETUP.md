@@ -397,7 +397,7 @@ Everything the backend reads → where it lives. This is authoritative;
 | `SENTRY_DSN` | SSM | Backend project DSN |
 | `ENVIRONMENT` | env constant | `production` (drives log-level escalation, admin allowlist WARN, etc.) |
 | `LOG_JSON` | env constant | `true` (CloudWatch parses JSON logs) |
-| `CORS_ALLOWED_ORIGINS` | env constant | `https://eazyserv.com,https://app.eazyserv.com,capacitor://localhost` |
+| `CORS_ALLOWED_ORIGINS` | env constant | `https://eazyserv.com,https://app.eazyserv.com,capacitor://localhost,https://localhost` |
 
 ---
 
@@ -471,7 +471,8 @@ resource "aws_apprunner_service" "backend" {
         runtime_environment_variables = {
           ENVIRONMENT            = "production"
           LOG_JSON               = "true"
-          CORS_ALLOWED_ORIGINS   = "https://eazyserv.com,https://app.eazyserv.com,capacitor://localhost"
+          # Origins: web app, iOS Capacitor (capacitor://), Android Capacitor (https://localhost — comes from androidScheme: "https" in capacitor.config.ts). Omitting https://localhost blocks every request from Android with an opaque "Failed to fetch" — the browser rejects the CORS preflight and the fetch never fires.
+          CORS_ALLOWED_ORIGINS   = "https://eazyserv.com,https://app.eazyserv.com,capacitor://localhost,https://localhost"
         }
         runtime_environment_secrets = {
           DATABASE_URL           = aws_ssm_parameter.database_url.arn
