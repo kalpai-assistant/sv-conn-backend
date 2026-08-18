@@ -98,6 +98,18 @@ class CouponInvalid(AppException):
         super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST)
 
 
+class SMSDeliveryError(AppException):
+    """The SMS provider rejected an OTP send (bad key, unapproved template, dropped by DLT, etc.).
+
+    502 rather than 500: the failure is downstream (MSG91 / Twilio / DLT
+    stack), not our code. Client apps can retry after the operator fixes
+    the provider — no permanent server bug.
+    """
+
+    def __init__(self, message: str = "SMS delivery failed"):
+        super().__init__(message, status_code=status.HTTP_502_BAD_GATEWAY)
+
+
 class RateLimitExceeded(AppException):
     """
     Raised when a request exceeds a per-key rate limit.
