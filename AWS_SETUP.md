@@ -126,6 +126,7 @@ put RAZORPAY_KEY_SECRET  '<from razorpay dashboard>'
 put RAZORPAY_WEBHOOK_SECRET  '<generated on razorpay webhook setup>'
 put FCM_CREDENTIALS_JSON "$(base64 -i path/to/fcm-service-account.json)"
 put MSG91_AUTH_KEY       '<from msg91 dashboard>'
+put MSG91_TEMPLATE_ID    '<DLT-approved template id from msg91 → SMS → Templates>'
 put GOOGLE_MAPS_API_KEY  '<from gcp console>'
 put ADMIN_ALLOWED_IPS    '<home ip>/32'  # tighten later
 ```
@@ -392,6 +393,7 @@ Everything the backend reads → where it lives. This is authoritative;
 | `RAZORPAY_WEBHOOK_SECRET` | SSM | Set when webhook URL registered on Razorpay side |
 | `FCM_CREDENTIALS_PATH` | env `/tmp/fcm.json` | Materialised from base64 SSM at container start (see §5.3) |
 | `MSG91_AUTH_KEY` | SSM | Once MSG91 template approved |
+| `MSG91_TEMPLATE_ID` | SSM | DLT-approved template ID (`{"var1": otp}` substitution). Empty → send-otp returns 502. |
 | `GOOGLE_MAPS_API_KEY` | SSM | For address geocoding |
 | `ADMIN_ALLOWED_IPS` | SSM | Vipul's home IP for now; add ops as needed |
 | `SENTRY_DSN` | SSM | Backend project DSN |

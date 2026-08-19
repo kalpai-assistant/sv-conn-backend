@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.exceptions import InvalidOTP, RateLimitExceeded
+from app.exceptions import InvalidOTP, RateLimitExceeded, SMSDeliveryError
 from app.models.user import User, UserRole
 from app.utils.otp import (
     generate_otp,
@@ -62,8 +62,20 @@ class AuthService:
         await store_otp(self.redis, phone, otp)
         try:
             await self._sms.send_otp(phone, otp)
+        except SMSDeliveryError:
+            # Let the router surface 502 to the client — a silent 200
+            # here (the old behavior) told the app "OTP sent" while the
+            # SMS was actually dropped, so testers/users waited forever
+            # for a code that would never arrive. The OTP is already in
+            # Redis, so a caller that retries with the correct number
+            # after ops fixes the provider still works.
+            raise
         except Exception as e:
-            logger.warning(f"SMS sending failed (expected if keys missing): {e}")
+            # Anything unexpected (network blip, timeout, bug in the
+            # provider client) also becomes a 502. Log so we can triage
+            # from CloudWatch / Sentry.
+            logger.exception("Unexpected SMS send failure for %s", phone)
+            raise SMSDeliveryError(f"SMS provider error: {e}") from e
 
     @staticmethod
     def _is_e2e_test_phone(phone: str) -> bool:
