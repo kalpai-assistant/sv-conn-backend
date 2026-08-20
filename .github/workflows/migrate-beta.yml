@@ -160,6 +160,9 @@ jobs:
           ENVIRONMENT: beta
           JWT_SECRET_KEY: migrate-only-not-used-for-signing
           ENCRYPTION_KEY: migrate-only-32-bytes-padding-x
+          # app/config.Settings requires REDIS_URL at bootstrap even though
+          # migrations never touch Redis. Dummy value; alembic won't dial it.
+          REDIS_URL: "redis://localhost:6379/0"
           RAZORPAY_KEY_ID: unused
           RAZORPAY_KEY_SECRET: unused
           RAZORPAY_WEBHOOK_SECRET: unused
@@ -183,6 +186,9 @@ jobs:
           ENVIRONMENT: beta
           JWT_SECRET_KEY: migrate-only-not-used-for-signing
           ENCRYPTION_KEY: migrate-only-32-bytes-padding-x
+          # app/config.Settings requires REDIS_URL at bootstrap even though
+          # migrations never touch Redis. Dummy value; alembic won't dial it.
+          REDIS_URL: "redis://localhost:6379/0"
           RAZORPAY_KEY_ID: unused
           RAZORPAY_KEY_SECRET: unused
           RAZORPAY_WEBHOOK_SECRET: unused
