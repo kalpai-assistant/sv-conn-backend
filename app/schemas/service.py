@@ -20,6 +20,35 @@ class UpdateServiceRequest(BaseModel):
     is_active: bool | None = None
 
 
+class ServiceVariantResponse(BaseModel):
+    """One priced option under a service.
+
+    ``base_price`` is what the customer sees before GST; ``gst_percent`` is 0
+    for the launch summary rows and 18 for the vertical sheets. Frontend
+    computes the customer total as ``base_price * (1 + gst_percent/100)``
+    when rendering the checkout.
+
+    ``provider_payout`` + ``platform_commission`` are stored, not derived,
+    because the split ratio isn't a global constant — the launch summary
+    rows are 70/30 and the vertical sheets are 65/35. The booking service
+    snapshots these fields into ``booking_items`` at booking time.
+    """
+
+    id: UUID
+    label: str
+    subcategory: str | None
+    base_price: float
+    provider_payout: float
+    platform_commission: float
+    gst_percent: float
+    duration_minutes: int | None
+    materials_note: str | None
+    sort_order: int
+    is_active: bool
+
+    model_config = {"from_attributes": True}
+
+
 class ServiceResponse(BaseModel):
     id: UUID
     category_id: UUID
@@ -29,6 +58,10 @@ class ServiceResponse(BaseModel):
     duration_minutes: int
     is_active: bool
     created_at: datetime
+    # Empty list until the variants relationship is loaded. Routes that
+    # render variants call an attach helper first — the model relationship
+    # is `lazy="raise_on_sql"` and will refuse an implicit lookup here.
+    variants: list[ServiceVariantResponse] = []
 
     model_config = {"from_attributes": True}
 

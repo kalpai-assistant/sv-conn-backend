@@ -12,6 +12,12 @@ class CreateBookingItemRequest(BaseModel):
     """One line item on a booking-creation request."""
 
     service_id: UUID
+    # Optional during the variant-picker rollout. When present, pricing is
+    # snapshotted from the variant's price/payout/commission. When absent,
+    # the booking service picks the service's first-ordered active variant
+    # (or falls back to services.base_price + hardcoded split for pre-variant
+    # services). See BookingService.create_booking.
+    service_variant_id: UUID | None = None
     # Same-service duplicates express "two of this" (e.g. two haircuts). At
     # the DB level a booking can't have two rows with the same service_id
     # (uix_booking_item_service), so the API forces the caller to consolidate
@@ -77,6 +83,12 @@ class BookingItemResponse(BaseModel):
     id: UUID
     service_id: UUID
     service_name: str
+    # Snapshot of the variant the customer chose at booking time. Both are
+    # nullable because pre-variant bookings and the fallback path (caller
+    # sent only service_id) don't carry one. When present, the label is
+    # what the customer saw at checkout ("1 BHK", "Hatchback", etc.).
+    service_variant_id: UUID | None = None
+    variant_label: str | None = None
     quantity: int
     unit_price: float
     total_price: float
@@ -92,10 +104,13 @@ class BookingItemResponse(BaseModel):
         relationship — keeping schemas free of ORM lookups keeps them
         serialisable in isolation and testable without a session.
         """
+        variant_label = item.service_variant.label if item.service_variant is not None else None
         return cls(
             id=item.id,
             service_id=item.service_id,
             service_name=item.service.name,
+            service_variant_id=item.service_variant_id,
+            variant_label=variant_label,
             quantity=item.quantity,
             unit_price=item.unit_price,
             total_price=item.total_price,
