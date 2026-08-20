@@ -1,26 +1,41 @@
-# Deploy backend to beta (App Runner via ECR).
+# Deploy backend to beta (App Runner via ECR), with an optional pre-deploy
+# alembic upgrade gated on the merged PR carrying the `db-migrate` label.
 #
-# Auth via GitHub OIDC → assume `eazyserv-github-deploy` IAM role
-# (created in AWS Setup Part 5.5). No long-lived AWS keys as GH secrets.
+# Auth via GitHub OIDC → assume `eazyserv-github-deploy` IAM role.
 #
-# Manual trigger for now (workflow_dispatch) so I can rebuild without
-# a code push. Auto-deploy on push to main enabled once we're confident
-# the pipeline is stable — pattern: uncomment the `push:` block.
+# Triggers:
+#   - push: main       → auto-deploy every merge. If the merge commit's PR
+#                        has the `db-migrate` label, run migrations first.
+#   - workflow_dispatch → manual bypass. Toggle `run_migration` to also run
+#                         alembic upgrade head before deploying.
+#
+# Ordering guarantee: migrate (if requested) always completes before the
+# ECR push, so App Runner never rolls new pods against an unmigrated schema.
+#
+# Failure guarantee: if migrate fails, the deploy step is skipped — old
+# code + old schema keeps serving. Loud alert, zero silent downtime.
+#
+# Concurrency: single group, no cancels. Two rapid merges queue.
 
 name: Deploy backend to beta
 
 on:
-  workflow_dispatch:  # manual trigger from the Actions tab
-  # push:
-  #   branches: [main]
-  #   paths-ignore:
-  #     - '**.md'
-  #     - '.gitignore'
-  #     - 'docs/**'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      run_migration:
+        description: "Also run 'alembic upgrade head' before deploying"
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-beta
-  cancel-in-progress: false  # never cancel a deploy mid-flight
+  cancel-in-progress: false
 
 env:
   AWS_REGION: ap-south-1
@@ -28,18 +43,97 @@ env:
   IMAGE_TAG: beta
 
 jobs:
-  build-and-push:
+  # --------------------------------------------------------------------
+  # Look up the PR that produced this merge commit and inspect its labels.
+  # `should_migrate=true` iff the label is present (push path) OR the
+  # manual toggle was set (workflow_dispatch path).
+  # --------------------------------------------------------------------
+  detect_label:
+    runs-on: ubuntu-latest
+    outputs:
+      should_migrate: ${{ steps.check.outputs.should_migrate }}
+    steps:
+      - name: Determine whether to run migrations
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "workflow_dispatch: honoring run_migration=${{ inputs.run_migration }}"
+            echo "should_migrate=${{ inputs.run_migration }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # push path — find the PR the merge commit came from. Squash-merges
+          # produce one commit → one PR association; the API returns [] for
+          # direct-to-main pushes (no PR), in which case we skip migrations.
+          PR_NUMBER=$(gh api \
+            "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '.[0].number // empty' 2>/dev/null || echo "")
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR associated with ${{ github.sha }} — skipping migration."
+            echo "should_migrate=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LABELS=$(gh pr view "$PR_NUMBER" \
+            --repo ${{ github.repository }} \
+            --json labels --jq '[.labels[].name] | join(",")')
+          echo "PR #$PR_NUMBER labels: $LABELS"
+          # Comma-wrap both sides so a partial name match ("db-migrate-later")
+          # doesn't false-positive.
+          if echo ",$LABELS," | grep -q ',db-migrate,'; then
+            echo "db-migrate label present → will run migrations."
+            echo "should_migrate=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "db-migrate label absent → skipping migration."
+            echo "should_migrate=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # --------------------------------------------------------------------
+  # Call the reusable migration workflow. Only fires when detect_label
+  # says so. `alembic upgrade head` runs against the beta Neon DB.
+  # --------------------------------------------------------------------
+  migrate:
+    needs: detect_label
+    if: needs.detect_label.outputs.should_migrate == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/migrate-beta.yml
+    with:
+      direction: upgrade
+      target: head
+
+  # --------------------------------------------------------------------
+  # Build the image and push to ECR. App Runner is configured with
+  # auto_deployments_enabled=true so pushing :beta triggers a rolling
+  # redeploy within 2-3 min.
+  #
+  # `if: always() && needs.migrate.result != 'failure' && ...` runs the
+  # deploy when:
+  #   - migrate succeeded         (result == 'success')
+  #   - migrate was skipped       (result == 'skipped'; no label present)
+  # and BLOCKS the deploy when:
+  #   - migrate failed
+  #   - migrate was cancelled
+  # `always()` is needed to override GHA's default "skip if any need was
+  # skipped" behaviour.
+  # --------------------------------------------------------------------
+  deploy:
+    needs: [detect_label, migrate]
+    if: |
+      always()
+      && needs.migrate.result != 'failure'
+      && needs.migrate.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # required for OIDC
+      id-token: write
       contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # OIDC → assume the ECR-push role. Sub-second, no long-lived creds
-      # sitting in GH secrets.
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::018272776203:role/eazyserv-github-deploy
@@ -49,8 +143,6 @@ jobs:
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Buildx gives us layer caching between runs via the GitHub Actions
-      # cache backend — subsequent builds are 30-60s instead of 3-4 min.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -59,24 +151,16 @@ jobs:
         with:
           context: .
           push: true
-          platforms: linux/amd64  # App Runner runs on x86; DON'T let buildx
-                                  # pick arm64 from a Mac runner
+          platforms: linux/amd64
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # App Runner is configured (in AWS Setup Part 2.6) with
-      # `auto_deployments_enabled = true`, so pushing a new :beta tag
-      # triggers a rolling redeploy within 2-3 min. No API call needed
-      # from here. If the service isn't set up yet (first-time bringup),
-      # this step is skipped and the image just sits in ECR ready for
-      # the manual apprunner:create-service call in the runbook.
-
-      - name: Note next steps
+      - name: Summary
         run: |
-          echo "Image pushed: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:beta"
+          echo "Migration ran: ${{ needs.detect_label.outputs.should_migrate }}"
+          echo "Image pushed:  ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:beta"
           echo ""
-          echo "If App Runner service exists: auto-deploys in 2-3 min."
-          echo "If not: run the create-service step from AWS_SETUP.md Part 2.6."
+          echo "App Runner will roll new pods in 2-3 min."

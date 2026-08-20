@@ -119,12 +119,34 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
+    import os
+
     from app.config import get_settings
 
     settings = get_settings()
 
+    # Prefer ALEMBIC_DATABASE_URL so operators can point a run at a specific
+    # DB (beta, a Neon branch, a throwaway) without editing .env. Offline
+    # mode has always respected this via get_url() — online mode used to
+    # hard-code settings.DATABASE_URL, which meant `ALEMBIC_DATABASE_URL=... alembic
+    # upgrade head` silently migrated whichever DB .env pointed at. Accept
+    # a sync-form URL (psycopg2) too and convert to asyncpg for the engine.
+    override = os.getenv("ALEMBIC_DATABASE_URL")
+    if override:
+        db_url = (
+            override.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
+            .replace("psycopg2://", "postgresql+asyncpg://")
+        )
+        if db_url.startswith("postgresql://"):
+            db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        # asyncpg uses `ssl=`, psycopg2 uses `sslmode=` — same semantics,
+        # different key. Translate so an operator can paste either form.
+        db_url = db_url.replace("sslmode=require", "ssl=require")
+    else:
+        db_url = settings.DATABASE_URL
+
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = settings.DATABASE_URL
+    configuration["sqlalchemy.url"] = db_url
 
     connectable = async_engine_from_config(
         configuration,

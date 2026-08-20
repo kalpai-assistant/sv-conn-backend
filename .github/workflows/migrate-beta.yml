@@ -1,0 +1,113 @@
+# Run alembic against the beta DB (Neon).
+#
+# Two callers:
+#   - workflow_call from deploy-beta.yml (post-merge auto path — only fires
+#     when the merged PR carries the `db-migrate` label).
+#   - workflow_dispatch (manual — for hotfix upgrades, downgrades, or pinning
+#     to a specific revision).
+#
+# Auth: same OIDC role as deploy-beta.yml (`eazyserv-github-deploy`). Role
+# has an inline policy (`ssm-read-beta-db-urls`) granting GetParameter on
+# `/eazyserv/beta/DATABASE_URL` + `/eazyserv/beta/SYNC_DATABASE_URL` and
+# `kms:Decrypt` on the account SSM key. Adding a new secret to the params
+# read here means adding it to that policy too.
+
+name: Migrate beta DB
+
+on:
+  workflow_call:
+    inputs:
+      direction:
+        description: "upgrade or downgrade"
+        type: string
+        required: false
+        default: upgrade
+      target:
+        description: "Alembic target (head, -1, or a specific revision id)"
+        type: string
+        required: false
+        default: head
+  workflow_dispatch:
+    inputs:
+      direction:
+        description: "upgrade or downgrade"
+        type: choice
+        options: [upgrade, downgrade]
+        default: upgrade
+      target:
+        description: "Alembic target (head, -1, or a specific revision id)"
+        type: string
+        required: true
+        default: head
+
+concurrency:
+  # One migration at a time, ever. Second run waits for the first to
+  # finish (or fail) rather than racing. Alembic's own advisory lock is
+  # the belt on these suspenders — this keeps us out of that scenario.
+  group: migrate-beta
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC assume-role
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies (frozen)
+        run: uv sync --frozen
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::018272776203:role/eazyserv-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fetch DB URL from SSM
+        run: |
+          set -euo pipefail
+          DB_URL=$(aws ssm get-parameter \
+            --name /eazyserv/beta/DATABASE_URL \
+            --with-decryption \
+            --query 'Parameter.Value' \
+            --output text)
+          # Mask the value so it never appears in job logs even by accident.
+          echo "::add-mask::$DB_URL"
+          echo "DATABASE_URL=$DB_URL" >> "$GITHUB_ENV"
+
+      - name: Alembic ${{ inputs.direction }} ${{ inputs.target }}
+        # app/config.py enforces min-length on ENCRYPTION_KEY + presence of
+        # JWT_SECRET_KEY; alembic env.py imports settings even though the
+        # migration doesn't need them. Feed dummy values here — the actual
+        # runtime secrets live in App Runner env, not touched by migrations.
+        env:
+          ENVIRONMENT: beta
+          JWT_SECRET_KEY: migrate-only-not-used-for-signing
+          ENCRYPTION_KEY: migrate-only-32-bytes-padding-x
+          RAZORPAY_KEY_ID: unused
+          RAZORPAY_KEY_SECRET: unused
+          RAZORPAY_WEBHOOK_SECRET: unused
+          RAZORPAYX_WEBHOOK_SECRET: unused
+          RAZORPAYX_ACCOUNT_NUMBER: "0000000000"
+        run: |
+          echo "Alembic ${{ inputs.direction }} to ${{ inputs.target }}"
+          uv run alembic current
+          uv run alembic ${{ inputs.direction }} ${{ inputs.target }}
+          echo "--- after ---"
+          uv run alembic current

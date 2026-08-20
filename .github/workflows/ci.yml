@@ -145,3 +145,55 @@ jobs:
 
       - name: Run pytest
         run: uv run pytest tests/ -v --tb=short
+
+  # Fails a PR if it adds a new alembic migration but doesn't carry the
+  # `db-migrate` label. Without this guard, the deploy pipeline silently
+  # skips migrations on merge and the beta DB drifts behind main — exactly
+  # what happened before this workflow existed. Runs only on PRs (push:main
+  # is too late — the merge already happened).
+  migration-label-check:
+    name: db-migrate label present when migration added
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Need the base ref locally to diff against it.
+          fetch-depth: 0
+
+      - name: Detect new migration files
+        id: detect
+        run: |
+          set -euo pipefail
+          BASE="origin/${{ github.base_ref }}"
+          NEW=$(git diff --name-only --diff-filter=A "$BASE"...HEAD -- 'alembic/versions/*.py' || true)
+          if [ -n "$NEW" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "New migration files in this PR:"
+            echo "$NEW"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No new migration files in this PR."
+          fi
+
+      - name: Enforce db-migrate label
+        if: steps.detect.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --json labels --jq '[.labels[].name] | join(",")')
+          echo "PR labels: $LABELS"
+          if echo ",$LABELS," | grep -q ',db-migrate,'; then
+            echo "OK — db-migrate label present."
+          else
+            echo "::error::This PR adds a new alembic migration but is missing the 'db-migrate' label."
+            echo "::error::Add the label to have 'alembic upgrade head' run on merge (deploy-beta.yml)."
+            exit 1
+          fi
