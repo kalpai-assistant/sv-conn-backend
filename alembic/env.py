@@ -133,9 +133,8 @@ async def run_async_migrations() -> None:
     # a sync-form URL (psycopg2) too and convert to asyncpg for the engine.
     override = os.getenv("ALEMBIC_DATABASE_URL")
     if override:
-        db_url = (
-            override.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
-            .replace("psycopg2://", "postgresql+asyncpg://")
+        db_url = override.replace("postgresql+psycopg2://", "postgresql+asyncpg://").replace(
+            "psycopg2://", "postgresql+asyncpg://"
         )
         if db_url.startswith("postgresql://"):
             db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
