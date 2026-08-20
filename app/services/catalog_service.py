@@ -7,6 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.exceptions import ServiceNotFound
 from app.models.category import Category
@@ -72,6 +73,11 @@ class CatalogService:
         )
         self.db.add(service)
         await self.db.flush()
+        # ServiceResponse embeds .variants, and the relationship is
+        # `raise_on_sql`. A brand-new service has no variants — mark the
+        # collection as loaded-empty so pydantic can serialise it without
+        # tripping the sentinel. (Admin adds variants via a separate flow.)
+        set_committed_value(service, "variants", [])
         return service
 
     async def update_service(
@@ -80,7 +86,12 @@ class CatalogService:
         **fields,
     ) -> Service:
         """Admin-only: update a global catalog service."""
-        service = await self.db.get(Service, service_id)
+        # Load with variants eagerly so the response can render them
+        # without a raise_on_sql fault at serialisation time.
+        stmt = (
+            select(Service).where(Service.id == service_id).options(selectinload(Service.variants))
+        )
+        service = (await self.db.execute(stmt)).scalar_one_or_none()
         if not service:
             raise ServiceNotFound(service_id)
         for key, value in fields.items():
