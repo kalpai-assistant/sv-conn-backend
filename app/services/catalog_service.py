@@ -6,10 +6,13 @@ import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.exceptions import ServiceNotFound
 from app.models.category import Category
 from app.models.service import Service
+from app.models.service_variant import ServiceVariant
 
 
 class CatalogService:
@@ -36,7 +39,17 @@ class CatalogService:
         self,
         category_id: uuid.UUID | None = None,
     ) -> list[Service]:
-        stmt = select(Service).where(Service.is_active.is_(True))
+        # Eager-load variants because ServiceResponse embeds them + the
+        # relationship is `lazy="raise_on_sql"` — pydantic would otherwise
+        # fault on serialisation, and even if it didn't, the read path would
+        # fire one query per service (N+1) on a listing that can return
+        # dozens of rows. `.options(selectinload(...))` fetches all variants
+        # in one round-trip keyed by service_id.
+        stmt = (
+            select(Service)
+            .where(Service.is_active.is_(True))
+            .options(selectinload(Service.variants.and_(ServiceVariant.is_active.is_(True))))
+        )
         if category_id:
             stmt = stmt.where(Service.category_id == category_id)
         result = await self.db.execute(stmt)
@@ -60,6 +73,11 @@ class CatalogService:
         )
         self.db.add(service)
         await self.db.flush()
+        # ServiceResponse embeds .variants, and the relationship is
+        # `raise_on_sql`. A brand-new service has no variants — mark the
+        # collection as loaded-empty so pydantic can serialise it without
+        # tripping the sentinel. (Admin adds variants via a separate flow.)
+        set_committed_value(service, "variants", [])
         return service
 
     async def update_service(
@@ -68,7 +86,12 @@ class CatalogService:
         **fields,
     ) -> Service:
         """Admin-only: update a global catalog service."""
-        service = await self.db.get(Service, service_id)
+        # Load with variants eagerly so the response can render them
+        # without a raise_on_sql fault at serialisation time.
+        stmt = (
+            select(Service).where(Service.id == service_id).options(selectinload(Service.variants))
+        )
+        service = (await self.db.execute(stmt)).scalar_one_or_none()
         if not service:
             raise ServiceNotFound(service_id)
         for key, value in fields.items():

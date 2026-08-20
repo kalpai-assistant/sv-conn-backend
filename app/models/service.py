@@ -47,3 +47,13 @@ class Service(Base):
     )
 
     category: Mapped["Category"] = relationship("Category", back_populates="services")
+    # `lazy="raise_on_sql"`: routes that render variants (GET /services,
+    # service detail, cart) call an attach helper explicitly. A caller who
+    # forgets should fail loudly here rather than trigger a MissingGreenlet
+    # inside pydantic, or on a list route, one implicit lookup per row.
+    variants: Mapped[list["ServiceVariant"]] = relationship(
+        "ServiceVariant",
+        back_populates="service",
+        lazy="raise_on_sql",
+        order_by="ServiceVariant.sort_order",
+    )

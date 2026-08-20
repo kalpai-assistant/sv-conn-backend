@@ -42,6 +42,11 @@ dev = [
     # SVC-157: validates live response bodies against the OpenAPI schema
     # declared on each route. Only used in tests/test_api_contracts.py.
     "jsonschema>=4.23,<5.0",
+    # Scripts/seeding: scripts/seed_pricing_from_xlsx.py reads the launch
+    # pricing workbook. Runtime image doesn't need it (seed is a one-off
+    # operator action, not something the API serves) so it lives here
+    # instead of main deps.
+    "openpyxl>=3.1,<4.0",
 ]
 
 [tool.pytest.ini_options]

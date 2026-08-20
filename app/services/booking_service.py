@@ -34,6 +34,7 @@ from app.models.booking_item import BookingItem
 from app.models.booking_status_log import BookingStatusLog
 from app.models.provider_profile import ProviderProfile
 from app.models.service import Service
+from app.models.service_variant import ServiceVariant
 from app.models.user import UserRole
 from app.schemas.booking import (
     BookingListResponse,
@@ -123,7 +124,13 @@ class BookingService:
 
         rows = await self.db.execute(
             select(BookingItem)
-            .options(selectinload(BookingItem.service))
+            .options(
+                selectinload(BookingItem.service),
+                # Eager-load the variant too so BookingItemResponse.from_item
+                # can read ``item.service_variant.label`` without tripping
+                # raise_on_sql. Nullable relationship — selectinload copes.
+                selectinload(BookingItem.service_variant),
+            )
             .where(BookingItem.booking_id.in_(booking_ids))
         )
         by_booking: dict[uuid.UUID, list[BookingItem]] = {}
@@ -173,7 +180,11 @@ class BookingService:
         # worse if a client ever pushes to the ``quantity <= 10`` limit
         # across ten distinct services.
         service_ids = [i.service_id for i in items]
-        rows = await self.db.execute(select(Service).where(Service.id.in_(service_ids)))
+        rows = await self.db.execute(
+            select(Service)
+            .where(Service.id.in_(service_ids))
+            .options(selectinload(Service.variants))
+        )
         services_by_id = {s.id: s for s in rows.scalars()}
 
         for item in items:
@@ -183,27 +194,94 @@ class BookingService:
                 # can't fulfil, which is a request problem, not a resource one.
                 raise ValueError(f"Service {item.service_id} not found or inactive")
 
-        # Exact decimal arithmetic per line (SVC-150). Commission is the rounded
-        # half, payout is the remainder — so the two always add back to exactly
-        # the line total and no paisa is invented or lost in the split. Applied
-        # per item so the same guarantee holds for a multi-service cart.
+        # Second query for the explicitly-requested variants (if any), so
+        # a caller who sent a stale variant_id fails cleanly rather than
+        # silently falling back to the service's first variant.
+        variant_ids = [i.service_variant_id for i in items if i.service_variant_id is not None]
+        variants_by_id: dict[uuid.UUID, ServiceVariant] = {}
+        if variant_ids:
+            var_rows = await self.db.execute(
+                select(ServiceVariant).where(ServiceVariant.id.in_(variant_ids))
+            )
+            variants_by_id = {v.id: v for v in var_rows.scalars()}
+            for item in items:
+                if item.service_variant_id is None:
+                    continue
+                v = variants_by_id.get(item.service_variant_id)
+                if v is None or not v.is_active or v.service_id != item.service_id:
+                    raise ValueError(
+                        f"Variant {item.service_variant_id} not found, inactive, "
+                        f"or does not belong to service {item.service_id}"
+                    )
+
+        # Legacy split (SVC-150) used for services that don't yet carry
+        # variants — the pre-Pune-pricing rows. Once every seed row has a
+        # variant this branch dies.
         commission_rate = to_decimal(settings.PLATFORM_COMMISSION_PERCENT) / 100
 
         # First pass: compute totals so we can seed the Booking row with the
         # aggregates. Second pass (after flush) creates the item rows keyed
-        # to the booking id.
-        item_lines: list[tuple[CreateBookingItemRequest, Service, Decimal, Decimal, Decimal]] = []
+        # to the booking id. Variant carries authoritative unit_price +
+        # provider_payout snapshot; the split ratio isn't a global constant
+        # any more (launch summary is 70/30, verticals 65/35), so we no
+        # longer derive it from PLATFORM_COMMISSION_PERCENT when a variant
+        # is in play.
+        item_lines: list[
+            tuple[
+                CreateBookingItemRequest,
+                Service,
+                ServiceVariant | None,
+                Decimal,
+                Decimal,
+                Decimal,
+                Decimal,
+            ]
+        ] = []
         for item in items:
             svc = services_by_id[item.service_id]
-            unit_price = to_decimal(svc.base_price)
-            total_price = to_decimal(unit_price * item.quantity)
-            platform_commission = to_decimal(total_price * commission_rate)
-            provider_payout = total_price - platform_commission
-            item_lines.append((item, svc, total_price, platform_commission, provider_payout))
+            variant: ServiceVariant | None = None
+            if item.service_variant_id is not None:
+                variant = variants_by_id[item.service_variant_id]
+            elif svc.variants:
+                # Fallback: caller sent only service_id. Pick the first
+                # active variant by sort_order. Documented as intentional
+                # in the schema comment on CreateBookingItemRequest.
+                variant = next((v for v in svc.variants if v.is_active), None)
 
-        total_service_amount = sum((line[2] for line in item_lines), start=Decimal(0))
-        total_platform_commission = sum((line[3] for line in item_lines), start=Decimal(0))
-        total_provider_payout = sum((line[4] for line in item_lines), start=Decimal(0))
+            if variant is not None:
+                unit_price = to_decimal(variant.base_price)
+                unit_provider_payout = to_decimal(variant.provider_payout)
+                unit_platform_commission = to_decimal(variant.platform_commission)
+                total_price = to_decimal(unit_price * item.quantity)
+                platform_commission = to_decimal(unit_platform_commission * item.quantity)
+                provider_payout = to_decimal(unit_provider_payout * item.quantity)
+            else:
+                # Pre-variant service: fall back to services.base_price + the
+                # config-driven split. Once the seed loads every service with
+                # at least one variant this branch is dead code.
+                unit_price = to_decimal(svc.base_price)
+                total_price = to_decimal(unit_price * item.quantity)
+                platform_commission = to_decimal(total_price * commission_rate)
+                provider_payout = total_price - platform_commission
+
+            item_lines.append(
+                (
+                    item,
+                    svc,
+                    variant,
+                    unit_price,
+                    total_price,
+                    platform_commission,
+                    provider_payout,
+                )
+            )
+
+        # Line tuple indices (item, svc, variant, unit_price, total_price,
+        # platform_commission, provider_payout) — the totals are the last
+        # three, one shift right of the pre-variant tuple.
+        total_service_amount = sum((line[4] for line in item_lines), start=Decimal(0))
+        total_platform_commission = sum((line[5] for line in item_lines), start=Decimal(0))
+        total_provider_payout = sum((line[6] for line in item_lines), start=Decimal(0))
 
         # Coupon application. Validated with the cart total *before* the
         # booking row is added so an invalid code refuses the request cleanly
@@ -262,16 +340,40 @@ class BookingService:
         # it now would count as a mutation rather than a load, tripping the
         # ``raise_on_sql`` sentinel we depend on for read-path hygiene.
         item_rows: list[BookingItem] = []
-        for req, svc, total_price, platform_commission, provider_payout in item_lines:
+        for (
+            req,
+            svc,
+            variant,
+            unit_price,
+            total_price,
+            platform_commission,
+            provider_payout,
+        ) in item_lines:
             item_row = BookingItem(
                 booking_id=booking.id,
                 service_id=svc.id,
+                # None for pre-variant services; the fallback path in
+                # create_booking above computes the split from base_price.
+                # Once the seed loads every service with variants this
+                # stays populated on every row.
+                service_variant_id=variant.id if variant is not None else None,
                 quantity=req.quantity,
-                unit_price=svc.base_price,
+                # unit_price comes from the variant when present, from
+                # services.base_price otherwise. Either way it's snapshotted
+                # here so a later price update on the catalogue does not
+                # retro-alter the bill.
+                unit_price=unit_price,
                 total_price=total_price,
                 platform_commission=platform_commission,
                 provider_payout=provider_payout,
             )
+            # Same reasoning as `items` below: populate the relationship
+            # attribute manually so the response builder that runs after
+            # this method doesn't fault on raise_on_sql for service_variant.
+            if variant is not None:
+                set_committed_value(item_row, "service_variant", variant)
+            else:
+                set_committed_value(item_row, "service_variant", None)
             self.db.add(item_row)
             item_rows.append(item_row)
         await self.db.flush()

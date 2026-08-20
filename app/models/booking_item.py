@@ -56,6 +56,12 @@ class BookingItem(Base):
     service_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("services.id"), index=True
     )
+    # Nullable during the variant rollout. See the migration comment on
+    # a91c4d2b7f18. When set, the item's money columns were snapshotted
+    # from this variant's price/payout/commission at booking time.
+    service_variant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("service_variants.id"), index=True
+    )
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     # Price *at booking time*, not the live services.base_price. See module
     # docstring — a later catalogue price change must not retro-alter the bill.
@@ -82,3 +88,6 @@ class BookingItem(Base):
     # trigger a MissingGreenlet inside pydantic — or, on a list route, one
     # implicit lookup per row.
     service: Mapped["Service"] = relationship("Service", lazy="raise_on_sql")
+    service_variant: Mapped["ServiceVariant | None"] = relationship(
+        "ServiceVariant", lazy="raise_on_sql"
+    )
