@@ -50,6 +50,16 @@ jobs:
   # --------------------------------------------------------------------
   detect_label:
     runs-on: ubuntu-latest
+    # BOTH scopes needed. `commits/{sha}/pulls` requires
+    # `pull-requests: read` (returns PRs associated with a commit),
+    # and `gh pr view` also needs `contents: read`. Without these the
+    # step exits with `Resource not accessible by integration`,
+    # `should_migrate` defaults to false, and a labeled PR is silently
+    # deployed against an unmigrated schema — SVC-pricing (2026-08-20)
+    # merged this way and the migration had to be run by hand.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       should_migrate: ${{ steps.check.outputs.should_migrate }}
     steps:
@@ -67,9 +77,12 @@ jobs:
           # push path — find the PR the merge commit came from. Squash-merges
           # produce one commit → one PR association; the API returns [] for
           # direct-to-main pushes (no PR), in which case we skip migrations.
+          # NOTE: don't 2>/dev/null the gh api call — it hides permission
+          # errors, and a silent-skip on failure is exactly the bug we
+          # just paid for.
           PR_NUMBER=$(gh api \
             "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
-            --jq '.[0].number // empty' 2>/dev/null || echo "")
+            --jq '.[0].number // empty')
           if [ -z "$PR_NUMBER" ]; then
             echo "No PR associated with ${{ github.sha }} — skipping migration."
             echo "should_migrate=false" >> "$GITHUB_OUTPUT"
