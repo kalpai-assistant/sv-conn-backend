@@ -31,7 +31,10 @@ COPY . .
 # Entrypoint materialises any base64-encoded secrets from SSM-injected env
 # vars into on-disk files the app expects (currently just FCM_CREDENTIALS_JSON
 # → FCM_CREDENTIALS_PATH). See docker-entrypoint.sh comments.
-RUN chmod +x /code/docker-entrypoint.sh
+# docker-worker-entrypoint.sh is the CMD override the Celery worker App
+# Runner service passes as StartCommand (SVC-228) — chmod both here so
+# either can be exec'd from the outer entrypoint.
+RUN chmod +x /code/docker-entrypoint.sh /code/docker-worker-entrypoint.sh
 ENTRYPOINT ["/code/docker-entrypoint.sh"]
 
 EXPOSE 8000
