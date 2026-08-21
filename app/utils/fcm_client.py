@@ -88,3 +88,79 @@ def send_push_notification(
         token=token,
     )
     return messaging.send(message)
+
+
+# FCM's multicast API caps at 500 tokens per call. Anything beyond that
+# is one HTTP request per chunk. The number is a hard FCM limit — do not
+# raise it thinking it'll go faster.
+_MULTICAST_CHUNK_SIZE = 500
+
+
+def send_multicast(
+    tokens: list[str],
+    title: str,
+    body: str,
+    data: dict[str, str] | None = None,
+) -> dict[str, int]:
+    """
+    Fan out one push to many device tokens (SVC-227). Used by
+    ``broadcast_update_available`` and any future admin broadcast.
+
+    Chunked at 500 (FCM's per-call cap). Returns a summary
+    ``{"success_count": N, "failure_count": N}`` so the caller can log
+    without walking every response.
+
+    Non-production without credentials mirrors ``send_push_notification``:
+    log-and-count-as-success so tests and dev can drive the flow without
+    real Firebase creds. Production still hard-refuses on missing creds
+    so silent no-delivery cannot happen there.
+
+    Failed tokens are logged individually so an operator can spot a
+    pattern (e.g. every push failing = credential rotation needed) but
+    the return is aggregate to keep the caller's log line short.
+    """
+    if not tokens:
+        return {"success_count": 0, "failure_count": 0}
+
+    if not is_configured():
+        if settings.ENVIRONMENT == "production":
+            raise RuntimeError(
+                "FCM_CREDENTIALS_PATH is not configured. "
+                "Provide the path to your Firebase service account JSON."
+            )
+        logger.warning(
+            "fcm_not_configured_multicast_logged_not_sent",
+            recipient_count=len(tokens),
+            title=title,
+            body=body,
+            data=data or {},
+            environment=settings.ENVIRONMENT,
+        )
+        return {"success_count": len(tokens), "failure_count": 0}
+
+    _get_app()
+    success = 0
+    failure = 0
+    for start in range(0, len(tokens), _MULTICAST_CHUNK_SIZE):
+        chunk = tokens[start : start + _MULTICAST_CHUNK_SIZE]
+        message = messaging.MulticastMessage(
+            notification=messaging.Notification(title=title, body=body),
+            data=data or {},
+            tokens=chunk,
+        )
+        # send_each_for_multicast returns per-token results — needed so a
+        # bad token in the batch doesn't fail-fast the whole chunk. The
+        # legacy send_multicast() is deprecated in firebase-admin >= 6.
+        batch = messaging.send_each_for_multicast(message)
+        success += batch.success_count
+        failure += batch.failure_count
+        for i, resp in enumerate(batch.responses):
+            if not resp.success:
+                # Token itself is not logged — the logging pipeline
+                # redacts anything with "token" in the key anyway (SVC-46).
+                logger.warning(
+                    "fcm_multicast_send_failed",
+                    chunk_index=start + i,
+                    error=str(resp.exception),
+                )
+    return {"success_count": success, "failure_count": failure}
