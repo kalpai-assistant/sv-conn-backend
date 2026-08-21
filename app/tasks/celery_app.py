@@ -7,10 +7,36 @@ from app.logging_config import configure_logging
 
 settings = get_settings()
 
+
+def _redis_url_with_ssl_reqs(url: str) -> str:
+    """Append ``ssl_cert_reqs=CERT_REQUIRED`` when Redis is over TLS.
+
+    Celery's Redis result-backend initialiser hard-refuses a ``rediss://``
+    URL that doesn't declare an explicit ``ssl_cert_reqs`` param
+    (celery/backends/redis.py raises
+    ``E_REDIS_SSL_CERT_REQS_MISSING_INVALID`` at Backend construction time,
+    which is the first ``.delay()`` from any process). Beta's Upstash URL
+    is ``rediss://…`` — every route path that fires a Celery task
+    (bookings, payouts, the SVC-227 update-broadcast) trips this.
+
+    Discovered when SVC-227.2's release endpoint was the first
+    ``notify=true`` call from the API after the SSM param existed.
+    ``CERT_REQUIRED`` (not ``CERT_NONE``) because Upstash presents a
+    proper CA-signed cert; we want the verify.
+
+    No-op on non-TLS ``redis://`` (local dev) and on URLs that already
+    declare the param.
+    """
+    if url.startswith("rediss://") and "ssl_cert_reqs" not in url:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}ssl_cert_reqs=CERT_REQUIRED"
+    return url
+
+
 celery_app = Celery(
     "eazyserv",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL,
+    broker=_redis_url_with_ssl_reqs(settings.REDIS_URL),
+    backend=_redis_url_with_ssl_reqs(settings.REDIS_URL),
 )
 
 
