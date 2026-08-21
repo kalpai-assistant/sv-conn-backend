@@ -104,6 +104,14 @@ class Settings(BaseSettings):
     # Firebase
     FCM_CREDENTIALS_PATH: str = ""
 
+    # SVC-227.2: CI-only token that lets release-apk.yml call the release
+    # endpoint (POST /admin/app-versions/{platform}/release) without a
+    # human admin JWT. Compared with hmac.compare_digest against the
+    # X-Internal-Release-Token header; nothing else grants admin-like
+    # access anywhere in the app. Empty string here disables the
+    # alt-auth path entirely — set only via SSM in prod-shaped envs.
+    INTERNAL_RELEASE_TOKEN: str = ""
+
     # Storage
     S3_BUCKET_NAME: str = ""
     S3_ENDPOINT_URL: str = ""  # MinIO endpoint for local dev
