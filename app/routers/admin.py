@@ -6,7 +6,8 @@ All endpoints require the "admin" role.
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -357,6 +358,80 @@ async def requeue_reversed_settlements(
 # ---------------------------------------------------------------------------
 
 
+async def _require_admin_or_release_token(
+    request: Request,
+    x_internal_release_token: str | None = Header(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False)),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Alt-auth for the release endpoint (SVC-227.2).
+
+    Accepts EITHER:
+      - `X-Internal-Release-Token` header matching
+        ``settings.INTERNAL_RELEASE_TOKEN`` (CI path — `release-apk.yml`), OR
+      - Standard admin JWT (human path — same as every other admin route).
+
+    Header path is scoped to THIS ONE endpoint — nothing else in the
+    app accepts it. `hmac.compare_digest` to defeat timing attacks.
+    Empty ``settings.INTERNAL_RELEASE_TOKEN`` disables the header path
+    entirely; the endpoint then behaves like every other admin route.
+
+    Written as one dep (rather than two Depends parameters) because
+    FastAPI runs deps eagerly — a `require_role("admin")` dep alongside
+    this one would hard-401 on missing JWT even when the header path
+    already succeeded. The `HTTPBearer(auto_error=False)` in this
+    signature is the trick that lets us decide the branch ourselves.
+
+    ``request.state.release_auth`` records which path won ("token" or
+    "jwt") so a Sentry event / access log can distinguish CI-driven
+    releases from human ones — CI-driven releases lose the "who"
+    otherwise.
+    """
+    import hmac
+
+    from app.config import get_settings
+    from app.dependencies import _tag_sentry_user
+
+    settings = get_settings()
+    if (
+        x_internal_release_token
+        and settings.INTERNAL_RELEASE_TOKEN
+        and hmac.compare_digest(x_internal_release_token, settings.INTERNAL_RELEASE_TOKEN)
+    ):
+        request.state.release_auth = "token"
+        return
+
+    # JWT path — inline the check rather than delegating to the standard
+    # `require_role("admin")` dep so we can return a specific 401 when
+    # neither auth method was provided at all (vs 403 for a wrong-role
+    # JWT). Same JWT decode + user lookup as `get_current_user`.
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "Auth required: either admin JWT via `Authorization: Bearer <jwt>` "
+                "or CI token via `X-Internal-Release-Token`."
+            ),
+        )
+
+    from app.utils.security import decode_jwt
+
+    payload = decode_jwt(credentials.credentials)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token"
+        )
+    user = await db.get(User, UUID(payload["sub"]))
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive"
+        )
+    if user.role.value != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+    _tag_sentry_user(str(user.id), user.role.value)
+    request.state.release_auth = "jwt"
+
+
 class PublishReleaseRequest(BaseModel):
     """Bump the current version + optionally push a nudge to every device.
 
@@ -407,11 +482,12 @@ class PublishReleaseResponse(BaseModel):
 @router.post(
     "/app-versions/{platform}/release",
     response_model=PublishReleaseResponse,
-    dependencies=[_admin_dep],
+    dependencies=[Depends(_require_admin_or_release_token)],
 )
 async def publish_app_release(
     platform: str,
     request: PublishReleaseRequest,
+    http_request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """One-shot publish: bump `app_versions.{platform}` + (optionally) push
@@ -460,6 +536,18 @@ async def publish_app_release(
     # a fresh release. See app_versions.released_at.
     row.released_at = datetime.now(UTC)
     await db.flush()
+
+    # Log auth path so we can tell CI vs human releases apart in Sentry /
+    # CloudWatch — the alt-auth path has no user object to attribute it to.
+    import structlog
+
+    structlog.get_logger(__name__).info(
+        "app_version_published",
+        platform=platform,
+        version=request.version,
+        notify=request.notify,
+        release_auth=getattr(http_request.state, "release_auth", "unknown"),
+    )
 
     task_id: str | None = None
     if request.notify:
