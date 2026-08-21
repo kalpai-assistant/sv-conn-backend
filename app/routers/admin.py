@@ -3,15 +3,18 @@ Admin router: user management, booking oversight, and KYC approval.
 All endpoints require the "admin" role.
 """
 
+from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import require_role
 from app.exceptions import BookingNotFound
+from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, SettlementStatus
 from app.models.payment import Payment
 from app.models.provider_profile import KYCStatus, ProviderProfile
@@ -346,4 +349,132 @@ async def requeue_reversed_settlements(
     """
     return await PayoutService(db).requeue_settlements(
         user_id, admin.id, from_status=SettlementStatus.REVERSED
+    )
+
+
+# ---------------------------------------------------------------------------
+# App version releases (SVC-227)
+# ---------------------------------------------------------------------------
+
+
+class PublishReleaseRequest(BaseModel):
+    """Bump the current version + optionally push a nudge to every device.
+
+    ``version`` is the customer-facing SemVer of the new build. The
+    matching APK must already be at ``app_versions.url`` (usually
+    ``s3://eazyserv-downloads/apk/latest.apk``, since ``release-apk.yml``
+    always overwrites that key). If they don't match, users will nudge
+    themselves onto a version we haven't shipped yet.
+
+    ``min_supported_version``, when passed, atomically hard-blocks anyone
+    below it — the SVC-162 emergency lever. Leave it unset to keep the
+    current threshold.
+
+    ``notify`` = true enqueues the FCM broadcast (``broadcast_update_available``).
+    Set to false when releasing a build we don't want to interrupt users
+    over (e.g. a silent metrics fix — the poll on next foreground will
+    still surface the nudge).
+    """
+
+    version: str = Field(..., min_length=1, max_length=32)
+    min_supported_version: str | None = Field(None, max_length=32)
+    release_notes: str | None = Field(None, max_length=2000)
+    url: str | None = Field(
+        None,
+        max_length=500,
+        description=(
+            "New APK URL. Usually stays the same because release-apk.yml "
+            "overwrites apk/latest.apk in place."
+        ),
+    )
+    notify: bool = Field(
+        default=True,
+        description="Fire the FCM broadcast so users learn about the update without opening the app.",
+    )
+
+
+class PublishReleaseResponse(BaseModel):
+    platform: str
+    version: str
+    min_supported_version: str
+    notified: bool
+    task_id: str | None = Field(
+        None,
+        description="Celery task id for the FCM broadcast (only when notify=true).",
+    )
+
+
+@router.post(
+    "/app-versions/{platform}/release",
+    response_model=PublishReleaseResponse,
+    dependencies=[_admin_dep],
+)
+async def publish_app_release(
+    platform: str,
+    request: PublishReleaseRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """One-shot publish: bump `app_versions.{platform}` + (optionally) push
+    a "New version available" notification to every consumer with an
+    FCM token.
+
+    The two-step manual ritual — SQL update + separate broadcast call —
+    is easy to get wrong (bump the version without notifying, or notify
+    without bumping and users tap through to nothing new). This endpoint
+    does both atomically: the DB write happens first (so the poll-on-
+    foreground path immediately reflects the new version even if the
+    broadcast fails to enqueue), then the Celery task is fired.
+
+    Not the same as ``release-apk.yml`` — that builds and uploads the
+    APK. This endpoint tells the running fleet about it after the APK
+    is in place. The current publish ritual is:
+      1. `gh workflow run release-apk.yml -f version=X.Y.Z`
+      2. `POST /admin/app-versions/android/release {"version": "X.Y.Z"}`
+    """
+    try:
+        platform_enum = AppPlatform(platform)
+    except ValueError as exc:
+        raise HTTPException(400, f"Unknown platform '{platform}'") from exc
+
+    row = (
+        await db.execute(select(AppVersion).where(AppVersion.platform == platform_enum))
+    ).scalar_one_or_none()
+    if row is None:
+        # Seed row missing — treat as a deployment bug rather than
+        # silently creating one on this hot path.
+        raise HTTPException(
+            503,
+            f"No app_versions row for platform={platform}. Missing seed migration?",
+        )
+
+    row.version = request.version
+    if request.min_supported_version is not None:
+        row.min_supported_version = request.min_supported_version
+    if request.release_notes is not None:
+        row.release_notes = request.release_notes
+    if request.url is not None:
+        row.url = request.url
+    # released_at is the "when did we cut this" timestamp shown in the
+    # nudge — bump it whenever we publish, even if only release_notes
+    # changed, so the client can differentiate a re-published note from
+    # a fresh release. See app_versions.released_at.
+    row.released_at = datetime.now(UTC)
+    await db.flush()
+
+    task_id: str | None = None
+    if request.notify:
+        # Import here rather than at module top: the Celery app pulls in
+        # broker config, and importing it at admin-router import time
+        # would slow the FastAPI cold start for every request path.
+        from app.tasks.notification_tasks import broadcast_update_available
+
+        result = broadcast_update_available.delay(version=request.version, platform=platform)
+        task_id = result.id
+
+    return PublishReleaseResponse(
+        platform=platform,
+        version=row.version,
+        min_supported_version=row.min_supported_version,
+        notified=request.notify,
+        task_id=task_id,
     )

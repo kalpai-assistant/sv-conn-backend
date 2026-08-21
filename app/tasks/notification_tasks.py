@@ -4,7 +4,7 @@ Uses a synchronous DB session (SyncSessionLocal) because Celery workers are not 
 """
 
 from app.tasks.celery_app import celery_app
-from app.utils.fcm_client import send_push_notification
+from app.utils.fcm_client import send_multicast, send_push_notification
 
 NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
     "new_request": {
@@ -236,4 +236,73 @@ def send_payout_notification(
             )
 
     except Exception as exc:
+        self.retry(exc=exc)
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=1,
+    default_retry_delay=30,
+    name="app.tasks.notification_tasks.broadcast_update_available",
+)
+def broadcast_update_available(self, version: str, platform: str = "android"):
+    """Push a "new version available" nudge to every user's device (SVC-227).
+
+    Complements SVC-162's poll-based version check: the poll only fires
+    when the user opens the app, so a tester who hasn't opened it in a
+    week doesn't learn about a patch release. This push lands in the
+    notification shade regardless of whether the app is open, and tapping
+    it brings the app to foreground where ``useAppVersionCheck`` re-runs
+    and renders the nudge/block modal SVC-162 already implements.
+
+    No per-user targeting today — every consumer with an FCM token on the
+    given platform gets it. A user already on the latest version will get
+    the push and their in-app check will silently show nothing (state:
+    ok), which is a tiny UX blemish that saves us tracking installed
+    version per token. Worth revisiting when the user base grows past
+    "we can afford to notify everyone."
+
+    Failed sends are logged but not retried at the per-token level —
+    FCM already retries transient failures internally and a stale token
+    is a soft failure the next FCM registration will fix.
+    """
+    from sqlalchemy import and_, select
+
+    from app.database import SyncSessionLocal
+    from app.models.user import User, UserRole
+
+    try:
+        with SyncSessionLocal() as db:
+            # Consumers only for now — providers get their own comms via
+            # booking/payout pushes. Widening to providers is a one-line
+            # change if we want it.
+            rows = db.execute(
+                select(User.fcm_token).where(
+                    and_(
+                        User.fcm_token.is_not(None),
+                        User.role == UserRole.CONSUMER,
+                    )
+                )
+            ).all()
+            tokens = [t[0] for t in rows if t[0]]
+            if not tokens:
+                return {"success_count": 0, "failure_count": 0, "recipient_count": 0}
+
+            summary = send_multicast(
+                tokens=tokens,
+                title="Update available",
+                body=f"EazyServ v{version} is ready. Tap to update.",
+                # The app doesn't need the version in the payload — tapping
+                # opens the app and the existing version-check hook fetches
+                # /downloads/latest.json for itself. `type` lets a future
+                # in-app handler branch (e.g. deep-link to a release-notes
+                # screen) without a schema change.
+                data={"type": "update_available", "version": version, "platform": platform},
+            )
+            summary["recipient_count"] = len(tokens)
+            return summary
+    except Exception as exc:
+        # One retry (default_retry_delay=30s) — the DB was probably
+        # blipping. Multicast internally handles per-token transient
+        # failures.
         self.retry(exc=exc)
