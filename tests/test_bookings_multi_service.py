@@ -16,7 +16,7 @@ These pin invariants the design rests on:
 import uuid
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import selectinload
 
 from app.models.address import Address
@@ -25,7 +25,11 @@ from app.models.booking_item import BookingItem
 from app.models.category import Category
 from app.models.provider_service import ProviderService
 from app.models.service import Service
-from app.schemas.booking import CreateBookingItemRequest, CreateBookingRequest
+from app.schemas.booking import (
+    BookingResponse,
+    CreateBookingItemRequest,
+    CreateBookingRequest,
+)
 from app.services.booking_service import BookingService
 from app.services.provider_matching import (
     eligible_providers_multi_stmt,
@@ -147,6 +151,50 @@ async def test_cart_becomes_one_booking_with_one_item_per_service(db_session):
     ).scalar_one()
     assert len(fresh.items) == 2
     assert {item.service_id for item in fresh.items} == {svc_a.id, svc_b.id}
+
+
+@pytest.mark.asyncio
+async def test_create_leaves_item_service_loaded_for_the_response_builder(db_session):
+    """``create_booking`` must hand back items with ``service`` already loaded.
+
+    The 201 body is built from the object this method returns, with no reload in
+    between, and ``BookingItemResponse.from_item`` reads ``item.service.name``
+    for every item. ``BookingItem.service`` is ``lazy="raise_on_sql"``, so a
+    create path that leaves it unloaded raises ``InvalidRequestError`` inside the
+    response builder. That escapes as a bare 500 which, having bypassed
+    CORSMiddleware, reaches a browser as an opaque network error rather than a
+    status code (SVC-230).
+
+    Asserting on ``unloaded`` rather than on "serialising raises" is deliberate.
+    ``raise_on_sql`` fires only when the load would emit SQL, and a many-to-one
+    is served from the identity map first — here the ``Service`` rows were
+    created in this very session, so serialisation succeeds even with the bug
+    present. An exception-based test would therefore pin session bookkeeping
+    rather than this method's contract, which is: the relationship is loaded
+    before the caller gets the object.
+    """
+    consumer, addr = await _consumer_with_address(db_session)
+    svc_a = await _service(db_session, name="Deep Clean", base_price=1000.0)
+    svc_b = await _service(db_session, name="Sofa Clean", base_price=500.0)
+
+    booking = await BookingService(db_session).create_booking(
+        consumer_id=consumer.id,
+        items=[
+            CreateBookingItemRequest(service_id=svc_a.id, quantity=1),
+            CreateBookingItemRequest(service_id=svc_b.id, quantity=2),
+        ],
+        address_id=addr.id,
+    )
+
+    for item in booking.items:
+        assert "service" not in inspect(item).unloaded, (
+            "BookingItem.service must be pre-loaded by create_booking — "
+            "from_item reads it and the relationship is lazy='raise_on_sql'"
+        )
+
+    # And the thing the route itself does, end to end.
+    response = BookingResponse.for_viewer(booking, consumer.id)
+    assert {item.service_name for item in response.items} == {"Deep Clean", "Sofa Clean"}
 
 
 @pytest.mark.asyncio

@@ -368,8 +368,15 @@ class BookingService:
                 provider_payout=provider_payout,
             )
             # Same reasoning as `items` below: populate the relationship
-            # attribute manually so the response builder that runs after
-            # this method doesn't fault on raise_on_sql for service_variant.
+            # attributes manually so the response builder that runs after
+            # this method doesn't fault on raise_on_sql.
+            #
+            # `service` is not optional here the way `service_variant` is —
+            # BookingItemResponse.from_item reads `item.service.name` on every
+            # item, so omitting it made *every* POST /bookings/ raise
+            # InvalidRequestError and return a bare 500 (SVC-230). `svc` is
+            # already loaded in this loop; nothing extra to fetch.
+            set_committed_value(item_row, "service", svc)
             if variant is not None:
                 set_committed_value(item_row, "service_variant", variant)
             else:
