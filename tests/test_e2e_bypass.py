@@ -72,32 +72,72 @@ def test_whitelist_tolerates_whitespace_and_trailing_commas(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# send_otp integration — the bypass short-circuits SMS but not rate limiting
+# send_otp integration — the bypass short-circuits SMS, Redis AND the limiter
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_send_otp_bypass_stores_fixed_otp_and_skips_sms(monkeypatch):
-    """Happy path: whitelisted phone → fixed OTP stored, SMS client not called."""
+async def test_send_otp_bypass_touches_no_redis_and_skips_sms(monkeypatch):
+    """Happy path: whitelisted phone → nothing stored, nothing sent.
+
+    The stored value used to be `settings.E2E_TEST_OTP` — a constant the
+    verifier already knows. Round-tripping it through Redis verified nothing
+    about the caller, so the write is gone and `verify_otp` compares against
+    the setting directly.
+    """
     _configure(monkeypatch, env="staging", whitelist="+919999900001", otp="123456")
 
     fake_sms = AsyncMock()
     fake_redis = AsyncMock()
     with (
-        patch("app.services.auth_service.is_rate_limited", new=AsyncMock(return_value=False)),
         patch("app.services.auth_service.store_otp", new=AsyncMock()) as mock_store,
         patch("app.services.auth_service.get_sms_client", return_value=fake_sms),
     ):
         svc = AuthService(db=None, redis=fake_redis)
         await svc.send_otp("+919999900001")
 
-    mock_store.assert_awaited_once_with(fake_redis, "+919999900001", "123456")
+    mock_store.assert_not_awaited()
     fake_sms.send_otp.assert_not_called()
+    # The point of the change: usable when Redis is unavailable.
+    fake_redis.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_send_otp_bypass_still_respects_rate_limit(monkeypatch):
-    """A bypass phone is not a rate-limit exemption — same abuse controls apply."""
+async def test_send_otp_bypass_works_when_redis_is_down(monkeypatch):
+    """The reason this path stopped touching Redis.
+
+    On 2026-08-24 the Upstash request quota was exhausted and every Redis
+    command raised. The bypass died at `is_rate_limited()` before it ever
+    reached the whitelist check — so the one login route that needs no SMS
+    provider was unusable exactly when it was most needed.
+    """
+    from redis.exceptions import ResponseError
+
+    _configure(monkeypatch, env="staging", whitelist="+919999900001", otp="123456")
+
+    exploding_redis = AsyncMock()
+    exploding_redis.incr.side_effect = ResponseError("max requests limit exceeded")
+    exploding_redis.get.side_effect = ResponseError("max requests limit exceeded")
+
+    with (
+        patch(
+            "app.services.auth_service.is_rate_limited",
+            new=AsyncMock(side_effect=ResponseError("max requests limit exceeded")),
+        ),
+        patch("app.services.auth_service.get_sms_client", return_value=AsyncMock()),
+    ):
+        svc = AuthService(db=None, redis=exploding_redis)
+        # Must not raise: the bypass is checked before anything touches Redis.
+        await svc.send_otp("+919999900001")
+
+
+@pytest.mark.asyncio
+async def test_non_bypass_phone_still_rate_limited(monkeypatch):
+    """Removing the limiter from the bypass must not remove it for everyone.
+
+    Mutation guard: deleting the `is_rate_limited` call outright would still
+    satisfy every bypass test above.
+    """
     from app.exceptions import RateLimitExceeded
 
     _configure(monkeypatch, env="staging", whitelist="+919999900001", otp="123456")
@@ -112,7 +152,7 @@ async def test_send_otp_bypass_still_respects_rate_limit(monkeypatch):
     ):
         svc = AuthService(db=None, redis=AsyncMock())
         with pytest.raises(RateLimitExceeded):
-            await svc.send_otp("+919999900001")
+            await svc.send_otp("+919876543210")
 
 
 @pytest.mark.asyncio
@@ -136,3 +176,93 @@ async def test_send_otp_non_bypass_phone_uses_normal_path(monkeypatch):
     # Random OTP stored, SMS sent.
     assert mock_store.await_args.args[2] == "998877"
     fake_sms.send_otp.assert_awaited_once_with("+919876543210", "998877")
+
+
+# ---------------------------------------------------------------------------
+# verify_otp — the bypass counterpart, compared against the constant
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_bypass_accepts_configured_otp_without_redis(monkeypatch):
+    """A whitelisted phone verifies against `settings.E2E_TEST_OTP` directly."""
+    _configure(monkeypatch, env="staging", whitelist="+919999900001", otp="123456")
+
+    exploding_redis = AsyncMock()
+    exploding_redis.get.side_effect = AssertionError(
+        "verify must not read Redis for a bypass phone"
+    )
+
+    with (
+        patch("app.services.auth_service.verify_otp", new=AsyncMock()) as mock_verify,
+        patch("app.services.auth_service.get_sms_client", return_value=AsyncMock()),
+    ):
+        svc = AuthService(db=None, redis=exploding_redis)
+        svc._upsert_user = AsyncMock(return_value=(object(), False))
+        svc._build_token_response = lambda user, is_new: {
+            "access_token": "t",
+            "is_new_user": is_new,
+        }
+
+        result = await svc.verify_otp("+919999900001", "123456", "consumer")
+
+    assert result["access_token"] == "t"
+    mock_verify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_verify_bypass_rejects_a_wrong_code(monkeypatch):
+    """The bypass is not "any code works" — the constant still has to match.
+
+    Without this, a bypass that accepted anything would pass every other
+    test in this file.
+    """
+    from app.exceptions import InvalidOTP
+
+    _configure(monkeypatch, env="staging", whitelist="+919999900001", otp="123456")
+
+    with patch("app.services.auth_service.get_sms_client", return_value=AsyncMock()):
+        svc = AuthService(db=None, redis=AsyncMock())
+        with pytest.raises(InvalidOTP):
+            await svc.verify_otp("+919999900001", "000000", "consumer")
+
+
+@pytest.mark.asyncio
+async def test_verify_non_bypass_phone_still_reads_redis(monkeypatch):
+    """Everyone else keeps the real, stored-OTP path.
+
+    Mutation guard: a bypass that ignored the whitelist would turn
+    E2E_TEST_OTP into a master key for every account on the system.
+    """
+    _configure(monkeypatch, env="staging", whitelist="+919999900001", otp="123456")
+
+    with (
+        patch(
+            "app.services.auth_service.verify_otp", new=AsyncMock(return_value=True)
+        ) as mock_verify,
+        patch("app.services.auth_service.get_sms_client", return_value=AsyncMock()),
+    ):
+        svc = AuthService(db=None, redis=AsyncMock())
+        svc._upsert_user = AsyncMock(return_value=(object(), False))
+        svc._build_token_response = lambda user, is_new: {"access_token": "t"}
+
+        await svc.verify_otp("+919876543210", "998877", "consumer")
+
+    mock_verify.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_verify_in_production_never_accepts_the_constant(monkeypatch):
+    """The gate that matters most: in production the bypass does not exist,
+    so the configured constant is just a wrong OTP like any other."""
+    from app.exceptions import InvalidOTP
+
+    _configure(monkeypatch, env="production", whitelist="+919999900001", otp="123456")
+
+    with (
+        patch("app.services.auth_service.verify_otp", new=AsyncMock(return_value=False)),
+        patch("app.services.auth_service.get_sms_client", return_value=AsyncMock()),
+    ):
+        svc = AuthService(db=None, redis=AsyncMock())
+        with pytest.raises(InvalidOTP):
+            await svc.verify_otp("+919999900001", "123456", "consumer")

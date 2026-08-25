@@ -6,6 +6,7 @@ It does NOT touch HTTP concerns — that belongs to the router.
 """
 
 import logging
+import secrets
 import uuid
 
 from redis.asyncio import Redis
@@ -43,19 +44,31 @@ class AuthService:
 
     async def send_otp(self, phone: str) -> None:
         """Generate OTP, enforce rate limit, persist in Redis, send via SMS."""
+        # SVC-52 E2E bypass — checked first, and deliberately touching no Redis.
+        #
+        # For a whitelisted phone the OTP *is* `settings.E2E_TEST_OTP`: a
+        # constant both ends already know. Writing that constant to Redis and
+        # reading it back proves nothing about the caller, only that Redis is
+        # up — so the round trip is dropped and `verify_otp` compares against
+        # the setting directly.
+        #
+        # Dropping it also makes the bypass work when Redis does not. On
+        # 2026-08-24 the Upstash request quota was exhausted and this path
+        # died at `is_rate_limited()` before ever reaching the bypass, which
+        # is exactly the situation a dependency-free login route exists for.
+        #
+        # ⚠️ This does remove per-phone rate limiting for whitelisted numbers,
+        # which the comment here previously promised. On a fixed test phone
+        # with a fixed code the limiter guarded very little; the three gates
+        # in `_is_e2e_test_phone` — never in production, OTP must be
+        # configured, phone must be listed — are what actually contain this.
+        if self._is_e2e_test_phone(phone):
+            logger.info("auth.e2e_bypass phone=%s", phone)
+            return
+
         if await is_rate_limited(self.redis, phone):
             retry = await otp_retry_after_seconds(self.redis, phone)
             raise RateLimitExceeded(retry_after=retry)
-
-        # SVC-52: E2E bypass. When the phone is on the whitelist AND the
-        # bypass is configured AND we're not in production, skip the SMS
-        # and use a fixed OTP. Lets nightly smoke tests complete auth
-        # without an SMS provider in the loop. Rate limiting still
-        # applies — this is not an unlimited backdoor.
-        if self._is_e2e_test_phone(phone):
-            await store_otp(self.redis, phone, settings.E2E_TEST_OTP)
-            logger.info("auth.e2e_bypass phone=%s", phone)
-            return
 
         otp = generate_otp(settings.OTP_LENGTH)
         logger.info(f"\n{'='*40}\n🔑 [MOCK OTP] Use {otp} to login for {phone}\n{'='*40}\n")
@@ -98,7 +111,14 @@ class AuthService:
         Verify the OTP. On success, upsert the user and return JWT tokens.
         Returns a dict matching TokenResponse schema.
         """
-        valid = await verify_otp(self.redis, phone, otp)
+        if self._is_e2e_test_phone(phone):
+            # Counterpart to the bypass in `send_otp`: nothing was stored, so
+            # compare against the configured constant. `compare_digest` rather
+            # than `==` to keep it constant-time — the value is short and
+            # fixed, so a timing oracle is worth denying even here.
+            valid = secrets.compare_digest(otp, settings.E2E_TEST_OTP)
+        else:
+            valid = await verify_otp(self.redis, phone, otp)
         if not valid:
             raise InvalidOTP("OTP is incorrect or has expired")
 
