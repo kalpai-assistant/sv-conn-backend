@@ -4,6 +4,7 @@ Covers: create booking (commission split), state-machine transitions,
 invalid transitions, doorstep OTP verification, single booking fetch.
 """
 
+import uuid
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -463,3 +464,126 @@ def test_booking_relationship_is_declared_list_not_scalar():
         "Booking.payments must be a list (SVC-186 G29). Reverting to scalar "
         "would re-introduce MultipleResultsFound on any booking with a retry."
     )
+
+
+# ---------------------------------------------------------------------------
+# Scheduled bookings (SVC-200)
+#
+# `scheduled_at` is nullable on the model — None means "book now, broadcast
+# immediately"; a future timestamp means "hold for later". The router
+# passes it straight through to BookingService.create_booking, which stores
+# it verbatim. The response echoes it so the tracking screen can render
+# "Scheduled for …" instead of "Provider en route".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_booking_persists_scheduled_at(client, auth_headers, db_session):
+    """A future `scheduled_at` on the create request must round-trip through
+    the response and land on the row unchanged. Silently dropping it would
+    turn every scheduled booking into an instant one — the provider would
+    get the offer immediately instead of at the slot time."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models.address import Address
+    from app.models.booking import Booking
+    from app.models.category import Category
+    from app.models.service import Service
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    await UserFactory.create(db_session, role="provider")
+
+    category = Category(name="Cleaning", slug="cleaning", is_active=True, sort_order=1)
+    db_session.add(category)
+    await db_session.flush()
+
+    service = Service(
+        category_id=category.id,
+        name="Deep Clean",
+        base_price=500.0,
+        duration_minutes=120,
+        is_active=True,
+    )
+    db_session.add(service)
+    address = Address(user_id=consumer.id, label="home", full_address="123 Later St")
+    db_session.add(address)
+    await db_session.flush()
+
+    # ~2 hours out, matching the ticket's example slot. Datetime carries UTC
+    # so the DB stores a timezone-aware timestamp — a naïve one would drift.
+    slot = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=2)
+
+    with patch("app.routers.bookings.send_booking_notification") as mock_task:
+        mock_task.delay = lambda **kwargs: None
+        response = await client.post(
+            "/api/v1/bookings/",
+            json={
+                "service_id": str(service.id),
+                "address_id": str(address.id),
+                "payment_method": "online",
+                "scheduled_at": slot.isoformat(),
+            },
+            headers=auth_headers(str(consumer.id), "consumer"),
+        )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    # Response carries the same slot back (ISO string). Parse both to a
+    # tz-aware datetime rather than compare strings — Pydantic may normalise
+    # the timezone spelling (`+00:00` vs `Z`).
+    from datetime import datetime as _dt
+
+    assert _dt.fromisoformat(body["scheduled_at"].replace("Z", "+00:00")) == slot
+
+    # And the row on disk agrees. Using a fresh SELECT (not just the response)
+    # to make sure the service layer wrote through the value, not just echoed
+    # the request.
+    booking = await db_session.get(Booking, uuid.UUID(body["id"]))
+    assert booking.scheduled_at == slot
+
+
+@pytest.mark.asyncio
+async def test_create_instant_booking_leaves_scheduled_at_null(client, auth_headers, db_session):
+    """Booking without `scheduled_at` → `None`. Pins the two-mode invariant so
+    a future default like `scheduled_at = now()` doesn't slip in and turn
+    every instant booking into a scheduled one."""
+    from app.models.address import Address
+    from app.models.booking import Booking
+    from app.models.category import Category
+    from app.models.service import Service
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    await UserFactory.create(db_session, role="provider")
+
+    category = Category(name="Painting", slug="painting", is_active=True, sort_order=1)
+    db_session.add(category)
+    await db_session.flush()
+
+    service = Service(
+        category_id=category.id,
+        name="One coat",
+        base_price=200.0,
+        duration_minutes=60,
+        is_active=True,
+    )
+    db_session.add(service)
+    address = Address(user_id=consumer.id, label="home", full_address="123 Now St")
+    db_session.add(address)
+    await db_session.flush()
+
+    with patch("app.routers.bookings.send_booking_notification") as mock_task:
+        mock_task.delay = lambda **kwargs: None
+        response = await client.post(
+            "/api/v1/bookings/",
+            json={
+                "service_id": str(service.id),
+                "address_id": str(address.id),
+                "payment_method": "online",
+            },
+            headers=auth_headers(str(consumer.id), "consumer"),
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["scheduled_at"] is None
+    booking = await db_session.get(Booking, uuid.UUID(body["id"]))
+    assert booking.scheduled_at is None
