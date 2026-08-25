@@ -27,15 +27,15 @@ uvicorn app.worker_health:worker_app --host 0.0.0.0 --port 8000 &
 # is fine at beta scale — the fancy multi-node coordination is only
 # worth it past ~10 workers).
 #
-# Queues are the three routes defined in celery_app.py:
-#   default        cleanup tasks + anything unrouted
-#   notifications  booking + update-available FCM pushes
-#   payments       payout dispatch + reconciliation
+# One queue only. The previous 3-queue split (default / notifications /
+# payments) multiplied kombu's idle BRPOP polling by 3× for no benefit at
+# beta scale — one worker instance drains everything in order regardless.
+# See celery_app.py's task_routes comment for when to re-introduce.
 echo "worker: starting celery worker + beat"
 celery -A app.tasks.celery_app worker \
     --beat \
     --loglevel=info \
-    --queues=default,notifications,payments \
+    --queues=default \
     --concurrency=2 &
 
 # Block on all children; return code follows whichever exits.

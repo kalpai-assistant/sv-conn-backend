@@ -20,6 +20,18 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str  # redis://localhost:6379/0
 
+    # Celery — broker + result backend URLs, decoupled from REDIS_URL so the
+    # broker can move off Upstash without a code change (the free-tier command
+    # budget is what motivated the split — see PR #131).
+    #
+    # Blank means "use REDIS_URL" — preserves the pre-split behaviour so beta
+    # can deploy this without a config change. Set CELERY_BROKER_URL to
+    # `sqs://` to run against AWS SQS (kombu's SQS transport handles the rest;
+    # requires `boto3` + IAM sqs:SendMessage/ReceiveMessage/DeleteMessage on
+    # the worker's task role).
+    CELERY_BROKER_URL: str = ""
+    CELERY_RESULT_BACKEND_URL: str = ""
+
     # JWT
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
