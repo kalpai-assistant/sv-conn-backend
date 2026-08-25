@@ -65,18 +65,43 @@ celery_app.conf.update(
         "app.tasks.notification_tasks.*": {"queue": "notifications"},
         "app.tasks.payment_tasks.*": {"queue": "payments"},
     },
+    # --- Upstash command-budget cuts ---
+    #
+    # Kombu's Redis transport defaults to a 1-second BRPOP polling interval;
+    # with our 2-worker × 3-queue setup that's ~6 idle BRPOPs/sec, or
+    # ~250k commands/day at zero traffic. Beta hit the 500k/2-day Upstash
+    # free-tier ceiling on this alone.
+    #
+    # `polling_interval=15.0` cuts idle BRPOPs by 15×. Trade-off: worst-case
+    # task pickup latency goes 1s → 15s. For our tasks (FCM push after a
+    # booking transition, cleanup sweeps) that's imperceptible — a consumer
+    # doesn't distinguish a push at 1s from a push at 15s.
+    #
+    # `visibility_timeout` stated explicitly at 1h (the default) because
+    # kombu forgets to persist it across worker restarts if you don't.
+    broker_transport_options={
+        "polling_interval": 15.0,
+        "visibility_timeout": 3600,
+    },
+    # Nobody calls `.get()` on task results anywhere in the codebase — every
+    # dispatch is fire-and-forget via `.delay()`. The default result-backend
+    # writes are pure waste (SET per task completion + eventual EXPIRE).
+    # Turning off cuts the result-backend slice entirely.
+    task_ignore_result=True,
     beat_schedule={
+        # Ticket timeout is 120s — a 60s sweep still catches expiry within
+        # one grace window and halves the dispatch overhead vs. the old 30s
+        # cadence.
         "expire-stale-bookings": {
             "task": "app.tasks.cleanup_tasks.expire_stale_bookings",
-            "schedule": 30.0,  # Every 30 seconds
+            "schedule": 60.0,
         },
-        # SVC-190 (G14): the local mirror of Razorpay's order-expiry. Runs
-        # every 5 min — much coarser than the 30s fulfilment sweep because
-        # the window itself is 15 min and Razorpay already refuses payment
-        # at the wire.
+        # SVC-190 (G14): the local mirror of Razorpay's order-expiry. The
+        # window is 15 min + grace, so a 10-min sweep is still comfortably
+        # within the grace and halves the tick count vs. the old 300s.
         "expire-abandoned-payments": {
             "task": "app.tasks.cleanup_tasks.expire_abandoned_payments",
-            "schedule": 300.0,
+            "schedule": 600.0,
         },
         "reconcile-payouts": {
             "task": "app.tasks.payment_tasks.reconcile_payouts",
