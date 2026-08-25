@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = ""
     CELERY_RESULT_BACKEND_URL: str = ""
 
+    # When CELERY_BROKER_URL is `sqs://`, this is the full HTTPS URL of the
+    # queue kombu should read/write (e.g.
+    # `https://sqs.ap-south-1.amazonaws.com/123456789/eazyserv-celery-default`).
+    # Setting this switches kombu to `predefined_queues` mode, which skips
+    # the ListQueues discovery call — matches a tight IAM scope that only
+    # grants per-queue actions. Ignored when broker is not SQS.
+    CELERY_SQS_QUEUE_URL: str = ""
+
+    # Fallback region for the SQS transport when a queue URL isn't provided.
+    # boto3 also honours AWS_REGION natively, so setting it in the container
+    # env covers this even if we leave it blank here.
+    AWS_REGION: str = ""
+
     # JWT
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
