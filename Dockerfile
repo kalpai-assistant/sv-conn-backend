@@ -6,11 +6,15 @@ FROM python:3.11-slim
 
 WORKDIR /code
 
-# System deps: libpq for psycopg2 (Celery sync path), gcc + build tools for
-# anything that needs compilation from the wheel misses (cryptography, etc.
-# ship prebuilt wheels for slim so this is mostly harmless).
+# System deps:
+# - libpq-dev: psycopg2 (Celery sync DB path)
+# - libcurl4-openssl-dev + libssl-dev: pycurl, which kombu 5.3/5.4 requires
+#   for its async SQS transport. Pycurl has no prebuilt wheel for slim, so
+#   these headers + gcc are mandatory — dropping any of them breaks the
+#   worker at runtime, not at build time (see PR #136 follow-up).
+# - gcc: build tool for anything else that misses a prebuilt wheel.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc \
+    libpq-dev libcurl4-openssl-dev libssl-dev gcc \
     && rm -rf /var/lib/apt/lists/*
 
 # uv installs to a project-local .venv. Put it first on PATH so uvicorn,
