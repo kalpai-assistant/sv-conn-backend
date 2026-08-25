@@ -33,10 +33,19 @@ def _redis_url_with_ssl_reqs(url: str) -> str:
     return url
 
 
+# Broker + result-backend URLs, sourced from Celery-specific settings and
+# falling back to REDIS_URL when unset. Decoupled from the cache Redis so the
+# broker can move off Upstash by env-var flip alone (set CELERY_BROKER_URL to
+# `sqs://` and kombu picks up the SQS transport — no code change here). The
+# ssl-reqs shim only fires when the resolved URL is `rediss://`, so a
+# `sqs://` or plain `redis://` passes through unchanged.
+_broker_url = _redis_url_with_ssl_reqs(settings.CELERY_BROKER_URL or settings.REDIS_URL)
+_backend_url = _redis_url_with_ssl_reqs(settings.CELERY_RESULT_BACKEND_URL or settings.REDIS_URL)
+
 celery_app = Celery(
     "eazyserv",
-    broker=_redis_url_with_ssl_reqs(settings.REDIS_URL),
-    backend=_redis_url_with_ssl_reqs(settings.REDIS_URL),
+    broker=_broker_url,
+    backend=_backend_url,
 )
 
 
@@ -61,24 +70,18 @@ celery_app.conf.update(
     timezone="Asia/Kolkata",
     enable_utc=True,
     task_default_queue="default",
-    task_routes={
-        "app.tasks.notification_tasks.*": {"queue": "notifications"},
-        "app.tasks.payment_tasks.*": {"queue": "payments"},
-    },
-    # --- Upstash command-budget cuts ---
+    # Everything on one queue — kombu polls each declared queue with a
+    # separate BRPOP, so 3 queues × 2 worker children = 6 idle pollers, and
+    # collapsing to 1 queue is another 3× cut on top of PR #131's polling
+    # interval bump. The per-queue split (notifications / payments) was
+    # ceremony from the LLD that never earned its keep at beta scale — one
+    # worker instance drains everything in order regardless. Re-introduce
+    # per-queue routing + dedicated worker pools when traffic warrants
+    # priority isolation (roughly: >10 req/sec sustained).
     #
-    # Kombu's Redis transport defaults to a 1-second BRPOP polling interval;
-    # with our 2-worker × 3-queue setup that's ~6 idle BRPOPs/sec, or
-    # ~250k commands/day at zero traffic. Beta hit the 500k/2-day Upstash
-    # free-tier ceiling on this alone.
-    #
-    # `polling_interval=15.0` cuts idle BRPOPs by 15×. Trade-off: worst-case
-    # task pickup latency goes 1s → 15s. For our tasks (FCM push after a
-    # booking transition, cleanup sweeps) that's imperceptible — a consumer
-    # doesn't distinguish a push at 1s from a push at 15s.
-    #
-    # `visibility_timeout` stated explicitly at 1h (the default) because
-    # kombu forgets to persist it across worker restarts if you don't.
+    # `broker_transport_options` still applies when the broker is Redis;
+    # kombu's SQS transport ignores these keys, so leaving them here is safe
+    # when CELERY_BROKER_URL flips to `sqs://`.
     broker_transport_options={
         "polling_interval": 15.0,
         "visibility_timeout": 3600,
