@@ -25,9 +25,13 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import Depends, FastAPI, Response, status
 from httpx import ASGITransport, AsyncClient
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import ResponseError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.dependencies import get_current_user, get_redis
 from app.exceptions import RateLimitExceeded, register_exception_handlers
+from app.middleware.rate_limit import RateLimitMiddleware
 from app.utils.rate_limiter import rate_limit
 
 
@@ -264,3 +268,95 @@ async def test_within_limit_response_carries_rate_headers():
     for r in (r1, r2):
         reset = int(r.headers["X-RateLimit-Reset"])
         assert now <= reset <= now + 60 + 5  # allow small jitter
+
+
+# ---------------------------------------------------------------------------
+# Middleware: behaviour when Redis itself is unavailable
+# ---------------------------------------------------------------------------
+
+
+class _BrokenRedis:
+    """Every command fails, the way Upstash behaves past its request quota."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def incr(self, key: str) -> int:
+        raise self._exc
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        raise self._exc
+
+
+def _build_middleware_app(redis, rpm: int = 60) -> FastAPI:
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.add_middleware(RateLimitMiddleware, redis=redis, requests_per_minute=rpm)
+
+    @app.get("/api/v1/categories")
+    async def _categories():
+        return [{"slug": "plumber"}]
+
+    return app
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        # The 2026-08-24 beta outage: Upstash rejects commands past the plan's
+        # request quota. A ResponseError, not a connection failure — so
+        # catching only ConnectionError would not have helped.
+        ResponseError("max requests limit exceeded. Limit: 500000, Usage: 500000."),
+        RedisConnectionError("Connection refused"),
+        RedisTimeoutError("Timeout reading from socket"),
+    ],
+    ids=["quota_exhausted", "unreachable", "timeout"],
+)
+@pytest.mark.asyncio
+async def test_middleware_fails_open_when_redis_is_unavailable(exc):
+    """A dead limiter must not take the API down with it.
+
+    This middleware runs on every request before routing, so an exception
+    here 500s endpoints that never touch Redis. That is exactly what happened
+    on 2026-08-24: the Upstash quota ran out and the entire backend — the
+    catalogue, bookings, profile — returned 500 for ~13 hours. Rate limiting
+    is a protection measure, not a correctness one; losing it briefly beats
+    losing the service.
+    """
+    app = _build_middleware_app(_BrokenRedis(exc))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        response = await client.get("/api/v1/categories")
+
+    assert response.status_code == 200, (
+        f"{type(exc).__name__} from the limiter must not fail the request; "
+        f"got {response.status_code}"
+    )
+    assert response.json() == [{"slug": "plumber"}]
+
+
+@pytest.mark.asyncio
+async def test_middleware_still_counts_when_redis_is_healthy():
+    """The fail-open path must not swallow a working limiter's counting.
+
+    Mutation guard: deleting the `incr` call entirely would still pass the
+    fail-open test above, so pin that a healthy Redis is actually driven.
+    """
+    calls: list[str] = []
+
+    class _CountingRedis:
+        async def incr(self, key: str) -> int:
+            calls.append(key)
+            return len(calls)
+
+        async def expire(self, key: str, seconds: int) -> bool:
+            return True
+
+    app = _build_middleware_app(_CountingRedis())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        for _ in range(3):
+            assert (await client.get("/api/v1/categories")).status_code == 200
+
+    assert len(calls) == 3, "healthy Redis should still be incremented once per request"
+    assert all(c.endswith(":/api/v1/categories") for c in calls)
