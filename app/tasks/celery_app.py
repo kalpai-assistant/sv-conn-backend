@@ -36,10 +36,16 @@ def _redis_url_with_ssl_reqs(url: str) -> str:
 # Broker + result-backend URLs, sourced from Celery-specific settings and
 # falling back to REDIS_URL when unset. Decoupled from the cache Redis so the
 # broker can move off Upstash by env-var flip alone (set CELERY_BROKER_URL to
-# `sqs://` and kombu picks up the SQS transport — no code change here). The
-# ssl-reqs shim only fires when the resolved URL is `rediss://`, so a
-# `sqs://` or plain `redis://` passes through unchanged.
-_broker_url = _redis_url_with_ssl_reqs(settings.CELERY_BROKER_URL or settings.REDIS_URL)
+# `sqs://` and kombu picks up the SQS transport — no code change here).
+_raw_broker_url = settings.CELERY_BROKER_URL or settings.REDIS_URL
+_is_sqs_broker = _raw_broker_url.startswith("sqs")
+
+# The ssl-reqs shim only applies to Redis (`rediss://`); an SQS URL passes
+# through unchanged. Result backend is always Redis-shaped — SQS has no
+# result-backend concept and `task_ignore_result=True` below means nothing
+# writes there anyway, so keeping the URL there is a no-op we don't need to
+# refactor.
+_broker_url = _raw_broker_url if _is_sqs_broker else _redis_url_with_ssl_reqs(_raw_broker_url)
 _backend_url = _redis_url_with_ssl_reqs(settings.CELERY_RESULT_BACKEND_URL or settings.REDIS_URL)
 
 celery_app = Celery(
@@ -47,6 +53,62 @@ celery_app = Celery(
     broker=_broker_url,
     backend=_backend_url,
 )
+
+
+def _broker_transport_options() -> dict:
+    """Broker-specific tuning. SQS and Redis need very different knobs, and
+    each transport silently ignores the other's keys — so we branch here to
+    keep intent obvious rather than dumping every possible option into one
+    dict.
+
+    The Redis path is what PRs #131 and #134 landed:
+    - `polling_interval=15.0` bumps kombu's idle BRPOP cadence 1s → 15s
+    - `visibility_timeout=3600` stated explicitly so kombu persists it across
+      worker restarts (which it forgets otherwise)
+
+    The SQS path relies on native long-polling — the fanout + control-channel
+    chatter that dominates our Upstash bill (see INFO STATS diagnosis 2026-08-25)
+    doesn't exist on SQS. Even at zero traffic we're bounded by one
+    ReceiveMessage per 20s per worker, plus per-task SendMessage/DeleteMessage.
+    """
+    if _is_sqs_broker:
+        opts: dict = {
+            # Long polling — one ReceiveMessage call held open for up to 20s
+            # (SQS max). Kombu counts these as 1 API call regardless of wait
+            # duration, so idle cost is ~3/min per worker vs Redis's constant
+            # BRPOP + fanout traffic.
+            "wait_time_seconds": 20,
+            # Match the Redis path so a task-lease semantics don't shift
+            # under callers just by changing broker.
+            "visibility_timeout": 3600,
+        }
+        # `predefined_queues` skips kombu's ListQueues discovery call at
+        # startup — matches the tight IAM policy (only per-queue actions
+        # granted, no account-wide ListQueues). Only set when the URL is
+        # actually configured; otherwise kombu will still attempt discovery
+        # and give a clearer error than us guessing a URL wrong.
+        if settings.CELERY_SQS_QUEUE_URL:
+            opts["predefined_queues"] = {
+                # Key must match `task_default_queue` below; kombu uses it
+                # to route .delay() calls to the right SQS URL.
+                "default": {"url": settings.CELERY_SQS_QUEUE_URL},
+            }
+        # Region — kombu-SQS defaults to us-east-1 and would silently create
+        # queues there without this. Derived from the queue URL when we have
+        # it, or from an explicit env var, or the App Runner default of
+        # ap-south-1.
+        if settings.CELERY_SQS_QUEUE_URL:
+            # e.g. https://sqs.ap-south-1.amazonaws.com/12345/foo
+            _region = settings.CELERY_SQS_QUEUE_URL.split(".")[1]
+        else:
+            _region = settings.AWS_REGION or "ap-south-1"
+        opts["region"] = _region
+        return opts
+
+    return {
+        "polling_interval": 15.0,
+        "visibility_timeout": 3600,
+    }
 
 
 # SVC-46: workers don't run through app/main.py, so structlog needs to be
@@ -79,13 +141,9 @@ celery_app.conf.update(
     # per-queue routing + dedicated worker pools when traffic warrants
     # priority isolation (roughly: >10 req/sec sustained).
     #
-    # `broker_transport_options` still applies when the broker is Redis;
-    # kombu's SQS transport ignores these keys, so leaving them here is safe
-    # when CELERY_BROKER_URL flips to `sqs://`.
-    broker_transport_options={
-        "polling_interval": 15.0,
-        "visibility_timeout": 3600,
-    },
+    # Broker-specific — see `_broker_transport_options` for the SQS vs Redis
+    # branch. Broker choice is env-driven via CELERY_BROKER_URL.
+    broker_transport_options=_broker_transport_options(),
     # Nobody calls `.get()` on task results anywhere in the codebase — every
     # dispatch is fire-and-forget via `.delay()`. The default result-backend
     # writes are pure waste (SET per task completion + eventual EXPIRE).
