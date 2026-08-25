@@ -27,8 +27,22 @@ async def test_send_otp_success(client):
 
 @pytest.mark.asyncio
 async def test_send_otp_rate_limited(client):
-    """Should return 429 when the phone has exceeded the hourly OTP limit."""
-    with patch("app.services.auth_service.is_rate_limited", new=AsyncMock(return_value=True)):
+    """Should return 429 when the phone has exceeded the hourly OTP limit.
+
+    Belt-and-suspenders on the phone choice: PR #133 moved the E2E bypass
+    ahead of `is_rate_limited`, so a phone that happens to be in the
+    caller's local `E2E_TEST_PHONES` short-circuits before the mock fires
+    and the test silently 200s. Patching `_is_e2e_test_phone` here makes
+    the assertion robust to any local env — matches the intent of the test
+    (exercising the limiter path), independent of what the current .env
+    lists as bypass numbers."""
+    with (
+        patch(
+            "app.services.auth_service.AuthService._is_e2e_test_phone",
+            return_value=False,
+        ),
+        patch("app.services.auth_service.is_rate_limited", new=AsyncMock(return_value=True)),
+    ):
         response = await client.post(
             "/api/v1/auth/send-otp",
             json={"phone": "+919876543210"},
