@@ -227,3 +227,91 @@ async def test_delete_unknown_address_is_silent_204(client, auth_headers, db_ses
     )
 
     assert response.status_code == 204, response.text
+
+
+# ---------------------------------------------------------------------------
+# Address coordinates + is_default semantics (SVC-197)
+#
+# Coordinates matter for the provider match — the geo query in
+# booking_service uses the PostGIS point, and an address without one is
+# unroutable. The `is_default` flag is what the booking flow reads when the
+# consumer doesn't pick an address explicitly.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_add_address_with_lat_lng_persists_postgis_point(client, auth_headers, db_session):
+    """When the frontend geocodes and sends lat/lng, they must round-trip as a
+    real PostGIS POINT — not a NULL location that would silently exclude this
+    address from every nearby-provider query."""
+    user = await UserFactory.create(db_session, role="consumer")
+
+    response = await client.post(
+        "/api/v1/users/me/addresses",
+        json={
+            "label": "home",
+            "full_address": "MG Road, Bangalore",
+            "lat": 12.9716,
+            "lng": 77.5946,
+        },
+        headers=auth_headers(str(user.id), "consumer"),
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+
+    persisted = await db_session.get(Address, uuid.UUID(body["id"]))
+    assert persisted is not None
+    # The `lat`/`lng` properties (backed by point_lat_lng on `location`) must
+    # return the values we sent — a bug in the WKT builder or the property
+    # unpacker would flip them silently.
+    assert persisted.lat == pytest.approx(12.9716)
+    assert persisted.lng == pytest.approx(77.5946)
+
+
+@pytest.mark.asyncio
+async def test_add_address_without_lat_lng_leaves_location_null(client, auth_headers, db_session):
+    """Free-text addresses (no geocode) legitimately have NULL location — the
+    schema treats them as fallback, not as an error. Callers must handle that."""
+    user = await UserFactory.create(db_session, role="consumer")
+
+    response = await client.post(
+        "/api/v1/users/me/addresses",
+        json={"label": "home", "full_address": "Flat 3, Some Lane"},
+        headers=auth_headers(str(user.id), "consumer"),
+    )
+    assert response.status_code == 201, response.text
+    persisted = await db_session.get(Address, uuid.UUID(response.json()["id"]))
+    assert persisted.location is None
+    assert persisted.lat is None
+    assert persisted.lng is None
+
+
+@pytest.mark.asyncio
+async def test_add_default_address_unsets_previous_default(client, auth_headers, db_session):
+    """A user can have exactly one `is_default` address. Adding a new default
+    must flip the previous one to False in the same transaction — otherwise
+    the booking flow's `first-is_default` lookup returns whichever the DB
+    happens to list first."""
+    user = await UserFactory.create(db_session, role="consumer")
+
+    # Seed a first "default" address directly.
+    first = Address(user_id=user.id, label="home", full_address="First place", is_default=True)
+    db_session.add(first)
+    await db_session.flush()
+
+    response = await client.post(
+        "/api/v1/users/me/addresses",
+        json={
+            "label": "work",
+            "full_address": "Second place",
+            "is_default": True,
+        },
+        headers=auth_headers(str(user.id), "consumer"),
+    )
+    assert response.status_code == 201, response.text
+
+    # The previously-default row must have been demoted.
+    await db_session.refresh(first)
+    assert first.is_default is False
+    new_default = await db_session.get(Address, uuid.UUID(response.json()["id"]))
+    assert new_default.is_default is True
