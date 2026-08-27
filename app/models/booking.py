@@ -195,8 +195,20 @@ class Booking(Base):
     # number of bookings; there is deliberately no lazy fallback to paper over a
     # path that forgets.
     consumer_address: Mapped["Address"] = relationship("Address", lazy="raise_on_sql")
+    # Ordered and raise_on_sql for the same reason `items` and
+    # `consumer_address` are (SVC-248). `BookingResponse.status_history`
+    # serialises this, so a read path that forgets to hydrate must fail by
+    # name here rather than as a MissingGreenlet inside pydantic — and on the
+    # list route an implicit load would be one query per row.
+    #
+    # `order_by` rather than sorting at the call site: oldest-first is what a
+    # timeline means, and putting it on the relationship keeps that true for
+    # any future loader, not just `BookingService.attach_status_logs`.
     status_logs: Mapped[list["BookingStatusLog"]] = relationship(
-        "BookingStatusLog", back_populates="booking"
+        "BookingStatusLog",
+        back_populates="booking",
+        lazy="raise_on_sql",
+        order_by="BookingStatusLog.created_at",
     )
     review: Mapped["Review"] = relationship("Review", back_populates="booking", uselist=False)
     # SVC-186 (G29): plural, not scalar. `44a9651a7ef8_drop_payment_unique_constraint`

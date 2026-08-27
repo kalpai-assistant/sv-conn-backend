@@ -149,6 +149,33 @@ class BookingAddress(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BookingStatusLogResponse(BaseModel):
+    """One state transition on a booking, as the tracking timeline sees it.
+
+    A deliberately narrow projection of ``booking_status_logs``, which is an
+    internal audit trail and not a consumer-facing record (SVC-248). Two
+    columns are withheld on purpose:
+
+    ``changed_by`` is a user id — usually the assigned provider's, sometimes an
+    admin's. Who moved a booking is an operational fact; handing it to the
+    consumer's app turns an audit row into a disclosure about another person.
+
+    ``metadata_`` is free-form JSONB written by whatever called
+    ``_log_transition``. Nobody has audited what is already in those rows
+    across the project's history, and a field whose contents are unknown
+    cannot be knowingly published. If some part of it is worth showing, it
+    should be promoted to a named column first.
+
+    ``from_status`` is left out for a plainer reason: on an ordered list the
+    previous state is always the ``to_status`` of the entry before it.
+    """
+
+    to_status: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class BookingResponse(BaseModel):
     id: UUID
     consumer_id: UUID
@@ -189,6 +216,23 @@ class BookingResponse(BaseModel):
     address: BookingAddress | None = Field(
         validation_alias=AliasChoices("address", "consumer_address")
     )
+    # Every state this booking has passed through, oldest first (SVC-248).
+    # `booking_status_logs` was write-only before this: the rows were recorded
+    # on every transition and never read back, so the tracking timeline could
+    # show only the *current* status — a booking cancelled while EN_ROUTE was
+    # indistinguishable from one cancelled seconds after being requested.
+    #
+    # Nullable-free and *required*, no default, for the reason `address`
+    # documents above: a field with a default falls out of the OpenAPI
+    # `required` set and the generated client types it optional. An empty list
+    # is a real answer — bookings predating the audit trail have no rows — and
+    # it must be distinguishable from "this route does not send the field",
+    # which a defaulted field makes impossible.
+    #
+    # Reads `Booking.status_logs`, declared `lazy="raise_on_sql"`: every path
+    # that builds this schema must call `BookingService.attach_status_logs`
+    # first, exactly like `address` and `items`.
+    status_history: list[BookingStatusLogResponse]
     # True when any payment for this booking has been charged back. Only populated by
     # the admin bookings list (which computes it); defaults False elsewhere (SVC-134).
     is_disputed: bool = False
@@ -282,6 +326,9 @@ class BookingResponse(BaseModel):
                 if booking.consumer_address is not None
                 else None
             ),
+            status_history=[
+                BookingStatusLogResponse.model_validate(log) for log in booking.status_logs
+            ],
             scheduled_at=booking.scheduled_at,
             created_at=booking.created_at,
         )

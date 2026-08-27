@@ -153,5 +153,12 @@ class BookingFactory:
         # read booking.items without tripping the raise_on_sql sentinel —
         # mirrors how BookingService.create_booking hydrates.
         set_committed_value(booking, "items", items)
+        # Same treatment for the transition history (SVC-248), and for the
+        # same reason: `status_logs` is raise_on_sql because
+        # `BookingResponse.status_history` serialises it, so a booking built
+        # here and handed straight to `for_viewer` would fault rather than
+        # serialise. Empty is also the truth — a booking this factory just
+        # made has never moved.
+        set_committed_value(booking, "status_logs", [])
 
         return booking
