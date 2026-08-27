@@ -949,14 +949,17 @@ async def test_webhook_accepts_empty_secret_in_dev(client, db_session):
 
 
 @pytest.mark.asyncio
-async def test_create_order_includes_expire_by(db_session):
-    """`create_order` hands Razorpay an `expire_by` Unix second, so a client
-    that cached the order id can't submit it days later.
+async def test_create_order_includes_expire_by_when_flag_on(db_session, monkeypatch):
+    """When `RAZORPAY_SEND_EXPIRE_BY` is True, `create_order` hands Razorpay
+    an `expire_by` Unix second, so a client that cached the order id can't
+    submit it days later.
 
     Razorpay refuses payment after that instant, so this is the belt half of
     the abandoned-payment defence; the local sweep is the braces.
     """
     import time as _time
+
+    monkeypatch.setattr(settings, "RAZORPAY_SEND_EXPIRE_BY", True)
 
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
@@ -975,6 +978,32 @@ async def test_create_order_includes_expire_by(db_session):
     # seconds of test-scheduling jitter on either side.
     expected = before + settings.PAYMENT_ORDER_EXPIRY_SECONDS
     assert expected - 2 <= order_data["expire_by"] <= expected + 3
+
+
+@pytest.mark.asyncio
+async def test_create_order_omits_expire_by_when_flag_off(db_session, monkeypatch):
+    """SVC-247: default (flag OFF) omits `expire_by`. Razorpay accounts
+    without the per-merchant `expire_by` feature return 400 on order create
+    if the field is present, so shipping this OFF-by-default is how a fresh
+    account works out of the box.
+
+    The local `expire_abandoned_payments` sweep is unaffected; it uses
+    `booking.created_at + PAYMENT_ORDER_EXPIRY_SECONDS + grace` as its own
+    source of truth.
+    """
+    monkeypatch.setattr(settings, "RAZORPAY_SEND_EXPIRE_BY", False)
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(db_session, consumer, provider)
+
+    with patch("app.services.payment_service.razorpay_client") as mock_rzp:
+        mock_rzp.order.create.return_value = {"id": "order_expiry_test"}
+        await PaymentService(db_session).create_order(booking.id, consumer.id)
+
+    _, call_kwargs = mock_rzp.order.create.call_args
+    order_data = call_kwargs["data"]
+    assert "expire_by" not in order_data
 
 
 @pytest.mark.asyncio

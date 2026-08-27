@@ -124,16 +124,22 @@ class PaymentService:
             # verify_payment, this makes "amount mismatch" impossible-then-caught
             # rather than caught-only.
             "partial_payment": 0,
-            # SVC-190 (G14): the checkout window. Razorpay refuses payment
-            # after `expire_by`, so a client that cached this order id and
-            # tries to submit it days later gets a hard refusal at the wire
-            # rather than reaching our verify path against an EXPIRED
-            # booking. The local sweep (`expire_abandoned_payments`) flips
-            # `payment_status = EXPIRED` after this + grace so the two views
-            # of the world agree. `expire_by` is a Unix second, per Razorpay's
-            # spec.
-            "expire_by": int(time.time()) + settings.PAYMENT_ORDER_EXPIRY_SECONDS,
         }
+        # SVC-190 (G14): the checkout window. Razorpay refuses payment
+        # after `expire_by`, so a client that cached this order id and
+        # tries to submit it days later gets a hard refusal at the wire
+        # rather than reaching our verify path against an EXPIRED
+        # booking. The local sweep (`expire_abandoned_payments`) flips
+        # `payment_status = EXPIRED` after this + grace so the two views
+        # of the world agree. `expire_by` is a Unix second, per Razorpay's
+        # spec.
+        #
+        # SVC-247: `expire_by` is per-merchant-gated on Razorpay. Accounts
+        # without the feature get a 400 on every order create. Guard behind
+        # a flag so a fresh merchant works out of the box; flip on once
+        # Razorpay support has enabled the feature.
+        if settings.RAZORPAY_SEND_EXPIRE_BY:
+            order_data["expire_by"] = int(time.time()) + settings.PAYMENT_ORDER_EXPIRY_SECONDS
 
         order = razorpay_client.order.create(data=order_data)
         booking.razorpay_order_id = order["id"]

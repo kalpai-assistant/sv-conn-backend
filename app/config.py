@@ -182,6 +182,16 @@ class Settings(BaseSettings):
     PAYMENT_ORDER_EXPIRY_SECONDS: int = 900
     PAYMENT_ORDER_EXPIRY_GRACE_SECONDS: int = 60
 
+    # SVC-247 — Razorpay `expire_by` on Order Create is per-merchant-gated.
+    # An account without the feature enabled gets a hard 400 BadRequestError
+    # (`"expire_by is/are not required and should not be sent"`) on every
+    # order create, which breaks payment for every consumer. Default OFF so
+    # a fresh account works out of the box. Flip to True once Razorpay
+    # support has enabled the feature on the merchant account, and we regain
+    # the wire-side belt on top of the local `expire_abandoned_payments`
+    # sweep (which is unaffected — it uses booking.created_at + settings).
+    RAZORPAY_SEND_EXPIRE_BY: bool = False
+
     # Encryption (AES-256) for PII at rest
     ENCRYPTION_KEY: str = ""
 
