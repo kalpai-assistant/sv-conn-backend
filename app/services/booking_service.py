@@ -830,6 +830,24 @@ class BookingService:
 
         total = (await self.db.execute(count_stmt)).scalar_one()
 
+        # Newest first, and ordered at all — this query had no ORDER BY.
+        #
+        # Two things were wrong with that. The visible one: rows came back in
+        # whatever order Postgres happened to hold them, which is roughly
+        # insertion order until a row is UPDATEd, at which point the new
+        # version lands elsewhere. A booking the user had just cancelled
+        # therefore sank to the bottom of "Past" instead of rising to the top,
+        # and read as missing.
+        #
+        # The quiet one: LIMIT/OFFSET over an unordered query has no defined
+        # result. Postgres is free to return a row on two pages or on neither,
+        # so paging past the first 20 could silently drop bookings.
+        #
+        # `id` breaks ties. `created_at` is `server_default=func.now()`, which
+        # in Postgres is transaction start time, so two bookings created in one
+        # transaction share a timestamp exactly — and a tie under LIMIT/OFFSET
+        # reintroduces the instability this line exists to remove.
+        stmt = stmt.order_by(Booking.created_at.desc(), Booking.id.desc())
         stmt = stmt.offset((page - 1) * per_page).limit(per_page)
         result = await self.db.execute(stmt)
         bookings = list(result.scalars().all())
