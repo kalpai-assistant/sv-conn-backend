@@ -180,6 +180,10 @@ async def list_all_bookings(
     svc = BookingService(db)
     await svc.attach_addresses(bookings)
     await svc.attach_items(bookings)
+    # Same reasoning as `attach_items` above: hydrated because the shared
+    # response schema is going to read it, not because this listing needs a
+    # per-booking transition log (SVC-248).
+    await svc.attach_status_logs(bookings)
 
     return BookingListResponse(
         # No viewer identity to compare against — an admin is never the booking's
@@ -228,6 +232,7 @@ async def get_any_booking(booking_id: UUID, db: AsyncSession = Depends(get_db)):
     svc = BookingService(db)
     await svc.attach_addresses([booking])
     await svc.attach_items([booking])
+    await svc.attach_status_logs([booking])
     return BookingResponse.for_admin(booking)
 
 

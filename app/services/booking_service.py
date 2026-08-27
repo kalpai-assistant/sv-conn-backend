@@ -140,6 +140,62 @@ class BookingService:
             set_committed_value(booking, "items", by_booking.get(booking.id, []))
 
     # ------------------------------------------------------------------
+    # Status-history hydration
+    # ------------------------------------------------------------------
+
+    async def attach_status_logs(self, bookings: Iterable[Booking]) -> None:
+        """Load each booking's transition history, ready for serialisation.
+
+        Third of the read-path hydrators, and it exists for the reason the
+        other two do: ``BookingResponse.status_history`` reads
+        ``Booking.status_logs`` (SVC-248), that relationship is declared
+        ``lazy="raise_on_sql"``, and on the list route an implicit load would
+        be one query per row.
+
+        The obvious alternative — ``selectinload(Booking.status_logs)`` on the
+        query — is the trap ``attach_addresses`` documents. Every single-booking
+        path here reaches the row through ``db.get``, which answers from the
+        identity map when it can, and a load that emits no SQL applies no
+        loader options. In production each request opens its own session, so a
+        cold read does emit SQL and the option would appear to work; under the
+        test suite, where ``get_db`` is overridden with one shared session, the
+        fixture's booking is already in the map and the relationship silently
+        stays unloaded. Passing in production and failing in CI is a worse
+        failure than either.
+
+        One query regardless of page size. Ordering comes from the
+        relationship's own ``order_by`` rather than from this query, so a
+        caller who loads the rows some other way still gets oldest-first;
+        it is restated here because ``set_committed_value`` stores whatever
+        sequence it is handed and will not re-sort it.
+
+        ``set_committed_value`` marks the relationship *already loaded* rather
+        than *changed*, which keeps this read-path hydration out of the unit of
+        work — plain assignment would enrol every serialised booking in the
+        next flush.
+
+        Note for callers that have just written a transition: this emits a
+        SELECT, and the session autoflushes before it, so a ``BookingStatusLog``
+        added but not yet flushed is included. ``create_booking`` and
+        ``transition_status`` both rely on that.
+        """
+        bookings = list(bookings)
+        booking_ids = [b.id for b in bookings]
+        if not booking_ids:
+            return
+
+        rows = await self.db.execute(
+            select(BookingStatusLog)
+            .where(BookingStatusLog.booking_id.in_(booking_ids))
+            .order_by(BookingStatusLog.created_at)
+        )
+        by_booking: dict[uuid.UUID, list[BookingStatusLog]] = {}
+        for log in rows.scalars():
+            by_booking.setdefault(log.booking_id, []).append(log)
+        for booking in bookings:
+            set_committed_value(booking, "status_logs", by_booking.get(booking.id, []))
+
+    # ------------------------------------------------------------------
     # Create
     # ------------------------------------------------------------------
 
@@ -402,6 +458,11 @@ class BookingService:
             changed_by=consumer_id,
         )
 
+        # After the transition is recorded, not before: the 201 carries
+        # `status_history`, and this booking's first entry is the row written
+        # immediately above. The SELECT autoflushes it into existence.
+        await self.attach_status_logs([booking])
+
         return booking
 
     # ------------------------------------------------------------------
@@ -419,6 +480,7 @@ class BookingService:
         # causes a lookup of the address (or items) they were refused.
         await self.attach_addresses([booking])
         await self.attach_items([booking])
+        await self.attach_status_logs([booking])
         return booking
 
     async def get_offer(
@@ -586,6 +648,7 @@ class BookingService:
                 # so this is the one accept path that has to hydrate for itself.
                 await self.attach_addresses([booking])
                 await self.attach_items([booking])
+                await self.attach_status_logs([booking])
                 return booking, False
         elif booking.provider_id is not None:
             # SVC-167: another provider won the race. From the card's point of
@@ -727,9 +790,13 @@ class BookingService:
         )
 
         # Every transition route answers with a BookingResponse, which now
-        # renders both `address` (SVC-170) and `items`.
+        # renders `address` (SVC-170), `items`, and `status_history` (SVC-248).
+        # The history hydrator runs last and deliberately after
+        # `_log_transition` above: the entry for the transition just made is
+        # part of the response, and the SELECT autoflushes the pending row.
         await self.attach_addresses([booking])
         await self.attach_items([booking])
+        await self.attach_status_logs([booking])
 
         return booking
 
@@ -774,6 +841,7 @@ class BookingService:
         # same reason and the item helper follows the pattern.
         await self.attach_addresses(bookings)
         await self.attach_items(bookings)
+        await self.attach_status_logs(bookings)
 
         return BookingListResponse(
             # Per-row redaction, not a role check: `role` says what kind of user
@@ -824,6 +892,7 @@ class BookingService:
 
         await self.attach_addresses([booking])
         await self.attach_items([booking])
+        await self.attach_status_logs([booking])
         return booking
 
     # ------------------------------------------------------------------
