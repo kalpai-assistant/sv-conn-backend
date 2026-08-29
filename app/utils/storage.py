@@ -16,7 +16,7 @@ def _get_client():
     global _s3_client
     if _s3_client is None:
         kwargs: dict = {}
-        # SVC-251: only inject static creds when both are set. Otherwise let
+        # SVC-250: only inject static creds when both are set. Otherwise let
         # boto3's default credential chain resolve (App Runner injects
         # `AWS_CONTAINER_CREDENTIALS_FULL_URI` for the instance role; passing
         # empty-string keys here silently overrode that chain and caused every
