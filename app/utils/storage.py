@@ -15,10 +15,17 @@ _s3_client = None
 def _get_client():
     global _s3_client
     if _s3_client is None:
-        kwargs: dict = {
-            "aws_access_key_id": settings.AWS_ACCESS_KEY_ID,
-            "aws_secret_access_key": settings.AWS_SECRET_ACCESS_KEY,
-        }
+        kwargs: dict = {}
+        # SVC-250: only inject static creds when both are set. Otherwise let
+        # boto3's default credential chain resolve (App Runner injects
+        # `AWS_CONTAINER_CREDENTIALS_FULL_URI` for the instance role; passing
+        # empty-string keys here silently overrode that chain and caused every
+        # S3 call to fail with `AuthorizationHeaderMalformed`).
+        if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
+            kwargs["aws_access_key_id"] = settings.AWS_ACCESS_KEY_ID
+            kwargs["aws_secret_access_key"] = settings.AWS_SECRET_ACCESS_KEY
+        if settings.AWS_REGION:
+            kwargs["region_name"] = settings.AWS_REGION
         if settings.S3_ENDPOINT_URL:
             kwargs["endpoint_url"] = settings.S3_ENDPOINT_URL
         _s3_client = boto3.client("s3", **kwargs)
