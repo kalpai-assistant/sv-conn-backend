@@ -1195,3 +1195,142 @@ def test_expire_abandoned_payments_task_registered_on_beat():
     assert "expire-abandoned-payments" in schedule
     entry = schedule["expire-abandoned-payments"]
     assert entry["task"] == "app.tasks.cleanup_tasks.expire_abandoned_payments"
+
+
+# ---------------------------------------------------------------------------
+# SVC-251 / SVC-243 — expire_stale_bookings guards (paid + scheduled)
+# ---------------------------------------------------------------------------
+
+
+async def _run_expire_stale_query(db_session):
+    """Run the exact expire_stale_bookings query via the async test session.
+    Bypasses Celery/sync-DB wiring so we can inspect result.rowcount inline.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import or_, update
+
+    from app.models.booking import Booking, BookingStatus, PaymentStatus
+
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS)
+    return await db_session.execute(
+        update(Booking)
+        .where(Booking.status == BookingStatus.REQUESTED)
+        .where(Booking.created_at < cutoff)
+        .where(Booking.payment_status == PaymentStatus.PENDING)
+        .where(or_(Booking.scheduled_at.is_(None), Booking.scheduled_at <= now))
+        .values(status=BookingStatus.EXPIRED)
+    )
+
+
+@pytest.mark.asyncio
+async def test_expire_stale_bookings_kills_unpaid_past_deadline(db_session):
+    """Regression on the happy path — an instant unpaid booking older than
+    BOOKING_REQUEST_TIMEOUT_SECONDS flips to EXPIRED. Guards from SVC-251
+    must not break the primary sweep behaviour.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.REQUESTED,
+        payment_status=PaymentStatus.PENDING,
+    )
+    booking.created_at = datetime.now(UTC) - timedelta(
+        seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS + 60
+    )
+    await db_session.flush()
+
+    result = await _run_expire_stale_query(db_session)
+    assert result.rowcount == 1
+    await db_session.refresh(booking)
+    assert booking.status is BookingStatus.EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_expire_stale_bookings_leaves_paid_alone(db_session):
+    """SVC-251: a PAID booking sitting at REQUESTED (paid, awaiting provider
+    accept) must not be swept — killing it would strand the customer's money.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.REQUESTED,
+        payment_status=PaymentStatus.PAID,
+    )
+    booking.created_at = datetime.now(UTC) - timedelta(
+        seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS + 60
+    )
+    await db_session.flush()
+
+    result = await _run_expire_stale_query(db_session)
+    assert result.rowcount == 0
+    await db_session.refresh(booking)
+    assert booking.status is BookingStatus.REQUESTED
+
+
+@pytest.mark.asyncio
+async def test_expire_stale_bookings_leaves_future_scheduled_alone(db_session):
+    """SVC-243: a booking scheduled 2h from now legitimately has a REQUESTED
+    lifetime longer than the fulfilment window. The broadcast opens near the
+    slot; until then the sweep must skip it.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.REQUESTED,
+        payment_status=PaymentStatus.PENDING,
+    )
+    # Created 5 min ago (past cutoff) but scheduled for 2h from now.
+    booking.created_at = datetime.now(UTC) - timedelta(minutes=5)
+    booking.scheduled_at = datetime.now(UTC) + timedelta(hours=2)
+    await db_session.flush()
+
+    result = await _run_expire_stale_query(db_session)
+    assert result.rowcount == 0
+    await db_session.refresh(booking)
+    assert booking.status is BookingStatus.REQUESTED
+
+
+@pytest.mark.asyncio
+async def test_expire_stale_bookings_hits_past_scheduled(db_session):
+    """SVC-243 regression: once the scheduled slot has opened and the
+    broadcast fires without an acceptance, the booking is eligible for the
+    sweep like any other stale REQUESTED.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+    booking = await _create_booking_with_deps(
+        db_session,
+        consumer,
+        provider,
+        status=BookingStatus.REQUESTED,
+        payment_status=PaymentStatus.PENDING,
+    )
+    booking.created_at = datetime.now(UTC) - timedelta(
+        seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS + 60
+    )
+    booking.scheduled_at = datetime.now(UTC) - timedelta(minutes=5)
+    await db_session.flush()
+
+    result = await _run_expire_stale_query(db_session)
+    assert result.rowcount == 1
+    await db_session.refresh(booking)
+    assert booking.status is BookingStatus.EXPIRED

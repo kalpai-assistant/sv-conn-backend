@@ -9,11 +9,17 @@ from fastapi.responses import JSONResponse
 
 
 class AppException(Exception):
-    """Base for all application-level exceptions."""
+    """Base for all application-level exceptions.
 
-    def __init__(self, message: str, status_code: int = 400):
+    ``code`` is optional and, when set, is included in the JSON response body
+    so the frontend can branch on a stable identifier instead of parsing the
+    message. Existing subclasses that don't set one keep the same wire shape.
+    """
+
+    def __init__(self, message: str, status_code: int = 400, code: str | None = None):
         self.message = message
         self.status_code = status_code
+        self.code = code
         super().__init__(message)
 
 
@@ -83,6 +89,24 @@ class InvalidPayoutMethod(AppException):
 
     def __init__(self, message: str):
         super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST)
+
+
+class ServiceAreaMissing(AppException):
+    """SVC-257: provider tried to go online without a service_area_center set.
+
+    Going online with a NULL geo makes the provider invisible to the PostGIS
+    dispatch query — every incoming booking silently doesn't match. Refusing
+    at the wire, with a distinct code the frontend can catch, means the app
+    nudges the provider to complete their profile instead of appearing active
+    while receiving zero offers.
+    """
+
+    def __init__(self):
+        super().__init__(
+            "Set your service area before going online.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="SERVICE_AREA_MISSING",
+        )
 
 
 class CouponInvalid(AppException):
@@ -207,13 +231,16 @@ def register_exception_handlers(app: FastAPI) -> None:
                 headers["X-RateLimit-Remaining"] = "0"
             if exc.reset_at is not None:
                 headers["X-RateLimit-Reset"] = str(exc.reset_at)
+        content: dict = {
+            "error": True,
+            "message": exc.message,
+            "status_code": exc.status_code,
+        }
+        if exc.code is not None:
+            content["code"] = exc.code
         return JSONResponse(
             status_code=exc.status_code,
-            content={
-                "error": True,
-                "message": exc.message,
-                "status_code": exc.status_code,
-            },
+            content=content,
             headers=headers or None,
         )
 

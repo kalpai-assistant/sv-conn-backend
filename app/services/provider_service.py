@@ -16,6 +16,7 @@ from app.exceptions import (
     AppException,
     DuplicateSubscription,
     InvalidPayoutMethod,
+    ServiceAreaMissing,
     ServiceNotFound,
     SubscriptionNotFound,
     UnauthorizedAction,
@@ -294,6 +295,14 @@ class ProviderService:
 
     async def set_online_status(self, user_id: uuid.UUID, is_online: bool) -> ProviderProfile:
         profile, _ = await self.get_or_create_profile(user_id)
+        # SVC-257: going online with no service_area_center makes the provider
+        # invisible to the PostGIS dispatch query — they'd appear active in
+        # the app while receiving zero offers, and the silent failure only
+        # surfaces via missed jobs. Refuse at the wire with a code the app
+        # can catch to nudge the provider through the missing wizard step.
+        # Going OFFLINE is always allowed regardless of geo state.
+        if is_online and profile.service_area_center is None:
+            raise ServiceAreaMissing()
         profile.is_online = is_online
         await self.db.flush()
         return profile

@@ -315,3 +315,94 @@ async def test_add_default_address_unsets_previous_default(client, auth_headers,
     assert first.is_default is False
     new_default = await db_session.get(Address, uuid.UUID(response.json()["id"]))
     assert new_default.is_default is True
+
+
+# ---------------------------------------------------------------------------
+# SVC-242 — deleting the default promotes another address to default
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_default_promotes_oldest_remaining(client, auth_headers, db_session):
+    """SVC-242: deleting the default address leaves the user with no default,
+    which breaks the booking flow's `first-is_default` lookup. The oldest
+    remaining address should be promoted so the next booking still auto-fills.
+    """
+    import asyncio
+
+    user = await UserFactory.create(db_session, role="consumer")
+
+    old = Address(user_id=user.id, label="home", full_address="Old place", is_default=True)
+    db_session.add(old)
+    await db_session.flush()
+
+    # Ensure a distinct created_at so the ORDER BY is deterministic.
+    await asyncio.sleep(0.01)
+
+    mid = Address(user_id=user.id, label="work", full_address="Mid place", is_default=False)
+    db_session.add(mid)
+    await db_session.flush()
+
+    await asyncio.sleep(0.01)
+
+    new = Address(user_id=user.id, label="other", full_address="New place", is_default=False)
+    db_session.add(new)
+    await db_session.flush()
+
+    # Delete the current default.
+    response = await client.delete(
+        f"/api/v1/users/me/addresses/{old.id}",
+        headers=auth_headers(str(user.id), "consumer"),
+    )
+    assert response.status_code == 204, response.text
+
+    # The oldest of the remaining two (mid) should now be default.
+    await db_session.refresh(mid)
+    await db_session.refresh(new)
+    assert mid.is_default is True
+    assert new.is_default is False
+
+
+@pytest.mark.asyncio
+async def test_delete_default_when_only_one_address_is_noop(client, auth_headers, db_session):
+    """SVC-242 boundary: deleting the ONLY address happens to be the default,
+    but there's nothing to promote. Must not error or leave state inconsistent.
+    """
+    user = await UserFactory.create(db_session, role="consumer")
+
+    only = Address(user_id=user.id, label="home", full_address="Only place", is_default=True)
+    db_session.add(only)
+    await db_session.flush()
+    only_id = only.id
+
+    response = await client.delete(
+        f"/api/v1/users/me/addresses/{only_id}",
+        headers=auth_headers(str(user.id), "consumer"),
+    )
+    assert response.status_code == 204, response.text
+
+    # Row is gone; no phantom row was created.
+    still_there = await db_session.get(Address, only_id)
+    assert still_there is None
+
+
+@pytest.mark.asyncio
+async def test_delete_non_default_does_not_touch_default(client, auth_headers, db_session):
+    """SVC-242 regression: deleting a non-default address leaves the existing
+    default untouched. Only the delete-default path promotes.
+    """
+    user = await UserFactory.create(db_session, role="consumer")
+
+    default = Address(user_id=user.id, label="home", full_address="Home", is_default=True)
+    non_default = Address(user_id=user.id, label="work", full_address="Work", is_default=False)
+    db_session.add_all([default, non_default])
+    await db_session.flush()
+
+    response = await client.delete(
+        f"/api/v1/users/me/addresses/{non_default.id}",
+        headers=auth_headers(str(user.id), "consumer"),
+    )
+    assert response.status_code == 204, response.text
+
+    await db_session.refresh(default)
+    assert default.is_default is True

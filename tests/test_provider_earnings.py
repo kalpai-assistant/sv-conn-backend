@@ -165,17 +165,20 @@ async def test_earnings_excludes_cancelled_and_refunded(client, auth_headers, db
     consumer = await UserFactory.create(db_session, role="consumer")
     now_utc = datetime.now(UTC)
 
-    # Completed + PAID — counts
+    # Completed + PAID — counts. Offset must stay inside the IST calendar week
+    # even on Monday just past midnight IST (~18:30 UTC Sun), so keep it seconds
+    # not hours — otherwise `now - 1h` lands in last week and the count is 0.
     await _seed_completed_booking(
-        db_session, provider, consumer, payout=80.0, completed_at=now_utc - timedelta(hours=1)
+        db_session, provider, consumer, payout=80.0, completed_at=now_utc - timedelta(seconds=5)
     )
-    # Completed but REFUNDED — does not count
+    # Completed but REFUNDED — excluded by payment_status filter regardless of
+    # window; using the same small offset for consistency.
     await _seed_completed_booking(
         db_session,
         provider,
         consumer,
         payout=200.0,
-        completed_at=now_utc - timedelta(hours=2),
+        completed_at=now_utc - timedelta(seconds=10),
         payment_status=PaymentStatus.REFUNDED,
     )
     # CANCELLED — would never have a COMPLETED log row in production; we don't
@@ -237,11 +240,13 @@ async def test_earnings_isolated_between_providers(client, auth_headers, db_sess
     consumer = await UserFactory.create(db_session, role="consumer")
     now_utc = datetime.now(UTC)
 
+    # See note in test_earnings_excludes_cancelled_and_refunded — `hours=1`
+    # crosses the IST week boundary on Monday just past midnight IST.
     await _seed_completed_booking(
-        db_session, provider_a, consumer, payout=80.0, completed_at=now_utc - timedelta(hours=1)
+        db_session, provider_a, consumer, payout=80.0, completed_at=now_utc - timedelta(seconds=5)
     )
     await _seed_completed_booking(
-        db_session, provider_b, consumer, payout=300.0, completed_at=now_utc - timedelta(hours=1)
+        db_session, provider_b, consumer, payout=300.0, completed_at=now_utc - timedelta(seconds=5)
     )
 
     response = await client.get(
