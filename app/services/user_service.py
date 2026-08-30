@@ -91,9 +91,29 @@ class UserService:
             select(Address).where(Address.id == address_id, Address.user_id == user_id)
         )
         address = result.scalar_one_or_none()
-        if address:
-            await self.db.delete(address)
-            await self.db.flush()
+        if not address:
+            return
+
+        was_default = address.is_default
+        await self.db.delete(address)
+        await self.db.flush()
+
+        # SVC-242: deleting the default leaves the user with no default at all,
+        # which breaks the booking flow's `first-is_default` address lookup.
+        # Promote the oldest remaining address to default so the user's next
+        # booking still auto-fills an address. If they had exactly one address,
+        # this is a no-op (nothing to promote).
+        if was_default:
+            promote = await self.db.execute(
+                select(Address)
+                .where(Address.user_id == user_id)
+                .order_by(Address.created_at.asc())
+                .limit(1)
+            )
+            successor = promote.scalar_one_or_none()
+            if successor is not None:
+                successor.is_default = True
+                await self.db.flush()
 
     # ------------------------------------------------------------------
     # Helpers

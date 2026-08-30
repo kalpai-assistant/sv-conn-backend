@@ -4,7 +4,7 @@ Cleanup Celery tasks — periodic jobs run by Celery Beat.
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 
 from app.config import get_settings
 from app.models.booking import Booking, BookingStatus, PaymentStatus
@@ -18,16 +18,30 @@ def expire_stale_bookings():
     """
     Celery Beat task: runs every 30 seconds.
     Bulk-expires REQUESTED bookings older than BOOKING_REQUEST_TIMEOUT_SECONDS.
+
+    Guards:
+
+    * ``payment_status == PENDING`` (SVC-251) — a PAID booking sitting at
+      REQUESTED is waiting on a provider to accept an already-charged card.
+      Killing it silently would strand the customer's money and force a
+      dispute/refund; the accept-timeout policy is a separate concern.
+    * ``scheduled_at IS NULL OR scheduled_at <= now`` (SVC-243) — a booking
+      scheduled two hours from now legitimately has a REQUESTED lifetime
+      longer than the fulfilment window. The broadcast opens near the slot;
+      until then it must not be swept.
     """
     from app.database import SyncSessionLocal
 
-    cutoff = datetime.now(UTC) - timedelta(seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS)
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS)
 
     with SyncSessionLocal() as db:
         result = db.execute(
             update(Booking)
             .where(Booking.status == BookingStatus.REQUESTED)
             .where(Booking.created_at < cutoff)
+            .where(Booking.payment_status == PaymentStatus.PENDING)
+            .where(or_(Booking.scheduled_at.is_(None), Booking.scheduled_at <= now))
             .values(status=BookingStatus.EXPIRED)
         )
         db.commit()

@@ -249,3 +249,75 @@ async def test_list_my_services_isolated_per_provider(client, auth_headers, db_s
     returned = {row["service_id"] for row in response.json()}
     assert returned == {str(b_service.id)}
     assert str(a_service.id) not in returned
+
+
+# ---------------------------------------------------------------------------
+# SVC-257 — go-online refused when service_area_center is NULL
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_set_online_true_without_geo_rejected(client, auth_headers, db_session):
+    """SVC-257: going online with NULL geo makes the provider invisible to
+    the PostGIS dispatch. The endpoint must refuse with the
+    SERVICE_AREA_MISSING code so the app can nudge them through the
+    missing wizard step.
+    """
+    user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.VERIFIED)
+    assert profile.service_area_center is None
+
+    response = await client.patch(
+        "/api/v1/providers/me/status",
+        json={"is_online": True},
+        headers=auth_headers(str(user.id), "provider"),
+    )
+
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body.get("code") == "SERVICE_AREA_MISSING"
+    # Ensure the flag stayed False — the check must happen before the mutation.
+    await db_session.refresh(profile)
+    assert profile.is_online is False
+
+
+@pytest.mark.asyncio
+async def test_set_online_false_without_geo_allowed(client, auth_headers, db_session):
+    """SVC-257 regression: going OFFLINE is always allowed, geo or no geo.
+    A stuck-online provider must be able to disable themselves without first
+    completing their profile.
+    """
+    user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.VERIFIED)
+    profile.is_online = True  # simulate a legacy provider who slipped through
+    await db_session.flush()
+
+    response = await client.patch(
+        "/api/v1/providers/me/status",
+        json={"is_online": False},
+        headers=auth_headers(str(user.id), "provider"),
+    )
+
+    assert response.status_code == 200, response.text
+    await db_session.refresh(profile)
+    assert profile.is_online is False
+
+
+@pytest.mark.asyncio
+async def test_set_online_true_with_geo_succeeds(client, auth_headers, db_session):
+    """SVC-257 regression: the happy path — profile with geo set can go
+    online normally.
+    """
+    from app.utils.geo import build_point_wkt
+
+    user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.VERIFIED)
+    profile.service_area_center = build_point_wkt(lat=12.97, lng=77.59)  # Bengaluru
+    await db_session.flush()
+
+    response = await client.patch(
+        "/api/v1/providers/me/status",
+        json={"is_online": True},
+        headers=auth_headers(str(user.id), "provider"),
+    )
+
+    assert response.status_code == 200, response.text
+    await db_session.refresh(profile)
+    assert profile.is_online is True
