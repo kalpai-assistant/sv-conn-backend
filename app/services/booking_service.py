@@ -34,7 +34,7 @@ from app.models.booking import (
 from app.models.booking_item import BookingItem
 from app.models.booking_offer import BookingOffer, OfferResponse
 from app.models.booking_status_log import BookingStatusLog
-from app.models.provider_profile import ProviderProfile
+from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.service import Service
 from app.models.service_variant import ServiceVariant
 from app.models.user import UserRole
@@ -584,6 +584,31 @@ class BookingService:
         Sorted soonest-expiring first: the card shows one job at a time, and the
         one closest to dying is the one that needs an answer now.
         """
+        # Gate on the provider-level half of the eligibility rule once, up front.
+        #
+        # Two things go wrong without it. A provider who has gone offline still
+        # holds rows from when they were online, so they would be served cards
+        # that ``accept_booking`` then refuses with 403 — it re-checks the same
+        # predicate, ``is_online`` included. And a profile with no
+        # ``service_area_center`` (nullable, and only *going online* requires it
+        # since SVC-257) has no point to measure from, so ``_build_offer``'s
+        # distance comes back NULL and raises — taking the whole list down with
+        # it, not just that one offer. ``get_offer`` never hits either because it
+        # re-runs the full eligibility check per booking; this path deliberately
+        # does not, for rows that already exist.
+        profile = (
+            await self.db.execute(
+                select(ProviderProfile).where(ProviderProfile.user_id == provider_id)
+            )
+        ).scalar_one_or_none()
+        if (
+            profile is None
+            or not profile.is_online
+            or profile.kyc_status is not KYCStatus.VERIFIED
+            or profile.service_area_center is None
+        ):
+            return []
+
         timeout = timedelta(seconds=get_settings().BOOKING_REQUEST_TIMEOUT_SECONDS)
         cutoff = datetime.now(UTC) - timeout
 

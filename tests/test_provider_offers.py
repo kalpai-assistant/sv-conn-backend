@@ -302,6 +302,60 @@ async def test_expired_window_drops_out(client, db_session, auth_headers):
     assert resp.json() == []
 
 
+@pytest.mark.asyncio
+async def test_provider_who_went_offline_is_served_nothing(client, db_session, auth_headers):
+    """Offered while online, offline now — the row is not enough.
+
+    ``accept_booking`` re-checks the full eligibility rule, ``is_online``
+    included, so serving this card would hand them a job that 403s the instant
+    they tap it.
+    """
+    service = await _service(db_session)
+    provider = await _provider(db_session, service)
+    booking = await _open_booking(db_session, service)
+    await _offer(db_session, booking, provider)
+
+    profile = (
+        await db_session.execute(
+            select(ProviderProfile).where(ProviderProfile.user_id == provider.id)
+        )
+    ).scalar_one()
+    profile.is_online = False
+    await db_session.flush()
+
+    resp = await _list(client, provider, auth_headers)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_missing_service_area_centre_does_not_500(client, db_session, auth_headers):
+    """A profile with no centre has no point to measure a distance from.
+
+    Regression: the distance came back NULL and ``round()`` raised, which took
+    down the whole endpoint — so one bad profile meant the provider saw none of
+    their offers rather than one fewer.
+    """
+    service = await _service(db_session)
+    provider = await _provider(db_session, service)
+    booking = await _open_booking(db_session, service)
+    await _offer(db_session, booking, provider)
+
+    profile = (
+        await db_session.execute(
+            select(ProviderProfile).where(ProviderProfile.user_id == provider.id)
+        )
+    ).scalar_one()
+    profile.service_area_center = None
+    await db_session.flush()
+
+    resp = await _list(client, provider, auth_headers)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == []
+
+
 # --- ordering -----------------------------------------------------------------
 
 
