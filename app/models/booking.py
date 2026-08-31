@@ -29,7 +29,6 @@ class PaymentStatus(str, enum.Enum):
     PENDING = "pending"
     PAID = "paid"
     REFUNDED = "refunded"
-    # Reserved for the three-axis design — not used at runtime yet.
     EXPIRED = "expired"
     REFUND_PROCESSING = "refund_processing"
     REFUND_FAILED = "refund_failed"
