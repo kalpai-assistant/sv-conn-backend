@@ -4,7 +4,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_redis
-from app.schemas.auth import RefreshTokenRequest, SendOTPRequest, TokenResponse, VerifyOTPRequest
+from app.schemas.auth import (
+    LogoutRequest,
+    RefreshTokenRequest,
+    SendOTPRequest,
+    TokenResponse,
+    VerifyOTPRequest,
+)
 from app.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -38,3 +44,18 @@ async def refresh_token(
     redis: Redis = Depends(get_redis),
 ):
     return await AuthService(db, redis).refresh_tokens(request.refresh_token)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    request: LogoutRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    """SVC-241: revoke a refresh token so /auth/refresh with it returns 401.
+
+    Silently succeeds on any token — even malformed / already-expired — so
+    the client can call this once, drop its stored tokens, and never care
+    whether the server had anything to blacklist.
+    """
+    await AuthService(db, redis).logout(request.refresh_token)

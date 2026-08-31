@@ -26,3 +26,12 @@ class TokenResponse(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
+
+
+class LogoutRequest(BaseModel):
+    """SVC-241: refresh token to blacklist. The access token is short-lived
+    and expires on its own; the refresh token is the durable credential a
+    thief could otherwise use to mint fresh access tokens for 30 days.
+    """
+
+    refresh_token: str

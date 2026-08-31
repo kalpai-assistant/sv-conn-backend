@@ -171,3 +171,137 @@ async def test_refresh_rejects_deactivated_user(client, db_session):
     response = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
 
     assert response.status_code == 401, response.text
+
+
+# ---------------------------------------------------------------------------
+# SVC-240 — verify_otp stamps last_login_at
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_otp_stamps_last_login_at(client, db_session):
+    """SVC-240: successful verify sets `users.last_login_at` to (roughly) now.
+    A previous sign-in stamp is overwritten each time; NULL exists only for
+    users who have never signed in since the column was added.
+    """
+    from datetime import UTC, datetime
+
+    from app.models.user import User
+
+    with patch("app.services.auth_service.verify_otp", new=AsyncMock(return_value=True)):
+        response = await client.post(
+            "/api/v1/auth/verify-otp",
+            json={"phone": "+919876500240", "otp": "123456", "role": "consumer"},
+        )
+    assert response.status_code == 200
+
+    user_id = response.json()["user_id"]
+    user = await db_session.get(User, uuid.UUID(user_id))
+    await db_session.refresh(user)
+    assert user.last_login_at is not None
+    # Within a few seconds of "now"; test-machine clock skew is tolerated.
+    delta = abs((datetime.now(UTC) - user.last_login_at).total_seconds())
+    assert delta < 10, f"last_login_at drifted {delta}s from now"
+
+
+# ---------------------------------------------------------------------------
+# SVC-253 — Policy A: phone bound to a single role
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_otp_rejects_role_mismatch(client, db_session):
+    """SVC-253: a phone that already exists as consumer cannot re-authenticate
+    as provider (or vice versa). 400 with a message that names the existing
+    role so the caller knows to switch, not the vague "already registered".
+    """
+    user = await UserFactory.create(db_session, role="consumer", phone="+919876500253")
+    await db_session.commit()
+    assert user.role.value == "consumer"
+
+    with patch("app.services.auth_service.verify_otp", new=AsyncMock(return_value=True)):
+        response = await client.post(
+            "/api/v1/auth/verify-otp",
+            json={"phone": "+919876500253", "otp": "123456", "role": "provider"},
+        )
+
+    assert response.status_code == 400, response.text
+    body = response.json()
+    # The role name must appear so the caller can tell the user what to do —
+    # a bare "already registered" would leave a UI stuck with no guidance.
+    assert "consumer" in (body.get("message") or body.get("detail", ""))
+
+
+@pytest.mark.asyncio
+async def test_verify_otp_same_role_succeeds(client, db_session):
+    """SVC-253 regression: a user re-signing-in with the same role still works.
+    Only *different* role attempts are refused."""
+    user = await UserFactory.create(db_session, role="consumer", phone="+919876500254")
+    await db_session.commit()
+
+    with patch("app.services.auth_service.verify_otp", new=AsyncMock(return_value=True)):
+        response = await client.post(
+            "/api/v1/auth/verify-otp",
+            json={"phone": "+919876500254", "otp": "123456", "role": "consumer"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["user_id"] == str(user.id)
+
+
+# ---------------------------------------------------------------------------
+# SVC-241 — logout + refresh-token blacklist
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_logout_blacklists_refresh_and_prevents_refresh(client, db_session, redis_client):
+    """SVC-241: POST /auth/logout blacklists the refresh token's jti; a
+    subsequent POST /auth/refresh with the same token returns 401.
+    """
+    user = await UserFactory.create(db_session, role="consumer")
+    await db_session.commit()
+
+    # Mint via the actual factory so the jti + type are set.
+    refresh = create_refresh_token({"sub": str(user.id), "role": "consumer", "type": "refresh"})
+
+    # Sanity: works before logout.
+    ok = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+    assert ok.status_code == 200, ok.text
+
+    # Log out.
+    resp = await client.post("/api/v1/auth/logout", json={"refresh_token": refresh})
+    assert resp.status_code == 204
+
+    # Now the same token is 401.
+    denied = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+    assert denied.status_code == 401
+    assert "revoked" in denied.json().get("detail", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_logout_is_idempotent_on_garbage_token(client):
+    """SVC-241: logout on a malformed / expired token succeeds silently.
+    A client that lost its refresh token in a crash should still be able to
+    press "sign out" and not see a 4xx that reads like their fault.
+    """
+    resp = await client.post("/api/v1/auth/logout", json={"refresh_token": "not.a.jwt"})
+    assert resp.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_carries_jti_claim(db_session):
+    """SVC-241 wire test: every refresh token minted by `create_refresh_token`
+    carries a `jti` claim. Without it, blacklist-by-jti has nothing to key on
+    and logout is a no-op — this test catches a regression that would silently
+    disable the whole revocation story.
+    """
+    from app.utils.security import decode_jwt
+
+    token = create_refresh_token({"sub": "abc", "role": "consumer", "type": "refresh"})
+    payload = decode_jwt(token)
+    assert payload is not None
+    assert payload.get("jti"), "refresh token must carry a jti"
+    # Fresh jti per mint — two tokens must have different ids.
+    other = create_refresh_token({"sub": "abc", "role": "consumer", "type": "refresh"})
+    assert decode_jwt(other)["jti"] != payload["jti"]
