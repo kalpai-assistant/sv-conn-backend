@@ -229,7 +229,15 @@ async def test_verify_otp_rejects_role_mismatch(client, db_session):
     body = response.json()
     # The role name must appear so the caller can tell the user what to do —
     # a bare "already registered" would leave a UI stuck with no guidance.
-    assert "consumer" in (body.get("message") or body.get("detail", ""))
+    assert "consumer" in body["message"]
+    # The stable identifier is the actual contract. The app offers "sign in as a
+    # customer instead" off the back of this rejection, and used to find it by
+    # regexing the prose — which quietly made this copy load-bearing. Renaming a
+    # word in the message above must not silently remove that affordance.
+    assert body["code"] == "ROLE_MISMATCH"
+    # AppException shape, not FastAPI's bare {"detail": ...}: the client reads
+    # `message` for every other domain error and should not special-case this one.
+    assert "detail" not in body
 
 
 @pytest.mark.asyncio

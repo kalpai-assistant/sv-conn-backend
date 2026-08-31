@@ -70,6 +70,27 @@ class BookingOfferClosed(AppException):
         super().__init__(message, status_code=status.HTTP_410_GONE)
 
 
+class RoleMismatch(AppException):
+    """SVC-253 Policy A: this phone is bound to a different role.
+
+    Carries a stable ``code`` because the frontend acts on this one — it offers
+    "sign in as a <other role> instead" — and was previously matching the prose
+    with a regex, which made the copy load-bearing. Was a raw ``HTTPException``,
+    whose ``{"detail": ...}`` shape the client also had to special-case; as an
+    ``AppException`` it serialises like every other domain error.
+    """
+
+    ROLE_MISMATCH = "ROLE_MISMATCH"
+
+    def __init__(self, existing_role: str):
+        super().__init__(
+            f"This phone is already registered as {existing_role}. "
+            f"Sign in with the same role or use a different phone.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code=self.ROLE_MISMATCH,
+        )
+
+
 class InvalidOTP(AppException):
     def __init__(self, message: str = "Invalid OTP"):
         super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST)
