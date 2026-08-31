@@ -3,6 +3,7 @@ Security helpers: JWT encoding/decoding + password hashing.
 All JWT operations are centralised here — no other module touches jose directly.
 """
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -48,8 +49,14 @@ def create_access_token(data: dict[str, Any]) -> str:
 
 
 def create_refresh_token(data: dict[str, Any]) -> str:
+    # SVC-241: every refresh token gets a `jti` (JWT ID) so logout can
+    # blacklist it in Redis keyed on this stable identifier. Access tokens
+    # deliberately don't need one — they're short-lived and the blacklist
+    # cost per hop isn't worth the marginal safety window.
+    payload = data.copy()
+    payload.setdefault("jti", uuid.uuid4().hex)
     return _build_token(
-        data,
+        payload,
         timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
     )
 

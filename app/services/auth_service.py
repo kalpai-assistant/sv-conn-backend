@@ -8,7 +8,9 @@ It does NOT touch HTTP concerns — that belongs to the router.
 import logging
 import secrets
 import uuid
+from datetime import UTC, datetime
 
+from fastapi import HTTPException, status
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -126,20 +128,31 @@ class AuthService:
         return self._build_token_response(user, is_new)
 
     async def refresh_tokens(self, refresh_token: str) -> dict:
-        """Decode a refresh token and issue a fresh access + refresh pair."""
+        """Decode a refresh token and issue a fresh access + refresh pair.
+
+        SVC-241: also refuses when the token's `jti` is on the Redis blacklist
+        (populated by ``logout``). Without this a stolen refresh token stays
+        good for its full 30-day life.
+        """
         payload = decode_jwt(refresh_token)
         if not payload or payload.get("type") != "refresh":
-            from fastapi import HTTPException, status
-
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired refresh token",
             )
 
+        # SVC-241: blacklist check. `jti` is set on every refresh token issued
+        # after this ships; older tokens without a jti still work (grandfathered)
+        # so a mid-deploy user isn't force-logged-out.
+        jti = payload.get("jti")
+        if jti and await self.redis.exists(f"jwt:blacklist:{jti}"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token has been revoked",
+            )
+
         user = await self.db.get(User, uuid.UUID(payload["sub"]))
         if not user or not user.is_active:
-            from fastapi import HTTPException, status
-
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found or inactive",
@@ -147,23 +160,62 @@ class AuthService:
 
         return self._build_token_response(user, is_new=False)
 
+    async def logout(self, refresh_token: str) -> None:
+        """SVC-241: blacklist the refresh token's `jti` in Redis with a TTL
+        equal to the token's remaining lifetime. Subsequent calls to
+        ``/auth/refresh`` with this token 401 immediately.
+
+        Silently succeeds on a malformed / already-expired token — logout is
+        an idempotent, user-driven signal, not a security check. The access
+        token (short-lived, ~15 min) is deliberately not blacklisted; the
+        cost of tracking every access-token jti buys 15 min of extra safety
+        for a token the client already stopped using.
+        """
+        payload = decode_jwt(refresh_token)
+        if not payload or payload.get("type") != "refresh":
+            return
+        jti = payload.get("jti")
+        exp = payload.get("exp")
+        if not jti or not isinstance(exp, int):
+            return
+        now = int(datetime.now(UTC).timestamp())
+        ttl = max(1, exp - now)
+        await self.redis.setex(f"jwt:blacklist:{jti}", ttl, "1")
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     async def _upsert_user(self, phone: str, role: UserRole) -> tuple[User, bool]:
-        """Get existing user or create a new one. Returns (user, is_new)."""
+        """Get existing user or create a new one. Returns (user, is_new).
+
+        SVC-253 policy A: a phone is bound to a single role for its lifetime.
+        Attempting to re-authenticate the same phone with a different role
+        errors clearly instead of silently returning the original role — which
+        used to bite when a consumer tried to onboard as a provider on the
+        same number and got a JWT that never matched provider routes.
+        """
         result = await self.db.execute(select(User).where(User.phone == phone))
         user = result.scalar_one_or_none()
+        now = datetime.now(UTC)
 
-        is_new = user is None
-        if is_new:
-            user = User(phone=phone, role=role)
-            self.db.add(user)
+        if user is not None:
+            if user.role != role:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"This phone is already registered as {user.role.value}. "
+                    f"Sign in with the same role or use a different phone.",
+                )
+            # SVC-240: stamp last_login_at on every successful sign-in.
+            user.last_login_at = now
             await self.db.commit()
-            await self.db.refresh(user)
+            return user, False
 
-        return user, is_new
+        user = User(phone=phone, role=role, last_login_at=now)
+        self.db.add(user)
+        await self.db.commit()
+        await self.db.refresh(user)
+        return user, True
 
     @staticmethod
     def _build_token_response(user: User, is_new: bool) -> dict:

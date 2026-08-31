@@ -25,6 +25,9 @@ class User(Base):
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     fcm_token: Mapped[str | None] = mapped_column(String(255))
+    # SVC-240: stamped on every successful verify-otp. NULL for users who
+    # signed up before the column existed and haven't signed in since.
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
