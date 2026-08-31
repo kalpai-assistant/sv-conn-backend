@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user, require_role
 from app.models.user import User
+from app.schemas.booking import BookingOfferResponse
 from app.schemas.provider import (
     EarningsResponse,
     KYCSubmissionResponse,
@@ -18,6 +19,7 @@ from app.schemas.provider import (
     ProviderServiceSubscriptionResponse,
     ProviderStatusUpdate,
 )
+from app.services.booking_service import BookingService
 from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/providers", tags=["Providers"])
@@ -164,6 +166,28 @@ async def list_my_services(
 ):
     """List the services the current provider is subscribed to."""
     return await ProviderService(db).list_subscriptions(current_user.id)
+
+
+@router.get("/me/offers", response_model=list[BookingOfferResponse])
+async def list_my_offers(
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Open job offers for the current provider (SVC-254).
+
+    The fallback delivery path. Until this existed, an FCM push was the only way
+    an offer reached anyone — so a stale token, a denied notification permission
+    or an iOS Safari tab meant the provider was silently deaf to paid work.
+
+    The provider app polls this while online. Each entry is the same
+    ``BookingOfferResponse`` the push route's card fetches, so a polled offer and
+    a pushed one are indistinguishable to the UI. Soonest-expiring first.
+
+    Also tops up: a provider who came online after a booking was dispatched has
+    no offer row for it, and its push has already been sent. This is the only
+    place they can be added, so the read writes the missing rows.
+    """
+    return await BookingService(db).list_open_offers(current_user.id)
 
 
 @router.get("/me/earnings", response_model=EarningsResponse)

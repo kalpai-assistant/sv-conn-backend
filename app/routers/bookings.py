@@ -158,6 +158,37 @@ async def accept_booking(
     return BookingResponse.for_viewer(booking, current_user.id)
 
 
+@router.patch(
+    "/{booking_id}/decline",
+    status_code=status.HTTP_204_NO_CONTENT,
+    # Same defence-in-depth as /accept (SVC-168): a consumer or admin must never
+    # reach the service call, even though the offer-row lookup would refuse them
+    # anyway.
+    dependencies=[Depends(require_role("provider"))],
+    responses={
+        403: {"description": "You were not offered this booking"},
+    },
+)
+async def decline_booking(
+    booking_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Turn down a job offer (SVC-254). Backs the card's "Not now".
+
+    Without this the poll would re-serve a dismissed offer every fifteen seconds
+    until the window closed — worse than never showing it. Declining only
+    silences it for this provider; the booking stays open for everyone else.
+
+    Idempotent, and quiet about it: declining an offer already answered returns
+    204 rather than an error. A double tap is the common cause, and the
+    provider's intent is satisfied either way. 403 when they were never offered
+    the booking — the same answer ``/offer`` gives a non-recipient, so decline
+    can't be used to probe which bookings exist.
+    """
+    await BookingService(db).decline_offer(booking_id=booking_id, provider_id=current_user.id)
+
+
 @router.patch("/{booking_id}/en-route", response_model=BookingResponse)
 async def mark_en_route(
     booking_id: UUID,

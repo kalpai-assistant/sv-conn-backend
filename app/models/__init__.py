@@ -14,6 +14,7 @@ from app.models.booking import (  # noqa: F401
     PaymentStatus,
 )
 from app.models.booking_item import BookingItem  # noqa: F401
+from app.models.booking_offer import BookingOffer, OfferResponse  # noqa: F401
 from app.models.booking_status_log import BookingStatusLog  # noqa: F401
 from app.models.category import Category  # noqa: F401
 from app.models.coupon import Coupon, CouponRedemption, DiscountType  # noqa: F401

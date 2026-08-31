@@ -168,6 +168,45 @@ def send_booking_notification(self, booking_id: str, event: str):
                     return
                 stmt = eligible_providers_multi_stmt(service_ids, address.location)
                 recipients = db.execute(stmt).scalars().all()
+
+                # SVC-254: persist the offer before pushing.
+                #
+                # The push is best-effort — a stale token, a denied permission
+                # or an iOS Safari tab drops it with no error anywhere — so the
+                # row, not the push, is what actually makes this job reachable.
+                # It backs ``GET /providers/me/offers``, which a provider polls
+                # when no notification arrives.
+                #
+                # Written *before* the pushes on purpose: a push that landed
+                # ahead of its row would point the card at an offer the
+                # provider cannot see yet.
+                #
+                # ``on_conflict_do_nothing`` keeps this idempotent against
+                # ``uix_booking_offer``. This task retries up to three times, so
+                # without it a retry after a partial failure would offer the
+                # same provider the same booking twice.
+                if recipients:
+                    import uuid as _uuid
+
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                    from app.models.booking_offer import BookingOffer
+
+                    db.execute(
+                        pg_insert(BookingOffer)
+                        .values(
+                            [
+                                {
+                                    "id": _uuid.uuid4(),
+                                    "booking_id": booking.id,
+                                    "provider_id": recipient.id,
+                                }
+                                for recipient in recipients
+                            ]
+                        )
+                        .on_conflict_do_nothing(constraint="uix_booking_offer")
+                    )
+                    db.commit()
             else:
                 recipients = [booking.provider if event == "accepted" else booking.consumer]
 
