@@ -450,7 +450,12 @@ def _fake_session(booking, address, service, recipients):
         result.scalars.return_value.all.return_value = recipients
         return result
 
-    db.execute.side_effect = [_items_result(), _providers_result()]
+    # Three execute calls now: the cart items, the eligible providers, and
+    # SVC-254's offer insert. The insert's result is never read — only that it
+    # happens, before any push goes out — so a bare mock suffices. Left as an
+    # explicit sequence rather than a permissive callable: pinning the count is
+    # what made this task's new write visible here in the first place.
+    db.execute.side_effect = [_items_result(), _providers_result(), MagicMock()]
     db.__enter__.return_value = db
     db.__exit__.return_value = False
     return db

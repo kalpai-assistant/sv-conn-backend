@@ -9,7 +9,8 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -31,8 +32,9 @@ from app.models.booking import (
     PaymentStatus,
 )
 from app.models.booking_item import BookingItem
+from app.models.booking_offer import BookingOffer, OfferResponse
 from app.models.booking_status_log import BookingStatusLog
-from app.models.provider_profile import ProviderProfile
+from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.service import Service
 from app.models.service_variant import ServiceVariant
 from app.models.user import UserRole
@@ -529,6 +531,18 @@ class BookingService:
         if booking.status is not BookingStatus.REQUESTED:
             raise BookingOfferClosed()
 
+        return await self._build_offer(booking, address, provider_id)
+
+    async def _build_offer(
+        self, booking: Booking, address: Address, provider_id: uuid.UUID
+    ) -> BookingOfferResponse:
+        """Render one offer for one provider. Assumes items are already attached
+        and the caller has decided this provider may see it.
+
+        Shared by ``get_offer`` (one booking, by id) and ``list_open_offers``
+        (SVC-254's poll), so the pushed card and the polled card are built from
+        exactly one code path and cannot drift apart.
+        """
         distance = await self.db.execute(
             select(
                 distance_km_to_point(ProviderProfile.service_area_center, address.location)
@@ -546,6 +560,176 @@ class BookingService:
             expires_at=expires_at,
             seconds_remaining=seconds_remaining,
         )
+
+    async def list_open_offers(self, provider_id: uuid.UUID) -> list[BookingOfferResponse]:
+        """Every offer this provider can still act on (SVC-254).
+
+        The fallback for a provider whose FCM push never arrived — a stale
+        token, a denied permission, an iOS Safari tab. Before this, a dropped
+        push meant the job was simply invisible to them.
+
+        Two sources feed the list:
+
+        * **Rows written at dispatch.** The broadcast persists one per provider
+          it pushed to, so an offer outlives the notification that announced it.
+        * **A top-up.** Rows are written once, when the booking dispatches, so a
+          provider who came online mid-window has none. Any still-open booking
+          they are eligible for *now* gets a row here. This is the only place it
+          can happen: that booking's push has already fired and will not be
+          re-sent, so polling is the sole way they could ever learn of it.
+
+        An offer once made stands until it is answered or the booking closes —
+        losing eligibility afterwards (going offline, say) does not retract it.
+
+        Sorted soonest-expiring first: the card shows one job at a time, and the
+        one closest to dying is the one that needs an answer now.
+        """
+        # Gate on the provider-level half of the eligibility rule once, up front.
+        #
+        # Two things go wrong without it. A provider who has gone offline still
+        # holds rows from when they were online, so they would be served cards
+        # that ``accept_booking`` then refuses with 403 — it re-checks the same
+        # predicate, ``is_online`` included. And a profile with no
+        # ``service_area_center`` (nullable, and only *going online* requires it
+        # since SVC-257) has no point to measure from, so ``_build_offer``'s
+        # distance comes back NULL and raises — taking the whole list down with
+        # it, not just that one offer. ``get_offer`` never hits either because it
+        # re-runs the full eligibility check per booking; this path deliberately
+        # does not, for rows that already exist.
+        profile = (
+            await self.db.execute(
+                select(ProviderProfile).where(ProviderProfile.user_id == provider_id)
+            )
+        ).scalar_one_or_none()
+        if (
+            profile is None
+            or not profile.is_online
+            or profile.kyc_status is not KYCStatus.VERIFIED
+            or profile.service_area_center is None
+        ):
+            return []
+
+        timeout = timedelta(seconds=get_settings().BOOKING_REQUEST_TIMEOUT_SECONDS)
+        cutoff = datetime.now(UTC) - timeout
+
+        # Genuinely open: REQUESTED, unclaimed, and inside the offer window.
+        # `created_at > cutoff` matters because `expire_stale_bookings` sweeps
+        # only every 30s, so a booking can sit past its deadline still REQUESTED.
+        open_bookings = (
+            (
+                await self.db.execute(
+                    select(Booking).where(
+                        Booking.status == BookingStatus.REQUESTED,
+                        Booking.provider_id.is_(None),
+                        Booking.created_at > cutoff,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not open_bookings:
+            return []
+
+        await self.attach_items(open_bookings)
+
+        existing = (
+            (
+                await self.db.execute(
+                    select(BookingOffer).where(
+                        BookingOffer.provider_id == provider_id,
+                        BookingOffer.booking_id.in_([b.id for b in open_bookings]),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        rows_by_booking = {row.booking_id: row for row in existing}
+
+        offers: list[BookingOfferResponse] = []
+        top_ups: list[dict] = []
+
+        for booking in open_bookings:
+            row = rows_by_booking.get(booking.id)
+
+            # Answered already — accepted elsewhere, or declined. Either way it
+            # is not coming back.
+            if row is not None and row.response is not None:
+                continue
+
+            address = await self.db.get(Address, booking.consumer_address_id)
+            if address is None or address.location is None:
+                # The broadcast bails on this same condition, so nobody was ever
+                # offered this booking.
+                continue
+
+            if row is None:
+                # Top-up path. Only include it if they qualify right now —
+                # matching-policy (i), every service in the cart, same predicate
+                # the broadcast used.
+                eligible = await self.db.execute(
+                    is_eligible_provider_multi_stmt(
+                        [item.service_id for item in booking.items],
+                        address.location,
+                        provider_id,
+                    )
+                )
+                if eligible.scalar_one_or_none() is None:
+                    continue
+                top_ups.append(
+                    {
+                        "id": uuid.uuid4(),
+                        "booking_id": booking.id,
+                        "provider_id": provider_id,
+                    }
+                )
+
+            offers.append(await self._build_offer(booking, address, provider_id))
+
+        if top_ups:
+            # Racing polls from the same provider can both decide to top up the
+            # same booking; the unique constraint settles it and neither fails.
+            await self.db.execute(
+                pg_insert(BookingOffer)
+                .values(top_ups)
+                .on_conflict_do_nothing(constraint="uix_booking_offer")
+            )
+            await self.db.commit()
+
+        offers.sort(key=lambda offer: offer.seconds_remaining)
+        return offers
+
+    async def decline_offer(self, booking_id: uuid.UUID, provider_id: uuid.UUID) -> None:
+        """Record that this provider does not want this job (SVC-254).
+
+        Without it the poll would re-serve a dismissed offer every fifteen
+        seconds for the life of the window, which is worse than showing nothing.
+
+        403 when they were never offered it — same answer as ``get_offer`` gives
+        a non-recipient, so declining cannot be used to probe which bookings
+        exist. Declining an already-answered offer is a no-op rather than an
+        error: the provider's intent is satisfied either way, and the common
+        cause is a double tap.
+        """
+        row = (
+            await self.db.execute(
+                select(BookingOffer).where(
+                    BookingOffer.booking_id == booking_id,
+                    BookingOffer.provider_id == provider_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if row is None:
+            raise UnauthorizedAction("You were not offered this booking")
+
+        if row.response is not None:
+            return
+
+        row.response = OfferResponse.DECLINED
+        row.responded_at = datetime.now(UTC)
+        await self.db.commit()
 
     @staticmethod
     def _offer_expiry(booking: Booking) -> tuple[datetime, int]:
@@ -657,6 +841,27 @@ class BookingService:
             # cancelled/expired path forced the frontend into
             # `if (403 || 410) dismiss()`. 410 unifies the vocabulary.
             raise BookingOfferClosed()
+
+        # SVC-254: stamp the winner's offer row. Queued *before* the transition
+        # so ``transition_status``'s own commit carries both — the claim and the
+        # record of who claimed it land atomically, and this path adds no second
+        # commit of its own.
+        #
+        # Only the winner's row. The losers' are left untouched on purpose:
+        # ``list_open_offers`` joins to the booking and filters on REQUESTED +
+        # unclaimed, so a booking that has just been taken drops out of
+        # everyone else's list with no write at all. That keeps a bulk UPDATE
+        # off the accept path, and leaves their rows reading as what actually
+        # happened — offered, never responded.
+        await self.db.execute(
+            update(BookingOffer)
+            .where(
+                BookingOffer.booking_id == booking_id,
+                BookingOffer.provider_id == provider_id,
+                BookingOffer.response.is_(None),
+            )
+            .values(response=OfferResponse.ACCEPTED, responded_at=datetime.now(UTC))
+        )
 
         booking = await self.transition_status(
             booking_id=booking_id,
