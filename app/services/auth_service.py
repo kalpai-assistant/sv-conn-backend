@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.exceptions import InvalidOTP, RateLimitExceeded, SMSDeliveryError
+from app.exceptions import InvalidOTP, RateLimitExceeded, RoleMismatch, SMSDeliveryError
 from app.models.user import User, UserRole
 from app.utils.otp import (
     generate_otp,
@@ -201,11 +201,7 @@ class AuthService:
 
         if user is not None:
             if user.role != role:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"This phone is already registered as {user.role.value}. "
-                    f"Sign in with the same role or use a different phone.",
-                )
+                raise RoleMismatch(user.role.value)
             # SVC-240: stamp last_login_at on every successful sign-in.
             user.last_login_at = now
             await self.db.commit()
