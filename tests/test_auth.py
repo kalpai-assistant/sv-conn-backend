@@ -215,14 +215,17 @@ async def test_verify_otp_rejects_role_mismatch(client, db_session):
     as provider (or vice versa). 400 with a message that names the existing
     role so the caller knows to switch, not the vague "already registered".
     """
-    user = await UserFactory.create(db_session, role="consumer", phone="+919876500253")
+    # No literal phone: the commit below is real and outlives the test, so a
+    # hardcoded number leaks a row that fails this same test on the next run
+    # against the same database. The factory generates a unique one.
+    user = await UserFactory.create(db_session, role="consumer")
     await db_session.commit()
     assert user.role.value == "consumer"
 
     with patch("app.services.auth_service.verify_otp", new=AsyncMock(return_value=True)):
         response = await client.post(
             "/api/v1/auth/verify-otp",
-            json={"phone": "+919876500253", "otp": "123456", "role": "provider"},
+            json={"phone": user.phone, "otp": "123456", "role": "provider"},
         )
 
     assert response.status_code == 400, response.text
@@ -244,13 +247,13 @@ async def test_verify_otp_rejects_role_mismatch(client, db_session):
 async def test_verify_otp_same_role_succeeds(client, db_session):
     """SVC-253 regression: a user re-signing-in with the same role still works.
     Only *different* role attempts are refused."""
-    user = await UserFactory.create(db_session, role="consumer", phone="+919876500254")
+    user = await UserFactory.create(db_session, role="consumer")
     await db_session.commit()
 
     with patch("app.services.auth_service.verify_otp", new=AsyncMock(return_value=True)):
         response = await client.post(
             "/api/v1/auth/verify-otp",
-            json={"phone": "+919876500254", "otp": "123456", "role": "consumer"},
+            json={"phone": user.phone, "otp": "123456", "role": "consumer"},
         )
 
     assert response.status_code == 200, response.text
