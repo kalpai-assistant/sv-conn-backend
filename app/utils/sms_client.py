@@ -82,14 +82,18 @@ class MSG91Client(AbstractSMSClient):
                 "Set it in SSM once the DLT template is approved on MSG91."
             )
 
-        # `var1` matches the ##var1## placeholder in the DLT-approved
-        # template ("Dear User, please use this OTP: ##var1##"). If the
-        # template body changes, update the key here to match the new
-        # placeholder — MSG91 substitutes by name, not position.
+        # MSG91's /api/v5/otp endpoint expects the OTP under the `otp`
+        # key, not `var1` — the template placeholder is `##OTP##`
+        # (MSG91's reserved OTP-specific token), not `##var1##`. Passing
+        # `var1` here is silently ignored; MSG91 then auto-generates its
+        # own OTP into ##OTP## and sends THAT, leaving Redis and the
+        # phone out of sync and every verify failing. This tripped us on
+        # 2026-09-02 the moment DLT delivery finally worked end-to-end
+        # for the first time (see SVC-225 saga).
         body = {
             "template_id": settings.MSG91_TEMPLATE_ID,
             "mobile": phone.lstrip("+"),
-            "var1": otp,
+            "otp": otp,
         }
         headers = {
             "authkey": settings.MSG91_AUTH_KEY,
