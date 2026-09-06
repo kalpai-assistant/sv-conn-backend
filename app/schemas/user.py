@@ -79,6 +79,23 @@ class AddressResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class UpdateAddressRequest(BaseModel):
+    """Edit a saved address (SVC-277). Every field optional — this is a PATCH.
+
+    Served by a copy-on-write update: the old row is soft-deleted and a new one
+    created, so bookings that already point at the old address keep recording
+    where the job actually happened. See `UserService.update_address`.
+    """
+
+    label: str | None = Field(default=None, pattern=r"^(home|work|other)$")
+    full_address: str | None = Field(default=None, min_length=5, max_length=500)
+    # A pair or neither: one without the other would build a point half from the
+    # old address and half from the new.
+    lat: float | None = None
+    lng: float | None = None
+    is_default: bool | None = None
+
+
 class CreateAddressRequest(BaseModel):
     label: str = Field(default="home", pattern=r"^(home|work|other)$")
     full_address: str = Field(..., min_length=5, max_length=500)

@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from geoalchemy2 import Geography
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -19,7 +19,18 @@ class Address(Base):
 
     __tablename__ = "addresses"
 
-    __table_args__ = (Index("idx_addresses_location", "location", postgresql_using="gist"),)
+    __table_args__ = (
+        Index("idx_addresses_location", "location", postgresql_using="gist"),
+        # SVC-277: the address book reads live rows only, so the index covers
+        # just those. Declared here as well as in the migration — Alembic
+        # compares the models against the database, and an index present in one
+        # but not the other reads as a pending drop.
+        Index(
+            "ix_addresses_user_live",
+            "user_id",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -34,6 +45,17 @@ class Address(Base):
     )
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # SVC-277: soft delete. `bookings.consumer_address_id` is an unqualified FK,
+    # so removing a row Postgres knows a booking points at raises — and almost
+    # every address has a booking. Hiding instead of deleting keeps the FK
+    # satisfied and keeps a booking's address resolvable for history.
+    #
+    # The filtering rule this creates is asymmetric and worth stating once:
+    # the *address book* hides deleted rows; anything resolving a *booking's*
+    # address must not, or the geo-fence stops matching providers and the
+    # booking dies as "no partners found nearby" with nothing logged.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="addresses")
