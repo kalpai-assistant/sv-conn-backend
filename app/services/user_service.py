@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.exceptions import UserNotFound
 from app.models.address import Address
 from app.models.user import User
-from app.utils.geo import build_point_wkt
+from app.utils.geo import build_point_wkt, point_lat_lng
 
 
 class UserService:
@@ -146,7 +146,19 @@ class UserService:
         if lat is not None and lng is not None:
             new_location = build_point_wkt(lat, lng)
         else:
-            new_location = current.location
+            # Rebuild the point from its coordinates rather than reusing the
+            # loaded value. What comes back off a Geography column is a
+            # WKBElement, and writing one to a new row makes geoalchemy2 reach
+            # for shapely to convert it — which this project deliberately does
+            # not depend on (see `point_lat_lng`). Passing it straight through
+            # raises ImportError at INSERT, and only for an edit that keeps the
+            # existing location, so `add_address` never sees it.
+            old_lat, old_lng = point_lat_lng(current.location)
+            new_location = (
+                build_point_wkt(old_lat, old_lng)
+                if old_lat is not None and old_lng is not None
+                else None
+            )
 
         current.deleted_at = datetime.now(UTC)
         current.is_default = False

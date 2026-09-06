@@ -343,3 +343,54 @@ async def test_booking_count_is_untouched_by_either_operation(client, auth_heade
 
     after = (await db_session.execute(select(Booking))).scalars().all()
     assert len(after) == len(before)
+
+
+@pytest.mark.asyncio
+async def test_edit_keeps_the_location_without_needing_shapely(client, auth_headers, db_session):
+    """Regression: an edit that keeps the existing point must not round-trip it.
+
+    Reusing the loaded `current.location` looks obviously right and fails at
+    INSERT with `ImportError: This feature needs the optional Shapely
+    dependency` — what comes back off a Geography column is a WKBElement, and
+    writing one to a new row makes geoalchemy2 reach for shapely, which this
+    project deliberately does not depend on (see `point_lat_lng`).
+
+    Only an edit that *keeps* the location hits it, which is why `add_address`
+    never did: that path always builds a fresh WKT from lat/lng. Found on a
+    device, not in this suite — the earlier tests asserted on the response body
+    and never re-read the stored point.
+    """
+    user = await UserFactory.create(db_session, role="consumer")
+    addr = await _address(db_session, user.id, full="Flat 302")
+    headers = auth_headers(str(user.id), "consumer")
+
+    # Re-read it from the database first, and this is the whole point of the
+    # test. Straight after a flush `location` is still the WKT *string* we
+    # wrote, which copies across harmlessly — it only becomes a WKBElement once
+    # genuinely loaded back, which is what every real request does. Without
+    # this the test passes against the broken code.
+    await db_session.refresh(addr)
+    assert type(addr.location).__name__ == "WKBElement", (
+        "setup did not reproduce a real read — the bug only appears for a "
+        "location loaded from the database"
+    )
+
+    # No lat/lng: the caller is editing text only.
+    response = await client.patch(
+        f"/api/v1/users/me/addresses/{addr.id}",
+        json={"full_address": "Flat 302, corrected"},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+
+    # The replacement must carry the same point, and it must be readable —
+    # a geo-fence match depends on it.
+    listed = (await client.get("/api/v1/users/me/addresses", headers=headers)).json()
+    assert len(listed) == 1
+    replacement = await db_session.get(Address, uuid.UUID(listed[0]["id"]))
+    assert replacement.location is not None, "the edit dropped the location"
+
+    from app.utils.geo import point_lat_lng
+
+    new_lat, new_lng = point_lat_lng(replacement.location)
+    assert (round(new_lat, 4), round(new_lng, 4)) == (round(PUNE[0], 4), round(PUNE[1], 4))
