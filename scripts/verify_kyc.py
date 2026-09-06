@@ -43,17 +43,13 @@ async def verify_kyc(phone: str, assume_yes: bool) -> int:
         return 2
 
     async with AsyncSessionLocal() as db:
-        user = (
-            await db.execute(select(User).where(User.phone == phone))
-        ).scalar_one_or_none()
+        user = (await db.execute(select(User).where(User.phone == phone))).scalar_one_or_none()
         if user is None:
             print(f"error: no user with phone {phone}", file=sys.stderr)
             return 3
 
         profile = (
-            await db.execute(
-                select(ProviderProfile).where(ProviderProfile.user_id == user.id)
-            )
+            await db.execute(select(ProviderProfile).where(ProviderProfile.user_id == user.id))
         ).scalar_one_or_none()
 
         print(f"user_id:          {user.id}")
@@ -111,9 +107,7 @@ def main() -> None:
         description="Approve a provider's SUBMITTED KYC by phone number."
     )
     parser.add_argument("phone", help="Phone in +91XXXXXXXXXX format")
-    parser.add_argument(
-        "-y", "--yes", action="store_true", help="Skip the confirmation prompt"
-    )
+    parser.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
     args = parser.parse_args()
     sys.exit(asyncio.run(verify_kyc(args.phone, args.yes)))
 
