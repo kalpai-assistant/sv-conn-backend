@@ -188,9 +188,18 @@ async def test_delete_own_address_removes_it(client, auth_headers, db_session):
     )
 
     assert response.status_code == 204, response.text
-    # Confirm the row is gone.
-    still_there = await db_session.get(Address, addr.id)
-    assert still_there is None
+    # SVC-277: the row survives, hidden. It cannot be removed — a booking may
+    # point at it and `bookings.consumer_address_id` has no ON DELETE rule, so
+    # a real delete raises for any address that has ever been used. What the
+    # user is promised is that it leaves their address book, so that is what
+    # this asserts.
+    await db_session.refresh(addr)
+    assert addr.deleted_at is not None
+
+    listed = await client.get(
+        "/api/v1/users/me/addresses", headers=auth_headers(str(user.id), "consumer")
+    )
+    assert [a["id"] for a in listed.json()] == []
 
 
 @pytest.mark.asyncio
@@ -381,9 +390,14 @@ async def test_delete_default_when_only_one_address_is_noop(client, auth_headers
     )
     assert response.status_code == 204, response.text
 
-    # Row is gone; no phantom row was created.
-    still_there = await db_session.get(Address, only_id)
-    assert still_there is None
+    # SVC-277: hidden rather than removed, and no phantom successor invented —
+    # there was nothing live left to promote.
+    survivor = await db_session.get(Address, only_id)
+    assert survivor is not None
+    assert survivor.deleted_at is not None
+    # A hidden row must not stay flagged default: the default lookup would
+    # still find it and prefill a booking with an address the user removed.
+    assert survivor.is_default is False
 
 
 @pytest.mark.asyncio

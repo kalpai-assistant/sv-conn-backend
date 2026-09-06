@@ -1,6 +1,7 @@
 import logging
+import uuid
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -10,6 +11,7 @@ from app.schemas.user import (
     AddressResponse,
     CreateAddressRequest,
     PushCapabilityReport,
+    UpdateAddressRequest,
     UpdateFCMTokenRequest,
     UpdateProfileRequest,
     UserResponse,
@@ -114,12 +116,42 @@ async def add_address(
     )
 
 
-@router.delete("/me/addresses/{address_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_address(
-    address_id: str,
+@router.patch("/me/addresses/{address_id}", response_model=AddressResponse)
+async def update_address(
+    address_id: uuid.UUID,
+    request: UpdateAddressRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    from uuid import UUID
+    """Edit a saved address (SVC-277).
 
-    await UserService(db).delete_address(current_user.id, UUID(address_id))
+    Copy-on-write: the old row is soft-deleted and a new one returned. Bookings
+    that already point at the old address keep recording where the job actually
+    happened, and a provider en route to it is not silently redirected.
+    """
+    updated = await UserService(db).update_address(
+        user_id=current_user.id,
+        address_id=address_id,
+        label=request.label,
+        full_address=request.full_address,
+        lat=request.lat,
+        lng=request.lng,
+        is_default=request.is_default,
+    )
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Address not found")
+    return updated
+
+
+@router.delete("/me/addresses/{address_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_address(
+    address_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a saved address (SVC-277: now a soft delete).
+
+    The row is hidden, not deleted — `bookings.consumer_address_id` is an
+    unqualified FK, so removing an address any booking has ever used raises.
+    """
+    await UserService(db).delete_address(current_user.id, address_id)

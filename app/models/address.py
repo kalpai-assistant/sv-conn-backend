@@ -35,6 +35,17 @@ class Address(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # SVC-277: soft delete. `bookings.consumer_address_id` is an unqualified FK,
+    # so removing a row Postgres knows a booking points at raises — and almost
+    # every address has a booking. Hiding instead of deleting keeps the FK
+    # satisfied and keeps a booking's address resolvable for history.
+    #
+    # The filtering rule this creates is asymmetric and worth stating once:
+    # the *address book* hides deleted rows; anything resolving a *booking's*
+    # address must not, or the geo-fence stops matching providers and the
+    # booking dies as "no partners found nearby" with nothing logged.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="addresses")
 
