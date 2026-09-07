@@ -3,8 +3,13 @@ Notification Celery tasks — handles async push + SMS dispatch for booking even
 Uses a synchronous DB session (SyncSessionLocal) because Celery workers are not async.
 """
 
+import logging
+
+from app.models.booking import BookingStatus
 from app.tasks.celery_app import celery_app
 from app.utils.fcm_client import send_multicast, send_push_notification
+
+logger = logging.getLogger(__name__)
 
 NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
     "new_request": {
@@ -114,6 +119,33 @@ def build_new_request_body(service_name: str | None) -> str:
     )
 
 
+def _expire_unbroadcastable(db, booking, reason: str) -> None:
+    """Terminate a booking the broadcast can never reach (SVC-278 issue 5).
+
+    Three conditions make a REQUESTED booking undeliverable the moment it is
+    created: no address location, an empty cart, or no eligible provider. Each
+    used to `return` here, leaving the row at REQUESTED until
+    `expire_stale_bookings` swept it two minutes later — so the consumer
+    watched "Finding nearby partner…" for the full window to learn something
+    that was already decided.
+
+    EXPIRED is the state the tracking screen already renders as "No partners
+    found nearby", so expiring now moves that message to the consumer's next
+    4s poll and needs no new UI.
+
+    `reason` is logged rather than shown: the three causes need different
+    engineering responses (a broken address, a bad cart, genuinely no supply)
+    but read identically to a consumer, who can only try again.
+    """
+    logger.info(
+        "booking.unbroadcastable booking_id=%s reason=%s",
+        booking.id,
+        reason,
+    )
+    booking.status = BookingStatus.EXPIRED
+    db.commit()
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -154,6 +186,7 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                 # Get the booking address location directly
                 address = db.get(Address, booking.consumer_address_id)
                 if not address or not address.location:
+                    _expire_unbroadcastable(db, booking, "no-address-location")
                     return
 
                 # Load the cart items (with each item's service) so the summary
@@ -179,6 +212,7 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                 # keeps the broadcast set and accept set aligned.
                 service_ids = [item.service_id for item in items]
                 if not service_ids:
+                    _expire_unbroadcastable(db, booking, "empty-cart")
                     return
                 stmt = eligible_providers_multi_stmt(service_ids, address.location)
                 recipients = db.execute(stmt).scalars().all()
@@ -199,28 +233,41 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                 # ``uix_booking_offer``. This task retries up to three times, so
                 # without it a retry after a partial failure would offer the
                 # same provider the same booking twice.
-                if recipients:
-                    import uuid as _uuid
+                if not recipients:
+                    # Nobody is eligible, and we know it now.
+                    #
+                    # What this gives up: a provider who becomes available
+                    # mid-window could previously still accept, because
+                    # `get_offer` re-checks eligibility live rather than
+                    # reading these offer rows. Of the conditions
+                    # `provider_matching` applies, availability is the only one
+                    # that can change inside two minutes — so that is the whole
+                    # of the loss, and it is worth less than making every
+                    # consumer sit out a dead window.
+                    _expire_unbroadcastable(db, booking, "no-eligible-provider")
+                    return
 
-                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+                import uuid as _uuid
 
-                    from app.models.booking_offer import BookingOffer
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-                    db.execute(
-                        pg_insert(BookingOffer)
-                        .values(
-                            [
-                                {
-                                    "id": _uuid.uuid4(),
-                                    "booking_id": booking.id,
-                                    "provider_id": recipient.id,
-                                }
-                                for recipient in recipients
-                            ]
-                        )
-                        .on_conflict_do_nothing(constraint="uix_booking_offer")
+                from app.models.booking_offer import BookingOffer
+
+                db.execute(
+                    pg_insert(BookingOffer)
+                    .values(
+                        [
+                            {
+                                "id": _uuid.uuid4(),
+                                "booking_id": booking.id,
+                                "provider_id": recipient.id,
+                            }
+                            for recipient in recipients
+                        ]
                     )
-                    db.commit()
+                    .on_conflict_do_nothing(constraint="uix_booking_offer")
+                )
+                db.commit()
             elif event == "cancelled":
                 # Tell whoever did NOT do the cancelling. Both parties can
                 # cancel, so this is the one event with no fixed direction —
