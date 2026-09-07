@@ -24,6 +24,14 @@ NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
         "title": "Service Completed",
         "body": "Your service has been completed. Please proceed to payment.",
     },
+    # Goes to whichever party did not cancel — see send_booking_notification.
+    # Worded to read correctly either way: "the other side pulled out" is true
+    # for a provider whose job vanished and for a consumer whose provider
+    # dropped it, without naming a role the recipient might not be.
+    "cancelled": {
+        "title": "Booking Cancelled",
+        "body": "This booking has been cancelled. No further action is needed.",
+    },
 }
 
 
@@ -112,8 +120,14 @@ def build_new_request_body(service_name: str | None) -> str:
     default_retry_delay=5,
     name="app.tasks.notification_tasks.send_booking_notification",
 )
-def send_booking_notification(self, booking_id: str, event: str):
-    """Send push notification for booking lifecycle events."""
+def send_booking_notification(self, booking_id: str, event: str, actor_id: str | None = None):
+    """Send push notification for booking lifecycle events.
+
+    ``actor_id`` is who caused the event, and only ``cancelled`` needs it:
+    either party can cancel, so the recipient is "the other one". Optional so
+    the events with a fixed direction (a provider accepts, a consumer is told)
+    keep calling this unchanged.
+    """
     from app.database import SyncSessionLocal
     from app.models.booking import Booking
 
@@ -207,6 +221,22 @@ def send_booking_notification(self, booking_id: str, event: str):
                         .on_conflict_do_nothing(constraint="uix_booking_offer")
                     )
                     db.commit()
+            elif event == "cancelled":
+                # Tell whoever did NOT do the cancelling. Both parties can
+                # cancel, so this is the one event with no fixed direction —
+                # and getting it wrong means telling someone their own action
+                # happened while the person waiting on them hears nothing.
+                #
+                # `provider` is None until someone accepts (VALID_TRANSITIONS
+                # allows REQUESTED → CANCELLED), so a consumer cancelling
+                # before acceptance has nobody to notify. That is correct, not
+                # a gap: no provider has committed to the job yet. The
+                # `if recipient` guard below already handles it.
+                recipients = (
+                    [booking.consumer]
+                    if actor_id and str(booking.provider_id) == actor_id
+                    else [booking.provider]
+                )
             else:
                 recipients = [booking.provider if event == "accepted" else booking.consumer]
 

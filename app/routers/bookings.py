@@ -254,6 +254,13 @@ async def cancel_booking(
         changed_by=current_user.id,
         cancellation_reason=request.reason,
     )
+    # SVC-278: cancel was the only lifecycle transition that told nobody, so
+    # the other party found out by opening the app — a provider could travel to
+    # a job the consumer had already called off. `actor_id` because either side
+    # can cancel and the push goes to the one who didn't.
+    send_booking_notification.delay(
+        booking_id=str(booking.id), event="cancelled", actor_id=str(current_user.id)
+    )
     return BookingResponse.for_viewer(booking, current_user.id)
 
 
