@@ -37,11 +37,37 @@ def _get_app() -> firebase_admin.App:
     return _app
 
 
+def _android_config(channel_id: str | None):
+    """Route an Android push to a specific notification channel (SVC-278).
+
+    Android takes the sound, the vibration and whether the notification
+    interrupts from the *channel*, not from the message — so a job request can
+    only sound different from an app-update nudge by naming a channel the app
+    created. ``priority="high"`` alongside it governs delivery (it wakes a dozing
+    device); the two are unrelated and both are needed for a time-critical push.
+
+    ``None`` means "leave Android to its defaults", which is what every event
+    other than a new job request wants: only one channel should stand out, or
+    none of them does.
+
+    The id must match ``JOB_REQUEST_CHANNEL_ID`` in the app's
+    ``notification-channels.ts``. A mismatch is silent — Android falls back to
+    the default channel and the push simply sounds ordinary.
+    """
+    if channel_id is None:
+        return None
+    return messaging.AndroidConfig(
+        priority="high",
+        notification=messaging.AndroidNotification(channel_id=channel_id),
+    )
+
+
 def send_push_notification(
     token: str,
     title: str,
     body: str,
     data: dict[str, str] | None = None,
+    android_channel_id: str | None = None,
 ) -> str:
     """
     Send a single push notification to a device token.
@@ -86,6 +112,7 @@ def send_push_notification(
         notification=messaging.Notification(title=title, body=body),
         data=data or {},
         token=token,
+        android=_android_config(android_channel_id),
     )
     return messaging.send(message)
 

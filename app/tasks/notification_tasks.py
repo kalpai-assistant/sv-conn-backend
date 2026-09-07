@@ -11,6 +11,18 @@ from app.utils.fcm_client import send_multicast, send_push_notification
 
 logger = logging.getLogger(__name__)
 
+# Android notification channel for new job requests (SVC-278 issue 6).
+#
+# Must match `JOB_REQUEST_CHANNEL_ID` in the app's `notification-channels.ts`.
+# The app creates the channel (with its own sound and MAX importance); this
+# names it so the push is filed against it. A mismatch fails silently — Android
+# falls back to the default channel and the job request sounds like everything
+# else, which is the bug this exists to fix.
+#
+# The `_vN` suffix is load-bearing: Android channels are immutable after
+# creation, so changing the sound means shipping a new id on both sides.
+JOB_REQUEST_CHANNEL_ID = "job_requests_v1"
+
 NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
     "new_request": {
         "title": "New Booking Request!",
@@ -293,6 +305,13 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                         token=recipient.fcm_token,
                         title=template["title"],
                         body=body,
+                        # Only the job request gets its own channel. Giving
+                        # every event one would leave a provider with a wall of
+                        # equally urgent sounds and nothing distinguishing the
+                        # one that pays them.
+                        android_channel_id=(
+                            JOB_REQUEST_CHANNEL_ID if event == "new_request" else None
+                        ),
                         # Payload stays a bare pointer — the card fetches its data
                         # from the offer endpoint, which can revoke access once the
                         # booking is claimed. A push cannot be taken back.
