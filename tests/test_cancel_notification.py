@@ -26,6 +26,23 @@ from tests.factories.booking_factory import BookingFactory
 from tests.factories.user_factory import UserFactory
 
 
+@pytest.fixture
+async def committed(db_session):
+    """Commit test rows, then remove them again.
+
+    These tests have to commit: the Celery task opens its own connection and
+    cannot see an uncommitted transaction, so the usual rollback-only isolation
+    does not work here. Committing leaks rows into `sc_test` though, and other
+    suites count bookings table-wide (`test_coupons` asserts there are none), so
+    what this commits it also cleans up.
+    """
+    created: list = []
+    yield created
+    for obj in reversed(created):
+        await db_session.delete(obj)
+    await db_session.commit()
+
+
 async def _address(db, user_id):
     """A real address row — BookingFactory only invents an id, and the FK is real."""
     from app.models.address import Address
@@ -130,7 +147,9 @@ def _tokens_pushed_to(booking_id, event, actor_id):
 
 
 @pytest.mark.asyncio
-async def test_consumer_cancels_so_the_provider_is_told(client, auth_headers, db_session):
+async def test_consumer_cancels_so_the_provider_is_told(
+    client, auth_headers, db_session, committed
+):
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     consumer.fcm_token = "consumer-token"
@@ -143,6 +162,7 @@ async def test_consumer_cancels_so_the_provider_is_told(client, auth_headers, db
         address_id=addr.id,
         status=BookingStatus.ACCEPTED,
     )
+    committed.extend([booking, addr, provider, consumer])
     await db_session.commit()
 
     tokens = _tokens_pushed_to(booking.id, "cancelled", str(consumer.id))
@@ -153,7 +173,9 @@ async def test_consumer_cancels_so_the_provider_is_told(client, auth_headers, db
 
 
 @pytest.mark.asyncio
-async def test_provider_cancels_so_the_consumer_is_told(client, auth_headers, db_session):
+async def test_provider_cancels_so_the_consumer_is_told(
+    client, auth_headers, db_session, committed
+):
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     consumer.fcm_token = "consumer-token"
@@ -166,6 +188,7 @@ async def test_provider_cancels_so_the_consumer_is_told(client, auth_headers, db
         address_id=addr.id,
         status=BookingStatus.ACCEPTED,
     )
+    committed.extend([booking, addr, provider, consumer])
     await db_session.commit()
 
     tokens = _tokens_pushed_to(booking.id, "cancelled", str(provider.id))
@@ -176,7 +199,9 @@ async def test_provider_cancels_so_the_consumer_is_told(client, auth_headers, db
 
 
 @pytest.mark.asyncio
-async def test_cancelling_before_anyone_accepts_pushes_to_nobody(client, auth_headers, db_session):
+async def test_cancelling_before_anyone_accepts_pushes_to_nobody(
+    client, auth_headers, db_session, committed
+):
     """REQUESTED → CANCELLED is legal and there is no provider yet.
 
     `provider_id` is only set on acceptance, so this must not raise and must
@@ -192,6 +217,7 @@ async def test_cancelling_before_anyone_accepts_pushes_to_nobody(client, auth_he
         address_id=addr.id,
         status=BookingStatus.REQUESTED,
     )
+    committed.extend([booking, addr, consumer])
     await db_session.commit()
 
     tokens = _tokens_pushed_to(booking.id, "cancelled", str(consumer.id))
@@ -200,7 +226,9 @@ async def test_cancelling_before_anyone_accepts_pushes_to_nobody(client, auth_he
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_actor_still_reaches_the_provider(client, auth_headers, db_session):
+async def test_an_unknown_actor_still_reaches_the_provider(
+    client, auth_headers, db_session, committed
+):
     """Defensive: a missing/garbled actor must not silence the notification.
 
     The provider is the higher-cost party to leave uninformed — they may be
@@ -218,6 +246,7 @@ async def test_an_unknown_actor_still_reaches_the_provider(client, auth_headers,
         address_id=addr.id,
         status=BookingStatus.ACCEPTED,
     )
+    committed.extend([booking, addr, provider, consumer])
     await db_session.commit()
 
     tokens = _tokens_pushed_to(booking.id, "cancelled", str(uuid.uuid4()))
