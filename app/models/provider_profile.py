@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.utils.geo import point_lat_lng
 
 
 class KYCStatus(str, enum.Enum):
@@ -107,6 +108,29 @@ class ProviderProfile(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="provider_profile")
+
+    @property
+    def service_area_lat(self) -> float | None:
+        """Latitude of the service-area centre, or None when it was never set.
+
+        SVC-279: the centre goes *in* through ``PATCH /providers/me`` but never
+        came back out, so a provider could overwrite their service area but
+        never see it. A Location screen cannot centre a map, pre-fill a pin, or
+        show that anything was saved without this.
+
+        Decoded in Python via ``point_lat_lng`` rather than a SQL
+        ``ST_X``/``ST_Y`` column_property: the latter is not populated by the
+        INSERT that creates the row, so reading it in the same session emits a
+        query — a ``MissingGreenlet`` under AsyncSession, which is how the test
+        suite builds profiles. The helper also absorbs the WKBElement-vs-EWKT
+        duality that broke address editing in #151.
+        """
+        return point_lat_lng(self.service_area_center)[0]
+
+    @property
+    def service_area_lng(self) -> float | None:
+        """Longitude of the service-area centre. See :attr:`service_area_lat`."""
+        return point_lat_lng(self.service_area_center)[1]
 
     @property
     def payout_set(self) -> bool:

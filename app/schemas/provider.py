@@ -116,6 +116,13 @@ class ProviderResponse(BaseModel):
     kyc_status: KYCStatus
     is_online: bool
     service_area_radius_km: int
+    # SVC-279: the centre, so a provider can see and edit the area they set.
+    # Write-only until now — `ProviderProfileUpdate` accepted lat/lng but no
+    # response returned them, which made "view your service area on a map"
+    # impossible to build. Nullable because a provider who onboarded before
+    # SVC-257 has no centre at all.
+    service_area_lat: float | None = None
+    service_area_lng: float | None = None
     # Derived: whether a payout destination is active. Never exposes the PII.
     payout_set: bool = False
     # Which method payouts go to, and a safe label for it — "••••8901" for a bank
