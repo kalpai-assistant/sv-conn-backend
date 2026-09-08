@@ -10,6 +10,10 @@
 # (SIGTERM from App Runner on redeploy) reach uvicorn.
 set -eu
 
+# Boot-time identity line — grep for "git_sha=" in CloudWatch to answer
+# "which commit is this container on?" without shelling in.
+echo "entrypoint: git_sha=${GIT_SHA:-unknown} startup_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 # FCM: SSM stores the service-account JSON base64-encoded because SSM
 # SecureString values are single-line. Decode into a tmpfs-backed path
 # App Runner cleans up on container stop.
