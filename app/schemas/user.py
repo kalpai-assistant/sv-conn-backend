@@ -75,6 +75,23 @@ class AddressResponse(BaseModel):
     label: str
     full_address: str
     is_default: bool
+    # SVC-281: the pin the consumer dropped, handed back.
+    #
+    # `CreateAddressRequest` has always accepted lat/lng and `addresses.location`
+    # has always stored them, but no response returned them — write-only, the
+    # same shape the provider service area had before #156. The cost showed up
+    # on the address map: with nowhere to open, it fell back to a hardcoded
+    # Bangalore for every user, including ones with a saved address 840km away.
+    #
+    # Nullable because `location` is: an address may be created without a pin
+    # (the field is optional on create), and older rows predate it. `null` means
+    # "no pin", which callers must not conflate with 0,0 — a real point in the
+    # Gulf of Guinea.
+    #
+    # Read off the model's existing `lat`/`lng` properties, which decode the
+    # geography column in Python — see the note there on why not ST_X/ST_Y.
+    lat: float | None = None
+    lng: float | None = None
 
     model_config = {"from_attributes": True}
 
