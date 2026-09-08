@@ -168,12 +168,81 @@ jobs:
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ------------------------------------------------------------------
+      # Explicit deploy + wait. Auto-deploy is on for both services and
+      # usually fires within seconds of the ECR push, but "the workflow
+      # goes green whether the deploy actually rolled" was a real gap
+      # (see the Sep-7 "worker on old code" false alarm). Now we:
+      #   1. Try start-deployment on each service. If auto-deploy has
+      #      already fired, App Runner returns InvalidStateException —
+      #      that's fine; we fall through to polling the latest op.
+      #   2. Poll each service's latest op until SUCCEEDED (green) or
+      #      FAILED / ROLLBACK_* (red). Workflow reflects reality.
+      # ------------------------------------------------------------------
+      - name: Trigger + wait for App Runner deploys
+        env:
+          BACKEND_ARN: arn:aws:apprunner:ap-south-1:018272776203:service/eazyserv-backend/7f383544153d4cf799fba30ced3ae033
+          WORKER_ARN: arn:aws:apprunner:ap-south-1:018272776203:service/eazyserv-worker/7b356f4c329243a5a2208c2bb8713e92
+        run: |
+          set -euo pipefail
+
+          declare -A ops
+          for arn in "$BACKEND_ARN" "$WORKER_ARN"; do
+            svc=$(echo "$arn" | awk -F/ '{print $2}')
+            echo "::group::$svc — trigger"
+            # Small window so auto-deploy from the ECR push has a chance
+            # to fire before our explicit call; if it did, the tail here
+            # returns InvalidStateException, which we treat as "someone
+            # else already started the deploy we wanted."
+            sleep 5
+            if op=$(aws apprunner start-deployment --service-arn "$arn" \
+                     --query 'OperationId' --output text 2>&1); then
+              echo "$svc: explicit start-deployment op=$op"
+            else
+              echo "$svc: start-deployment refused (auto-deploy in progress?)"
+              echo "  reason: $op"
+              op=$(aws apprunner list-operations --service-arn "$arn" \
+                     --max-results 1 \
+                     --query 'OperationSummaryList[0].Id' --output text)
+              echo "$svc: piggy-backing on latest op=$op"
+            fi
+            ops[$svc]="$arn=$op"
+            echo "::endgroup::"
+          done
+
+          echo "=== waiting for both deploys to finish (max ~15 min) ==="
+          for svc in "${!ops[@]}"; do
+            IFS='=' read -r arn op <<<"${ops[$svc]}"
+            echo "::group::$svc — waiting on op $op"
+            for i in $(seq 1 60); do
+              status=$(aws apprunner list-operations --service-arn "$arn" \
+                        --max-results 5 \
+                        --query "OperationSummaryList[?Id=='$op'].Status | [0]" \
+                        --output text)
+              echo "$(date -u +%H:%M:%S) $svc op $op: $status"
+              case "$status" in
+                SUCCEEDED)         echo "$svc: green"; break ;;
+                FAILED|ROLLBACK_FAILED|ROLLBACK_SUCCEEDED)
+                  echo "::error::$svc deploy $status"; exit 1 ;;
+              esac
+              sleep 15
+            done
+            if [ "$status" != "SUCCEEDED" ]; then
+              echo "::error::$svc deploy timed out after 15 min in status $status"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
 
       - name: Summary
         run: |
           echo "Migration ran: ${{ needs.detect_label.outputs.should_migrate }}"
-          echo "Image pushed:  ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:beta"
+          echo "Image:         ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:beta"
+          echo "Git SHA:       ${{ github.sha }}"
           echo ""
-          echo "App Runner will roll new pods in 2-3 min."
+          echo "Both App Runner services confirmed RUNNING on this image."

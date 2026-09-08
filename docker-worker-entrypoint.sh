@@ -17,6 +17,10 @@
 
 set -eu
 
+# Boot-time identity line — same intent as the API entrypoint. Print BEFORE
+# starting celery so it shows up even if celery immediately dies on import.
+echo "worker: git_sha=${GIT_SHA:-unknown} startup_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 # Tiny health app — serves ONLY /health so App Runner's probe passes.
 # Explicit --host 0.0.0.0 because App Runner routes to whatever the
 # container binds to.

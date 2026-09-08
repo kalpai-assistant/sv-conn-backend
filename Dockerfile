@@ -24,6 +24,13 @@ ENV PATH="/code/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=/code/.venv
 
+# Baked at build time from the CI workflow (`--build-arg GIT_SHA=$GITHUB_SHA`).
+# Surfaces at boot via the entrypoints so `aws logs tail ... | grep git_sha`
+# tells you exactly which commit a running container is on — no more
+# "is the worker on the new image?" guessing.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
 # Dependency install first, before app source, so a code-only change
 # doesn't invalidate this layer.
 COPY pyproject.toml uv.lock* ./
