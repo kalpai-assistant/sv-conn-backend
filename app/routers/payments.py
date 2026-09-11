@@ -32,7 +32,13 @@ settings = get_settings()
 # creation and verify so a single limit covers the whole payment surface —
 # stops abuse regardless of whether the attacker is spamming order creation
 # or signature verification. Webhook is NOT rate-limited (Razorpay-initiated).
-_PAYMENT_RATE_LIMIT = Depends(rate_limit("payment_ops", max_requests=20))
+#
+# TEMPORARY BUMP to 1000 for the 2026-09 live-payment testing sprint. A
+# normal book+pay cycle uses 2 calls (create-order + verify), so 1000/hour
+# = ~500 attempts per user per hour — effectively no ceiling during
+# testing. Revert to 20 once the live-mode rollout is done. If this
+# comment is still here past October the sprint is over; shrink it back.
+_PAYMENT_RATE_LIMIT = Depends(rate_limit("payment_ops", max_requests=1000))
 
 
 @router.post(
