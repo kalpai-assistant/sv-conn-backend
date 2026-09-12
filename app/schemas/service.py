@@ -73,5 +73,11 @@ class CategoryResponse(BaseModel):
     icon_url: str | None
     description: str | None
     sort_order: int
+    # SVC-286: NULL ⇒ Level-1 (home tile). Non-NULL ⇒ Level-2 (sub-category
+    # rendered inside its parent's category page). Frontend filters the flat
+    # /categories response client-side using this field; keeping the endpoint
+    # backward-compatible (returns everything) meant an old frontend
+    # continued to render fine during the deploy window.
+    parent_id: UUID | None
 
     model_config = {"from_attributes": True}
