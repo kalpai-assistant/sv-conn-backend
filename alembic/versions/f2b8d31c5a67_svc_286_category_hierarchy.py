@@ -103,7 +103,7 @@ def upgrade() -> None:
         ondelete="SET NULL",
     )
     op.create_index(
-        "idx_categories_parent_id",
+        "ix_categories_parent_id",
         "categories",
         ["parent_id"],
     )
@@ -159,6 +159,6 @@ def downgrade() -> None:
     )
 
     # 3. Drop the schema in reverse construction order.
-    op.drop_index("idx_categories_parent_id", table_name="categories")
+    op.drop_index("ix_categories_parent_id", table_name="categories")
     op.drop_constraint("fk_categories_parent_id", "categories", type_="foreignkey")
     op.drop_column("categories", "parent_id")
