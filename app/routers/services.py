@@ -9,6 +9,7 @@ from app.models.user import User
 from app.schemas.service import (
     CategoryResponse,
     CreateServiceRequest,
+    ServiceDetailResponse,
     ServiceResponse,
     UpdateServiceRequest,
 )
@@ -39,6 +40,22 @@ async def list_services(
 ):
     """List global catalog services, optionally filtered by category."""
     return await CatalogService(db).list_services(category_id=category_id)
+
+
+@router.get("/services/{service_id}", response_model=ServiceDetailResponse)
+async def get_service(
+    service_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """One service + variants + the three related-services buckets (SVC-291).
+
+    Distinct from the list route because the related payload is only worth
+    the extra joins on a detail page — a home-page listing that renders
+    just name / price / duration does not need the rails, and joining for
+    them there would multiply the query cost of the app's biggest single
+    request.
+    """
+    return await CatalogService(db).get_service_detail(service_id)
 
 
 @router.post("/services", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED)

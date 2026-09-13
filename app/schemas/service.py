@@ -66,6 +66,49 @@ class ServiceResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class RelatedServiceEntry(BaseModel):
+    """One entry in a related-services rail on the service detail page (SVC-292).
+
+    Denormalises name + base_price so the frontend renders the three rails
+    in the same round trip that fetches the service itself — no per-row
+    lookups from the client. ``sort_order`` is preserved so the frontend
+    respects the seed's / admin's ordering.
+    """
+
+    id: UUID
+    name: str
+    base_price: float
+    sort_order: int
+
+    model_config = {"from_attributes": True}
+
+
+class RelatedServicesBucket(BaseModel):
+    """The three related-services surfaces the redesigned service page renders.
+
+    Names track the three ``relationship_type`` enum values so the mapping
+    from row to render surface is 1:1 — no server-side re-shaping. An empty
+    list is a legitimate answer (a service with no seeded hooks, for example)
+    and the frontend renders nothing for that surface.
+    """
+
+    hook: list[RelatedServiceEntry] = []
+    upsell: list[RelatedServiceEntry] = []
+    related: list[RelatedServiceEntry] = []
+
+
+class ServiceDetailResponse(ServiceResponse):
+    """``GET /services/{id}`` response — the ServiceResponse shape plus the
+    three related-services buckets from SVC-291.
+
+    Kept as a subclass so the plain-list ``GET /services`` endpoint stays
+    lean (no related payload per row across dozens of catalogue entries)
+    and the per-service fetch pays exactly one extra roundtrip's worth of
+    joins to surface the rails."""
+
+    related: RelatedServicesBucket = RelatedServicesBucket()
+
+
 class CategoryResponse(BaseModel):
     id: UUID
     name: str
