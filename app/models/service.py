@@ -41,6 +41,11 @@ class Service(Base):
     base_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # SVC-293: full URLs to the service's banner media in S3. Both nullable —
+    # the frontend falls through to sub-category / L1 / colour block when
+    # they are, so a service without curated media renders intentionally.
+    banner_image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    banner_video_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

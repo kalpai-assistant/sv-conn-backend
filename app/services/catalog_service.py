@@ -155,6 +155,8 @@ class CatalogService:
             created_at=service.created_at,
             variants=[ServiceVariantResponse.model_validate(v) for v in service.variants],
             related=related,
+            banner_image_url=service.banner_image_url,
+            banner_video_url=service.banner_video_url,
         )
 
     async def _load_related(self, service_id: uuid.UUID) -> RelatedServicesBucket:

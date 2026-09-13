@@ -62,6 +62,11 @@ class ServiceResponse(BaseModel):
     # render variants call an attach helper first — the model relationship
     # is `lazy="raise_on_sql"` and will refuse an implicit lookup here.
     variants: list[ServiceVariantResponse] = []
+    # SVC-293: banner media, both nullable. Frontend falls through a chain
+    # (sub-cat banner → L1 banner → colour block) when they're null, so a
+    # service without curated media renders intentionally.
+    banner_image_url: str | None = None
+    banner_video_url: str | None = None
 
     model_config = {"from_attributes": True}
 
