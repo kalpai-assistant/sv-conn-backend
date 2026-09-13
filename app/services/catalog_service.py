@@ -12,7 +12,14 @@ from sqlalchemy.orm.attributes import set_committed_value
 from app.exceptions import ServiceNotFound
 from app.models.category import Category
 from app.models.service import Service
+from app.models.service_relationship import RelationshipType, ServiceRelationship
 from app.models.service_variant import ServiceVariant
+from app.schemas.service import (
+    RelatedServiceEntry,
+    RelatedServicesBucket,
+    ServiceDetailResponse,
+    ServiceVariantResponse,
+)
 
 
 class CatalogService:
@@ -107,3 +114,96 @@ class CatalogService:
             raise ServiceNotFound(service_id)
         service.is_active = False
         await self.db.flush()
+
+    # ------------------------------------------------------------------
+    # SVC-291: single-service fetch with related-services rails prefetched
+    # ------------------------------------------------------------------
+
+    async def get_service_detail(self, service_id: uuid.UUID) -> ServiceDetailResponse:
+        """One service + its variants + the three related-services buckets.
+
+        Sits alongside ``list_services`` rather than replacing it because the
+        list route (called on every home page load) doesn't need the related
+        payload, and paying for it there would multiply the query count on a
+        surface that's already the app's biggest single request. Fetching it
+        only here keeps the list lean and the detail complete.
+
+        The related rails are pulled in one round-trip via a join against
+        ``services`` — three per-type buckets are grouped in Python from the
+        single result. Inactive related services are excluded to match how
+        ``list_services`` treats the catalogue: a hidden service must not
+        surface anywhere the app renders it as bookable.
+        """
+        stmt = (
+            select(Service)
+            .where(Service.id == service_id, Service.is_active.is_(True))
+            .options(selectinload(Service.variants.and_(ServiceVariant.is_active.is_(True))))
+        )
+        service = (await self.db.execute(stmt)).scalar_one_or_none()
+        if not service:
+            raise ServiceNotFound(service_id)
+
+        related = await self._load_related(service_id)
+        return ServiceDetailResponse(
+            id=service.id,
+            category_id=service.category_id,
+            name=service.name,
+            description=service.description,
+            base_price=float(service.base_price),
+            duration_minutes=service.duration_minutes,
+            is_active=service.is_active,
+            created_at=service.created_at,
+            variants=[ServiceVariantResponse.model_validate(v) for v in service.variants],
+            related=related,
+        )
+
+    async def _load_related(self, service_id: uuid.UUID) -> RelatedServicesBucket:
+        """Fetch every edge out of `service_id` and bucket by relationship_type.
+
+        One query, joined to ``services`` so we get name + base_price in the
+        same round trip — the frontend renders the rails without a second
+        request. Rows pointing at a now-inactive service are dropped in the
+        WHERE clause so a soft-deleted catalogue entry never surfaces on a
+        rail. Sort order comes from the seed / hand-curated overrides.
+        """
+        rows = await self.db.execute(
+            select(ServiceRelationship, Service)
+            .join(Service, Service.id == ServiceRelationship.related_service_id)
+            .where(
+                ServiceRelationship.source_service_id == service_id,
+                Service.is_active.is_(True),
+            )
+            .order_by(
+                ServiceRelationship.relationship_type,
+                ServiceRelationship.sort_order,
+                Service.name,
+            )
+        )
+
+        buckets: dict[str, list[RelatedServiceEntry]] = {
+            RelationshipType.HOOK.value: [],
+            RelationshipType.UPSELL.value: [],
+            RelationshipType.RELATED.value: [],
+        }
+        for edge, related_service in rows.all():
+            bucket = buckets.get(edge.relationship_type)
+            # Unknown relationship_type (e.g. a future 4th surface not yet in
+            # the enum): drop silently rather than surfacing it on a rail the
+            # frontend can't render. The DB is the source of truth for what
+            # the model knows about.
+            if bucket is None:
+                continue
+            bucket.append(
+                RelatedServiceEntry(
+                    id=related_service.id,
+                    name=related_service.name,
+                    base_price=float(related_service.base_price),
+                    sort_order=edge.sort_order,
+                )
+            )
+
+        return RelatedServicesBucket(
+            hook=buckets[RelationshipType.HOOK.value],
+            upsell=buckets[RelationshipType.UPSELL.value],
+            related=buckets[RelationshipType.RELATED.value],
+        )
