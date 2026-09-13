@@ -70,6 +70,16 @@ class UpdateFCMTokenRequest(BaseModel):
     fcm_token: str | None = Field(..., max_length=255)
 
 
+# Six digits, nothing else. Indian PIN codes are fixed-width, so a length check
+# is a real check rather than a formality — it catches the common paste of a
+# phone number or a partial code.
+PINCODE_PATTERN = r"^\d{6}$"
+
+# Matches `users.phone`, so a tap-to-call link does not have to care whether the
+# number came from the account or from an address's contact person.
+PHONE_PATTERN = r"^\+91\d{10}$"
+
+
 class AddressResponse(BaseModel):
     id: UUID
     label: str
@@ -93,6 +103,17 @@ class AddressResponse(BaseModel):
     lat: float | None = None
     lng: float | None = None
 
+    # SVC-287. Returned, not just accepted: without these the edit form has
+    # nothing to prefill and the user retypes their flat number on every edit —
+    # which is exactly the weakness that ruled out composing these fields into
+    # one string on the client.
+    house_floor: str | None = None
+    building: str | None = None
+    landmark_area: str | None = None
+    pincode: str | None = None
+    contact_name: str | None = None
+    contact_phone: str | None = None
+
     model_config = {"from_attributes": True}
 
 
@@ -111,6 +132,16 @@ class UpdateAddressRequest(BaseModel):
     lat: float | None = None
     lng: float | None = None
     is_default: bool | None = None
+    # SVC-287. Optional here even though `house_floor` is required on create:
+    # this is a PATCH, and demanding it back would break editing the label
+    # alone. Unset fields keep whatever the row already holds — see
+    # `AddressDetails.merged_with`.
+    house_floor: str | None = Field(default=None, max_length=120)
+    building: str | None = Field(default=None, max_length=120)
+    landmark_area: str | None = Field(default=None, max_length=200)
+    pincode: str | None = Field(default=None, pattern=PINCODE_PATTERN)
+    contact_name: str | None = Field(default=None, max_length=120)
+    contact_phone: str | None = Field(default=None, pattern=PHONE_PATTERN)
 
 
 class CreateAddressRequest(BaseModel):
@@ -119,3 +150,20 @@ class CreateAddressRequest(BaseModel):
     lat: float | None = None
     lng: float | None = None
     is_default: bool = False
+
+    # SVC-287: the parts a map cannot supply.
+    #
+    # `house_floor` ships optional deliberately, though it is the one field a
+    # provider cannot do without. Eight existing test call sites and any
+    # installed app build post only `full_address`; making it required today
+    # turns those into 422s for a field the client does not yet send. It
+    # tightens to required once the form ships — an API change, needing no
+    # migration, because the column is nullable either way.
+    house_floor: str | None = Field(default=None, max_length=120)
+    building: str | None = Field(default=None, max_length=120)
+    landmark_area: str | None = Field(default=None, max_length=200)
+    # Customer-typed. Never the geocoder's — Nominatim answers 411001 for
+    # Kharadi, which is 411014, at every zoom level (SVC-284).
+    pincode: str | None = Field(default=None, pattern=PINCODE_PATTERN)
+    contact_name: str | None = Field(default=None, max_length=120)
+    contact_phone: str | None = Field(default=None, pattern=PHONE_PATTERN)

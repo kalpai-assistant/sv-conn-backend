@@ -3,6 +3,7 @@ User service: profile management and address CRUD.
 """
 
 import uuid
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -12,6 +13,56 @@ from app.exceptions import UserNotFound
 from app.models.address import Address
 from app.models.user import User
 from app.utils.geo import build_point_wkt, point_lat_lng
+
+
+@dataclass(frozen=True)
+class AddressDetails:
+    """The parts of an address a map cannot supply (SVC-287).
+
+    A dataclass rather than six more parameters on two already-long signatures,
+    and — more importantly — rather than six names to remember in two places.
+
+    `update_address` is copy-on-write: it soft-deletes the old row and builds a
+    new one with every field listed explicitly. A column added to the table but
+    forgotten in that constructor is silently dropped *on every edit* — save a
+    flat number, later change only the label, and the flat number is gone, with
+    a 200 and nothing in the logs.
+
+    Naming the set once makes that failure structural rather than a matter of
+    care: `carried_from` below copies whatever is in this class, so a seventh
+    field is one line here and nowhere else.
+    """
+
+    house_floor: str | None = None
+    building: str | None = None
+    landmark_area: str | None = None
+    pincode: str | None = None
+    contact_name: str | None = None
+    contact_phone: str | None = None
+
+    @classmethod
+    def carried_from(cls, address: Address) -> "AddressDetails":
+        """Everything this class covers, read off an existing row."""
+        return cls(**{f.name: getattr(address, f.name) for f in fields(cls)})
+
+    def merged_with(self, incoming: "AddressDetails | None") -> "AddressDetails":
+        """Apply a PATCH: set fields win, unset ones keep what is already there."""
+        if incoming is None:
+            return self
+        return AddressDetails(
+            **{
+                f.name: (
+                    getattr(incoming, f.name)
+                    if getattr(incoming, f.name) is not None
+                    else getattr(self, f.name)
+                )
+                for f in fields(self)
+            }
+        )
+
+    def as_columns(self) -> dict[str, str | None]:
+        """Spread into an `Address(...)` constructor."""
+        return {f.name: getattr(self, f.name) for f in fields(self)}
 
 
 class UserService:
@@ -89,6 +140,7 @@ class UserService:
         lat: float | None,
         lng: float | None,
         is_default: bool,
+        details: AddressDetails | None = None,
     ) -> Address:
         if is_default:
             await self._clear_default(user_id)
@@ -100,6 +152,8 @@ class UserService:
             full_address=full_address,
             location=location,
             is_default=is_default,
+            # Spread rather than listed: see AddressDetails.
+            **(details or AddressDetails()).as_columns(),
         )
         self.db.add(address)
         await self.db.flush()
@@ -114,6 +168,7 @@ class UserService:
         lat: float | None,
         lng: float | None,
         is_default: bool | None,
+        details: AddressDetails | None = None,
     ) -> Address | None:
         """Edit an address without rewriting the past (SVC-277).
 
@@ -173,6 +228,12 @@ class UserService:
             full_address=new_full,
             location=new_location,
             is_default=new_default,
+            # Carried from the row being replaced, then overlaid with whatever
+            # this PATCH actually set. Without this the structured fields would
+            # be dropped on every edit — silently, with a 200. See
+            # AddressDetails for why the set is named once rather than listed
+            # here.
+            **AddressDetails.carried_from(current).merged_with(details).as_columns(),
         )
         self.db.add(replacement)
         await self.db.flush()
