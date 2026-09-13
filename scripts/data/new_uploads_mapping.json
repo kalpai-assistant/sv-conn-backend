@@ -1,0 +1,163 @@
+[
+  { "video": "ac/ac-installation.mp4",           "sub_category": "ac", "services": ["AC installation", "AC uninstallation"] },
+  { "video": "ac/ac-service.mp4",                "sub_category": "ac", "services": ["Split AC foam-jet service", "Split AC power-jet service"] },
+  { "video": "ac/ac-repair.mp4",                 "sub_category": "ac", "services": ["AC PCB repair", "AC inspection/repair visit"] },
+  { "video": "ac/ac-gas-charging.mp4",           "sub_category": "ac", "services": ["AC gas charging"] },
+
+  { "video": "appliances/geyser-repair.mp4",           "sub_category": "appliances", "services": ["Geyser repair"] },
+  { "video": "appliances/microwave-repair.mp4",        "sub_category": "appliances", "services": ["Microwave repair"] },
+  { "video": "appliances/refrigerator-repair.mp4",     "sub_category": "appliances", "services": ["Refrigerator repair"] },
+  { "video": "appliances/ro-service-repair.mp4",       "sub_category": "appliances", "services": ["RO service/repair"] },
+  { "video": "appliances/tv-repair.mp4",               "sub_category": "appliances", "services": ["TV repair"] },
+  { "video": "appliances/washing-machine-repair.mp4",  "sub_category": "appliances", "services": ["Washing machine repair"] },
+
+  { "video": "carpenter/furniture-assembly.mp4",       "sub_category": "carpenter", "services": ["Furniture assembly", "Carpenter consultation"] },
+  { "video": "carpenter/shelf-installation.mp4",       "sub_category": "carpenter", "services": ["Shelf installation"] },
+  { "video": "carpenter/door-lock-installation.mp4",   "sub_category": "carpenter", "services": ["Door lock installation"] },
+  { "video": "carpenter/curtain-rod-installation.mp4", "sub_category": "carpenter", "services": ["Curtain rod installation"] },
+
+  { "video": "cctv-light-event/cctv-work.mp4", "sub_category": "cctv-light-event", "services": [
+    "16-camera AMC", "16-camera commercial package", "2-camera HD package", "4-camera AMC", "4-camera HD package",
+    "6-camera HD package", "8-camera AMC", "8-camera HD package", "CCTV cable installation", "CCTV troubleshooting",
+    "Camera configuration", "Camera repositioning", "DVR/NVR configuration", "DVR/NVR installation", "HDD installation",
+    "Installation per camera", "Mobile app setup", "Network configuration", "PVC conduit installation",
+    "Site survey", "Software/firmware update", "Wi-Fi/IP camera setup"
+  ]},
+  { "video": "cctv-light-event/wedding-event-lighting.mp4", "sub_category": "cctv-light-event", "services": [
+    "Basic stage lighting", "Basic wedding lighting", "Birthday lighting", "Corporate event lighting",
+    "DJ + lighting package", "DJ lighting package", "DMX lighting programming", "Emergency/last-minute setup",
+    "Engagement lighting", "Installation & dismantling", "LED Par lights – 12 units", "LED Par lights – 4 units",
+    "LED Par lights – 8 units", "Lighting operator", "Moving head – 2 units", "Moving head – 4 units",
+    "Moving head – 8 units", "Outdoor event lighting", "Power supply installation", "Premium stage lighting",
+    "Premium wedding lighting", "Reception lighting", "Sangeet lighting"
+  ]},
+  { "video": "cctv-light-event/decorative-lighting.mp4", "sub_category": "cctv-light-event", "services": [
+    "Basic LED light setup", "Decorative string lights", "Facade/architectural lighting", "Fairy light decoration",
+    "Garden/pathway lighting", "LED curtain lighting"
+  ]},
+
+  { "video": "cleaning/bathroom-deep-cleaning.mp4",  "sub_category": "cleaning", "services": ["Bathroom deep cleaning"] },
+  { "video": "cleaning/carpet-cleaning.mp4",         "sub_category": "cleaning", "services": ["Carpet cleaning"] },
+  { "video": "cleaning/chimney-cleaning.mp4",        "sub_category": "cleaning", "services": ["Chimney cleaning", "Chimney + stove cleaning"] },
+  { "video": "cleaning/fridge-cleaning.mp4",         "sub_category": "cleaning", "services": ["Fridge cleaning"] },
+  { "video": "cleaning/full-home-deep-cleaning.mp4", "sub_category": "cleaning", "services": ["Full home deep cleaning"] },
+  { "video": "cleaning/kitchen-deep-cleaning.mp4",   "sub_category": "cleaning", "services": ["Kitchen deep cleaning"] },
+  { "video": "cleaning/sofa-cleaning.mp4",           "sub_category": "cleaning", "services": ["Sofa cleaning"] },
+  { "video": "cleaning/water-tank-cleaning.mp4",     "sub_category": "cleaning", "services": ["Water tank cleaning"] },
+
+  { "video": "electrician/switch-socket-work.mp4",        "sub_category": "electrician", "services": ["Switch/socket replacement", "New plug point", "MCB replacement"] },
+  { "video": "electrician/ceiling-fan-work.mp4",          "sub_category": "electrician", "services": ["Ceiling fan installation", "Ceiling fan repair"] },
+  { "video": "electrician/electrician-consultation.mp4",  "sub_category": "electrician", "services": ["Electrician consultation"] },
+  { "video": "electrician/light-installation.mp4",        "sub_category": "electrician", "services": ["Light installation"] },
+
+  { "video": "furniture/furniture-assembly.mp4", "sub_category": "furniture", "services": [
+    "Bed assembly + cleaning", "Book shelf/bookcase assembly", "Chair assembly", "Chest of drawers assembly",
+    "Computer table assembly", "Dining chair assembly", "Dining set assembly + cleaning", "Dining table + chairs assembly",
+    "Dining table assembly", "Diwan/day bed assembly", "Double bed assembly", "Double wardrobe assembly",
+    "Dresser/dressing table assembly", "Furniture assembly AMC", "Furniture consultation/site visit",
+    "Furniture disassembly", "Furniture reassembly after shifting", "Furniture relocation within home",
+    "Hydraulic bed assembly", "Kids furniture assembly", "King bed assembly", "Large wardrobe assembly",
+    "Office furniture assembly", "Office workstation assembly", "Office/gaming chair assembly",
+    "Queen bed assembly", "Recliner assembly", "Shoe cabinet assembly", "Shoe rack assembly",
+    "Single bed assembly", "Single wardrobe assembly", "Sliding wardrobe assembly", "Sofa assembly",
+    "Storage cabinet assembly", "Study table assembly", "TV unit assembly", "Wall cabinet assembly",
+    "Wall mounting furniture", "Wardrobe assembly + cleaning"
+  ]},
+  { "video": "furniture/furniture-cleaning.mp4", "sub_category": "furniture", "services": [
+    "Cabinet interior cleaning", "Commercial furniture cleaning", "Dining set deep cleaning",
+    "Furniture alignment & adjustment", "Heavy-soil furniture cleaning", "Hotel furniture cleaning",
+    "Leather furniture cleaning", "Mattress cleaning", "Office chair deep cleaning", "Office desk deep cleaning",
+    "Office furniture cleaning", "Post-shifting furniture cleaning", "Recliner cleaning",
+    "Restaurant furniture cleaning", "Sofa cleaning + furniture sanitisation", "Sofa fabric cleaning",
+    "Table & chair cleaning", "Wardrobe interior cleaning", "Wood polish/shine treatment",
+    "Wooden furniture basic cleaning", "Wooden furniture deep cleaning"
+  ]},
+
+  { "video": "painting/wall-painting.mp4", "sub_category": "painting", "services": [
+    "Wall painting", "Full room painting", "1 BHK painting", "2 BHK painting", "3 BHK painting"
+  ]},
+
+  { "video": "pest-control/bed-bug-treatment.mp4",    "sub_category": "pest-control", "services": ["Bed bug treatment"] },
+  { "video": "pest-control/cockroach-control.mp4",    "sub_category": "pest-control", "services": ["Cockroach control"] },
+  { "video": "pest-control/general-pest-control.mp4", "sub_category": "pest-control", "services": ["General pest control"] },
+
+  { "video": "plumber/basin-installation.mp4",      "sub_category": "plumber", "services": ["Basin installation"] },
+  { "video": "plumber/drain-blockage.mp4",          "sub_category": "plumber", "services": ["Drain blockage removal"] },
+  { "video": "plumber/flush-tank-repair.mp4",       "sub_category": "plumber", "services": ["Flush tank repair"] },
+  { "video": "plumber/plumber-consultation.mp4",    "sub_category": "plumber", "services": ["Plumber consultation"] },
+  { "video": "plumber/tap-installation.mp4",        "sub_category": "plumber", "services": ["Tap installation"] },
+  { "video": "plumber/wash-basin-leakage.mp4",      "sub_category": "plumber", "services": ["Wash basin leakage repair"] },
+
+  { "video": "ro-purifier/ro-installation.mp4", "sub_category": "ro-purifier", "services": [
+    "Commercial RO installation", "Installation + uninstallation", "RO uninstallation",
+    "Under-counter RO installation", "Wall-mounted RO installation"
+  ]},
+  { "video": "ro-purifier/ro-service.mp4", "sub_category": "ro-purifier", "services": [
+    "Basic RO AMC", "Commercial RO AMC", "Commercial RO inspection", "Commercial RO service",
+    "Complete filter replacement", "Comprehensive AMC", "Electrical fault repair", "Filter AMC",
+    "Float valve replacement", "Full RO maintenance package", "Low / no water-flow repair", "Multi-RO maintenance",
+    "Pipe replacement", "Post-carbon filter replacement", "Pre-carbon filter replacement", "Premium AMC",
+    "Premium complete filter kit", "Pump repair / replacement", "RO deep service", "RO inspection / visit",
+    "RO leakage repair", "RO machine cleaning", "RO membrane housing replacement", "RO membrane replacement",
+    "RO plant inspection", "RO plant service", "RO repair / check-up", "RO routine service",
+    "RO service + 2 filters", "RO service + TDS test", "RO service + membrane", "RO service + sediment filter",
+    "RO tank cleaning", "RO tank sanitisation", "SMPS repair / replacement", "Sediment filter replacement",
+    "Solenoid valve replacement", "Standard RO AMC", "Storage tank replacement", "TDS controller replacement",
+    "TDS testing", "Tap replacement", "UF filter replacement", "UV lamp replacement",
+    "Water purifier sanitisation", "Water quality check"
+  ]},
+
+  { "video": "salon-men/mens-haircut.mp4",   "sub_category": "salon-men", "services": ["Men's haircut", "Haircut + beard"] },
+  { "video": "salon-men/beard-styling.mp4",  "sub_category": "salon-men", "services": ["Beard styling"] },
+  { "video": "salon-men/head-massage.mp4",   "sub_category": "salon-men", "services": ["Head massage"] },
+
+  { "video": "toilet-cleaning-commercial/residential-toilet-cleaning.mp4", "sub_category": "toilet-cleaning-commercial", "services": [
+    "Basic toilet cleaning", "Bathroom machine cleaning", "Complete bathroom deep cleaning", "Deep toilet cleaning",
+    "Exhaust fan cleaning", "Full washroom deep clean", "Grout cleaning", "Heavy-duty toilet cleaning",
+    "Indian toilet cleaning", "Machine toilet cleaning", "Mirror/glass cleaning", "Post-construction toilet cleaning",
+    "Premium washroom deep clean", "Shower cleaning", "Sink + tap cleaning", "Tile deep cleaning",
+    "Toilet + basin + floor", "Toilet + tile + grout", "Toilet + wash basin", "Very dirty/abandoned toilet",
+    "Wash basin deep cleaning", "Western toilet cleaning"
+  ]},
+  { "video": "toilet-cleaning-commercial/commercial-washroom.mp4", "sub_category": "toilet-cleaning-commercial", "services": [
+    "10-toilet package", "20-toilet package", "2× weekly cleaning AMC", "5-toilet package", "50-toilet package",
+    "Commercial deep toilet cleaning", "Commercial heavy-duty cleaning", "Commercial machine cleaning",
+    "Commercial toilet + basin", "Commercial washroom complete", "Daily cleaning AMC", "Gym washroom package",
+    "Office washroom package", "Restaurant washroom package", "School washroom package",
+    "Standard commercial toilet cleaning", "Urinal cleaning", "Weekly cleaning AMC"
+  ]},
+  { "video": "toilet-cleaning-commercial/washroom-disinfection.mp4", "sub_category": "toilet-cleaning-commercial", "services": [
+    "Hard-water stain treatment", "Toilet deodorisation", "Toilet disinfection", "Urinal descaling",
+    "Urine-scale removal", "Washroom disinfection", "Yellow-stain removal"
+  ]},
+
+  { "video": "vehicle-wash-cleaning/exterior-wash.mp4", "sub_category": "vehicle-wash-cleaning", "services": [
+    "Advanced rubbing & polishing", "Bug/tar removal", "Ceramic wax protection", "Chrome polish",
+    "Engine bay cleaning", "Engine bay detailing", "Exterior water wash", "Foam wash", "Glass cleaning",
+    "Glass coating", "Headlight restoration", "Paint sealant", "Plastic trim restoration", "Premium foam wash",
+    "Premium tyre + trim package", "Quick shine", "Rain repellent glass treatment", "Rubbing & polishing",
+    "Scratch spot treatment", "Spray wax", "Tyre dressing premium", "Tyre polishing", "Underbody wash",
+    "Waterless wash", "Wax polish", "Wheel cleaning", "Windshield polish"
+  ]},
+  { "video": "vehicle-wash-cleaning/interior-detailing.mp4", "sub_category": "vehicle-wash-cleaning", "services": [
+    "AC vent cleaning", "Carpet/floor shampoo", "Dashboard treatment", "Interior cleaning",
+    "Interior deep cleaning", "Interior vacuum", "Leather seat treatment", "Odour treatment",
+    "Pet hair removal", "Seat shampoo"
+  ]},
+  { "video": "vehicle-wash-cleaning/car-spa-package.mp4", "sub_category": "vehicle-wash-cleaning", "services": [
+    "12-wash monthly plan", "4-wash premium plan", "8-wash monthly plan", "Full car spa",
+    "Pickup/drop service", "Premium car spa", "Showroom detailing", "Wash + interior monthly"
+  ]},
+
+  { "video": "women/facial.mp4",     "sub_category": "salon-women", "services": ["Facial"] },
+  { "video": "women/hair-spa.mp4",   "sub_category": "salon-women", "services": ["Hair spa"] },
+  { "video": "women/haircut.mp4",    "sub_category": "salon-women", "services": ["Women's haircut"] },
+  { "video": "women/manicure.mp4",   "sub_category": "salon-women", "services": ["Manicure"] },
+  { "video": "women/waxing.mp4",     "sub_category": "salon-women", "services": ["Waxing"] },
+
+  { "video": "women/3d-nail-art.mp4",                   "sub_category": "nail-art", "services": ["3D nail art"] },
+  { "video": "women/chrome-nails.mp4",                  "sub_category": "nail-art", "services": ["Chrome nails"] },
+  { "video": "women/ombre-nails.mp4",                   "sub_category": "nail-art", "services": ["Ombre nails"] },
+  { "video": "women/paraffin-and-hand-treatment.mp4",   "sub_category": "nail-art", "services": ["Paraffin hand treatment"] },
+  { "video": "women/premium-nail-art.mp4",              "sub_category": "nail-art", "services": ["Premium nail art", "Bridal basic nail set", "Luxury nail set", "Premium bridal nail set"] }
+]
