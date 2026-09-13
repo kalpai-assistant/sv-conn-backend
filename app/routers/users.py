@@ -16,7 +16,7 @@ from app.schemas.user import (
     UpdateProfileRequest,
     UserResponse,
 )
-from app.services.user_service import UserService
+from app.services.user_service import AddressDetails, UserService
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -100,19 +100,77 @@ async def list_addresses(
     return await UserService(db).list_addresses(current_user.id)
 
 
+def _details_from(
+    request: CreateAddressRequest | UpdateAddressRequest,
+) -> AddressDetails | None:
+    """The structured fields off a request, or None when it carried none.
+
+    None is meaningful rather than an empty object: on a PATCH it is the
+    difference between "this edit did not mention the flat number" and "clear
+    the flat number", and only the first is ever what a client means here.
+    """
+    values = {
+        f: getattr(request, f, None)
+        for f in (
+            "house_floor",
+            "building",
+            "landmark_area",
+            "pincode",
+            "contact_name",
+            "contact_phone",
+        )
+    }
+    return AddressDetails(**values) if any(v is not None for v in values.values()) else None
+
+
+def compose_full_address(details: AddressDetails | None, fallback: str | None) -> str:
+    """Build the address line a provider reads (SVC-287).
+
+    Ordered the way an address is spoken on the way to a door: the flat first,
+    then the building, then what to look for, then the area and PIN. A provider
+    reading this on a job card is navigating, not filing.
+
+    `fallback` — whatever the client sent as `full_address` — carries the
+    locality and city, which none of the structured fields hold. It is appended
+    rather than replaced, and returned alone when there is nothing structured
+    to prepend, so an older app build behaves exactly as it did before.
+    """
+    if details is None:
+        return fallback or ""
+
+    parts = [
+        details.house_floor,
+        details.building,
+        details.landmark_area,
+        fallback,
+        details.pincode,
+    ]
+    composed = ", ".join(p.strip() for p in parts if p and p.strip())
+    # The column is String(500) and the request fields sum to more than that.
+    # Truncating here beats a 500 from the driver on an address a user has
+    # already typed.
+    return composed[:500] if composed else (fallback or "")
+
+
 @router.post("/me/addresses", response_model=AddressResponse, status_code=status.HTTP_201_CREATED)
 async def add_address(
     request: CreateAddressRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    details = _details_from(request)
     return await UserService(db).add_address(
         user_id=current_user.id,
         label=request.label,
-        full_address=request.full_address,
+        # Composed from the structured fields when they are present, so the
+        # provider's job card reads "Flat 302, 3rd floor, Amogh Residency…"
+        # rather than a geocoded street. Falls back to whatever the client sent
+        # when they are not — an older app build still works unchanged.
+        full_address=compose_full_address(details, request.full_address),
         lat=request.lat,
         lng=request.lng,
         is_default=request.is_default,
+        details=details,
     )
 
 
@@ -129,14 +187,24 @@ async def update_address(
     that already point at the old address keep recording where the job actually
     happened, and a provider en route to it is not silently redirected.
     """
+    details = _details_from(request)
     updated = await UserService(db).update_address(
         user_id=current_user.id,
         address_id=address_id,
         label=request.label,
-        full_address=request.full_address,
+        # Recomposed only when this PATCH actually carried structured fields.
+        # Otherwise the stored string is left exactly as it is: an edit that
+        # only changes the label must not rewrite the address line, and rows
+        # written before SVC-287 have nothing to compose from.
+        full_address=(
+            compose_full_address(details, request.full_address)
+            if details is not None
+            else request.full_address
+        ),
         lat=request.lat,
         lng=request.lng,
         is_default=request.is_default,
+        details=details,
     )
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Address not found")

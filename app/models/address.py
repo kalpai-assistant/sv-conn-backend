@@ -38,7 +38,41 @@ class Address(Base):
     )
     # "home" | "work" | "other"
     label: Mapped[str] = mapped_column(String(50), nullable=False, default="home")
+    # The rendered address line, composed from the structured fields below when
+    # they are present (SVC-287). Kept as a column rather than derived on read:
+    # every consumer — the provider's job card, the offer payload, the admin
+    # booking view — renders this string, and addresses written before the
+    # structured fields existed have nothing to compose from.
     full_address: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    # SVC-287: the parts a map cannot know.
+    #
+    # A pin locates a building; it does not say which flat, or which floor, or
+    # that the entrance is behind the chemist. Before this, all of that had to
+    # be typed into `full_address` as one free-text line — or, when the address
+    # came from "use my current location", was simply absent, leaving a
+    # provider with a geocoded street and no door.
+    #
+    # All nullable: rows written before this exist in their thousands and have
+    # none of it. `house_floor` is required by the *API* on create, not by the
+    # column, so old rows stay valid and the requirement can tighten later
+    # without a migration.
+    house_floor: Mapped[str | None] = mapped_column(String(120), default=None)
+    building: Mapped[str | None] = mapped_column(String(120), default=None)
+    landmark_area: Mapped[str | None] = mapped_column(String(200), default=None)
+    # Typed by the customer, never taken from the geocoder. Nominatim returns
+    # 411001 for Kharadi, which is 411014 — ~8km out, at every zoom level
+    # (SVC-284). The customer knows theirs; OSM does not.
+    pincode: Mapped[str | None] = mapped_column(String(6), default=None)
+
+    # Who meets the provider, when that is not the person who booked — a parent,
+    # a tenant, a flatmate. Optional: left empty, the provider falls back to the
+    # booking's customer exactly as before.
+    contact_name: Mapped[str | None] = mapped_column(String(120), default=None)
+    # Stored as +91XXXXXXXXXX, matching `users.phone`, so a tap-to-call link
+    # needs no special-casing for which of the two it came from.
+    contact_phone: Mapped[str | None] = mapped_column(String(13), default=None)
+
     # PostGIS POINT for distance calculations
     location = mapped_column(
         Geography(geometry_type="POINT", srid=4326, spatial_index=False), nullable=True
