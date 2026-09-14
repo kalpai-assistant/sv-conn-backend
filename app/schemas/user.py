@@ -153,13 +153,24 @@ class CreateAddressRequest(BaseModel):
 
     # SVC-287: the parts a map cannot supply.
     #
-    # `house_floor` ships optional deliberately, though it is the one field a
-    # provider cannot do without. Eight existing test call sites and any
-    # installed app build post only `full_address`; making it required today
-    # turns those into 422s for a field the client does not yet send. It
-    # tightens to required once the form ships — an API change, needing no
-    # migration, because the column is nullable either way.
-    house_floor: str | None = Field(default=None, max_length=120)
+    # `house_floor` is required here and nowhere else. A pin finds the
+    # building; it does not find the door, and a provider standing outside a
+    # twelve-flat block with no number is the failure this whole ticket exists
+    # to stop.
+    #
+    # It shipped optional first, deliberately: when the column landed, no
+    # client sent the field, so requiring it would have turned every "add
+    # address" on every installed build into a 422 for something the app had
+    # no way to provide. The form ships it now, so the gate closes.
+    #
+    # Required at the *API*, never at the column. Every address saved before
+    # this has NULL there and must stay valid, which is also why this needs no
+    # migration — nothing about the table changes.
+    #
+    # `UpdateAddressRequest` deliberately leaves it optional: that is a PATCH,
+    # and demanding a flat number to rename an address to "Work" would make
+    # legacy rows uneditable.
+    house_floor: str = Field(..., min_length=1, max_length=120)
     building: str | None = Field(default=None, max_length=120)
     landmark_area: str | None = Field(default=None, max_length=200)
     # Customer-typed. Never the geocoder's — Nominatim answers 411001 for
