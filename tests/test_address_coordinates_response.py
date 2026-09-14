@@ -111,6 +111,7 @@ async def test_a_freshly_created_address_returns_its_pin(client, auth_headers, d
         json={
             "label": "home",
             "full_address": "Lane Number 7, Karve Nagar, Pune",
+            "house_floor": "Flat 302",
             "lat": PUNE_LAT,
             "lng": PUNE_LNG,
         },

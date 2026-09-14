@@ -132,14 +132,17 @@ async def test_add_address_persists_to_caller(client, auth_headers, db_session):
 
     response = await client.post(
         "/api/v1/users/me/addresses",
-        json={"label": "home", "full_address": "42 Test Lane"},
+        json={"label": "home", "full_address": "42 Test Lane", "house_floor": "Flat 1"},
         headers=auth_headers(str(user.id), "consumer"),
     )
 
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["label"] == "home"
-    assert body["full_address"] == "42 Test Lane"
+    # Composed, not echoed (SVC-287): the structured fields lead, and what the
+    # client sent as `full_address` becomes the locality tail behind them.
+    assert body["full_address"] == "Flat 1, 42 Test Lane"
+    assert body["house_floor"] == "Flat 1"
 
 
 @pytest.mark.asyncio
@@ -149,7 +152,7 @@ async def test_add_address_rejects_invalid_label(client, auth_headers, db_sessio
 
     response = await client.post(
         "/api/v1/users/me/addresses",
-        json={"label": "friend", "full_address": "Somewhere"},
+        json={"label": "friend", "full_address": "Somewhere", "house_floor": "Flat 1"},
         headers=auth_headers(str(user.id), "consumer"),
     )
 
@@ -163,7 +166,7 @@ async def test_add_address_rejects_too_short_address(client, auth_headers, db_se
 
     response = await client.post(
         "/api/v1/users/me/addresses",
-        json={"label": "home", "full_address": "abc"},
+        json={"label": "home", "full_address": "abc", "house_floor": "Flat 1"},
         headers=auth_headers(str(user.id), "consumer"),
     )
 
@@ -260,6 +263,7 @@ async def test_add_address_with_lat_lng_persists_postgis_point(client, auth_head
         json={
             "label": "home",
             "full_address": "MG Road, Bangalore",
+            "house_floor": "Flat 12",
             "lat": 12.9716,
             "lng": 77.5946,
         },
@@ -285,7 +289,7 @@ async def test_add_address_without_lat_lng_leaves_location_null(client, auth_hea
 
     response = await client.post(
         "/api/v1/users/me/addresses",
-        json={"label": "home", "full_address": "Flat 3, Some Lane"},
+        json={"label": "home", "full_address": "Flat 3, Some Lane", "house_floor": "Flat 3"},
         headers=auth_headers(str(user.id), "consumer"),
     )
     assert response.status_code == 201, response.text
@@ -313,6 +317,7 @@ async def test_add_default_address_unsets_previous_default(client, auth_headers,
         json={
             "label": "work",
             "full_address": "Second place",
+            "house_floor": "Office 4",
             "is_default": True,
         },
         headers=auth_headers(str(user.id), "consumer"),

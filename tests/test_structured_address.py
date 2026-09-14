@@ -175,13 +175,27 @@ class TestComposingTheAddressLine:
 class TestTheSchemasStayHonest:
     """The contract, where an over-tight rule breaks an existing caller."""
 
-    def test_create_still_accepts_an_address_with_no_structured_fields(self):
-        # Eight existing test call sites and every installed app build post
-        # only `full_address`. `house_floor` tightens to required once the form
-        # ships — today it must not 422 them.
-        request = CreateAddressRequest(full_address="Kharadi, Pune")
+    def test_create_demands_a_door_number(self):
+        # A pin finds the building; it does not find the door. This is the one
+        # field a provider standing outside a twelve-flat block cannot work
+        # without, and the whole ticket exists because it was never asked for.
+        #
+        # It shipped optional first — no client sent it then, so requiring it
+        # would have 422'd every installed build for a field the app had no way
+        # to provide. The form ships it now.
+        with pytest.raises(ValueError):
+            CreateAddressRequest(full_address="Kharadi, Pune")
 
-        assert request.house_floor is None
+    def test_create_accepts_one(self):
+        request = CreateAddressRequest(full_address="Kharadi, Pune", house_floor="Flat 302")
+
+        assert request.house_floor == "Flat 302"
+
+    def test_create_rejects_a_blank_door_number(self):
+        # `""` would satisfy a bare `str` and store an empty string, which
+        # reads to a provider exactly like the missing field it replaced.
+        with pytest.raises(ValueError):
+            CreateAddressRequest(full_address="Kharadi, Pune", house_floor="")
 
     def test_edit_stays_a_patch(self):
         # Requiring house_floor here would make "rename this to Work"
@@ -195,18 +209,21 @@ class TestTheSchemasStayHonest:
         # Fixed-width, so a length check is a real check — it catches the
         # common paste of a phone number or a half-typed code.
         with pytest.raises(ValueError):
-            CreateAddressRequest(full_address="Kharadi, Pune", pincode=bad)
+            CreateAddressRequest(full_address="Kharadi, Pune", house_floor="Flat 302", pincode=bad)
 
     @pytest.mark.parametrize("bad", ["9325709787", "+9193257097", "+1 9325709787"])
     def test_rejects_a_contact_phone_that_is_not_e164_india(self, bad):
         # Matches `users.phone`, so a tap-to-call link does not have to care
         # which of the two the number came from.
         with pytest.raises(ValueError):
-            CreateAddressRequest(full_address="Kharadi, Pune", contact_phone=bad)
+            CreateAddressRequest(
+                full_address="Kharadi, Pune", house_floor="Flat 302", contact_phone=bad
+            )
 
     def test_accepts_the_shapes_the_app_sends(self):
         request = CreateAddressRequest(
             full_address="Kharadi, Pune",
+            house_floor="Flat 302",
             pincode="411014",
             contact_phone="+919325709787",
         )
