@@ -2907,6 +2907,200 @@ async def test_total_and_rows_come_from_one_snapshot(db_session):
 
 
 # ---------------------------------------------------------------------------
+# SVC-300 — GET /admin/providers/{id}/payouts (per-provider payout history)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_payout_audit(
+    db_session,
+    *,
+    provider_id,
+    admin_user_id=None,
+    source="admin",
+    outcome="processed",
+    amount_paise=8000,
+    booking_count=1,
+    payout_id="pout_test",
+    reference_id=None,
+    error=None,
+):
+    audit = PayoutAudit(
+        provider_id=provider_id,
+        admin_user_id=admin_user_id,
+        source=source,
+        outcome=outcome,
+        amount_paise=amount_paise,
+        booking_count=booking_count,
+        payout_id=payout_id,
+        reference_id=reference_id,
+        error=error,
+    )
+    db_session.add(audit)
+    await db_session.flush()
+    return audit
+
+
+@pytest.mark.asyncio
+async def test_payout_history_returns_newest_first(db_session):
+    """History is ordered by created_at DESC — the admin sees the last payout on top."""
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+
+    older = await _seed_payout_audit(
+        db_session, provider_id=provider.id, admin_user_id=admin.id, payout_id="pout_older"
+    )
+    newer = await _seed_payout_audit(
+        db_session, provider_id=provider.id, admin_user_id=admin.id, payout_id="pout_newer"
+    )
+    # Force a strictly later created_at for the "newer" row so the ordering
+    # assertion doesn't depend on flush-order tie-breaking under a shared
+    # ``func.now()`` timestamp.
+    from datetime import UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    older.created_at = _dt.now(UTC) - _td(minutes=5)
+    newer.created_at = _dt.now(UTC)
+    await db_session.flush()
+
+    report = await PayoutService(db_session).list_provider_payout_history(provider.id)
+
+    assert report["total"] == 2
+    assert [e["payout_id"] for e in report["entries"]] == ["pout_newer", "pout_older"]
+
+
+@pytest.mark.asyncio
+async def test_payout_history_scopes_to_the_asked_provider(db_session):
+    """A history query for provider A must not leak provider B's rows."""
+    provider_a = await UserFactory.create(db_session, role="provider")
+    provider_b = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+
+    await _seed_payout_audit(
+        db_session, provider_id=provider_a.id, admin_user_id=admin.id, payout_id="pout_A"
+    )
+    await _seed_payout_audit(
+        db_session, provider_id=provider_b.id, admin_user_id=admin.id, payout_id="pout_B"
+    )
+
+    report = await PayoutService(db_session).list_provider_payout_history(provider_a.id)
+
+    assert report["total"] == 1
+    assert report["entries"][0]["payout_id"] == "pout_A"
+
+
+@pytest.mark.asyncio
+async def test_payout_history_hydrates_admin_name_and_source(db_session):
+    """Admin name is joined for admin rows; reconciliation rows carry no admin."""
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin", name="Ops Alice")
+
+    await _seed_payout_audit(
+        db_session, provider_id=provider.id, admin_user_id=admin.id, payout_id="pout_admin"
+    )
+    await _seed_payout_audit(
+        db_session,
+        provider_id=provider.id,
+        admin_user_id=None,
+        source="reconciliation",
+        payout_id="pout_recon",
+    )
+
+    report = await PayoutService(db_session).list_provider_payout_history(provider.id)
+    by_id = {e["payout_id"]: e for e in report["entries"]}
+
+    assert by_id["pout_admin"]["source"] == "admin"
+    assert by_id["pout_admin"]["admin_user_id"] == admin.id
+    assert by_id["pout_admin"]["admin_name"] == "Ops Alice"
+
+    assert by_id["pout_recon"]["source"] == "reconciliation"
+    assert by_id["pout_recon"]["admin_user_id"] is None
+    assert by_id["pout_recon"]["admin_name"] is None
+
+
+@pytest.mark.asyncio
+async def test_payout_history_paginates(db_session):
+    """``page`` + ``per_page`` bound the window; ``total`` counts every row."""
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin")
+
+    for i in range(5):
+        await _seed_payout_audit(
+            db_session, provider_id=provider.id, admin_user_id=admin.id, payout_id=f"pout_{i}"
+        )
+
+    page1 = await PayoutService(db_session).list_provider_payout_history(
+        provider.id, page=1, per_page=2
+    )
+    page3 = await PayoutService(db_session).list_provider_payout_history(
+        provider.id, page=3, per_page=2
+    )
+
+    assert page1["total"] == 5
+    assert len(page1["entries"]) == 2
+    assert page3["total"] == 5
+    assert len(page3["entries"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_payout_history_empty_returns_empty_page(db_session):
+    """Empty state: total 0, entries []."""
+    provider = await UserFactory.create(db_session, role="provider")
+
+    report = await PayoutService(db_session).list_provider_payout_history(provider.id)
+
+    assert report == {"entries": [], "total": 0, "page": 1, "per_page": 50}
+
+
+@pytest.mark.asyncio
+async def test_payout_history_endpoint_returns_rows(client, db_session, auth_headers):
+    """HTTP: admin gets the paginated history for a provider."""
+    provider = await UserFactory.create(db_session, role="provider")
+    admin = await UserFactory.create(db_session, role="admin", name="Ops Alice")
+    await _seed_payout_audit(
+        db_session,
+        provider_id=provider.id,
+        admin_user_id=admin.id,
+        payout_id="pout_http",
+        outcome="processed",
+        amount_paise=12345,
+        booking_count=3,
+    )
+
+    resp = await client.get(
+        f"/api/v1/admin/providers/{provider.id}/payouts",
+        headers=auth_headers(str(admin.id), "admin"),
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["page"] == 1
+    assert body["per_page"] == 50
+    (entry,) = body["entries"]
+    assert entry["payout_id"] == "pout_http"
+    assert entry["outcome"] == "processed"
+    assert entry["amount_paise"] == 12345
+    assert entry["booking_count"] == 3
+    assert entry["source"] == "admin"
+    assert entry["admin_name"] == "Ops Alice"
+
+
+@pytest.mark.asyncio
+async def test_payout_history_endpoint_rejects_non_admin(client, db_session, auth_headers):
+    """History is admin-only, same guard as pending-settlements."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    provider = await UserFactory.create(db_session, role="provider")
+
+    resp = await client.get(
+        f"/api/v1/admin/providers/{provider.id}/payouts",
+        headers=auth_headers(str(consumer.id), "consumer"),
+    )
+
+    assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
 # SVC-188 (G30) — POST /admin/providers/{id}/payout enqueues a Celery task
 # ---------------------------------------------------------------------------
 

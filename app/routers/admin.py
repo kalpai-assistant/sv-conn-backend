@@ -21,7 +21,7 @@ from app.models.payment import Payment
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.user import User
 from app.schemas.booking import BookingListResponse, BookingResponse, ForceCancelBookingRequest
-from app.schemas.payout import PendingSettlementsResponse
+from app.schemas.payout import PendingSettlementsResponse, ProviderPayoutHistoryResponse
 from app.schemas.provider import (
     KYCDocsResponse,
     KYCQueueRow,
@@ -394,6 +394,29 @@ async def list_pending_settlements(db: AsyncSession = Depends(get_db)):
     the role guard rather than injecting the admin (nothing to audit).
     """
     return await PayoutService(db).list_pending_settlements()
+
+
+@router.get(
+    "/providers/{user_id}/payouts",
+    response_model=ProviderPayoutHistoryResponse,
+    dependencies=[_admin_dep],
+)
+async def list_provider_payout_history(
+    user_id: UUID,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Payout audit trail for a single provider, newest-first (SVC-300).
+
+    Paired with the pending-settlements list: the admin expands a row to see
+    what has already been paid before triggering a fresh payout, closing the
+    "did I pay this guy last week or not" gap that used to invite double
+    dispatch. Read-only projection over ``payout_audits`` — no state changes.
+    """
+    return await PayoutService(db).list_provider_payout_history(
+        user_id, page=page, per_page=per_page
+    )
 
 
 @router.post("/providers/{user_id}/payout", status_code=status.HTTP_202_ACCEPTED)
