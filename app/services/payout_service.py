@@ -162,6 +162,60 @@ class PayoutService:
             "truncated": total > len(providers),
         }
 
+    async def list_provider_payout_history(
+        self, provider_id: UUID, *, page: int = 1, per_page: int = 50
+    ) -> dict:
+        """Paginated payout audit trail for a single provider, newest-first (SVC-300).
+
+        The admin payouts screen expands each provider row into this history so
+        the operator can answer "did we already pay this person" before hitting
+        Pay out again — the ledger is authoritative, so we surface the rows as
+        they land in ``payout_audits`` rather than rederiving them.
+
+        ``admin_user_id`` is a nullable FK (reconciliation rows have no admin),
+        so the join is LEFT and ``admin_name`` returns null for those rows. The
+        UI reads ``source`` to caption reconciliation entries.
+        """
+        count_stmt = (
+            select(func.count())
+            .select_from(PayoutAudit)
+            .where(PayoutAudit.provider_id == provider_id)
+        )
+        total = (await self.db.execute(count_stmt)).scalar_one()
+
+        rows_stmt = (
+            select(PayoutAudit, User.name)
+            .outerjoin(User, User.id == PayoutAudit.admin_user_id)
+            .where(PayoutAudit.provider_id == provider_id)
+            .order_by(PayoutAudit.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+        rows = (await self.db.execute(rows_stmt)).all()
+
+        entries = [
+            {
+                "audit_id": audit.id,
+                "payout_id": audit.payout_id,
+                "reference_id": audit.reference_id,
+                "amount_paise": audit.amount_paise,
+                "booking_count": audit.booking_count,
+                "outcome": audit.outcome,
+                "source": audit.source,
+                "admin_user_id": audit.admin_user_id,
+                "admin_name": admin_name,
+                "error": audit.error,
+                "created_at": audit.created_at,
+            }
+            for audit, admin_name in rows
+        ]
+        return {
+            "entries": entries,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+        }
+
     async def estimate_pending_payout(self, provider_id: UUID) -> dict:
         """Booking count + net payable for a single provider's PENDING bookings.
 

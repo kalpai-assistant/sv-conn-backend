@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -41,3 +42,49 @@ class PendingSettlementsResponse(BaseModel):
     providers: list[PendingSettlementProvider]
     total: int
     truncated: bool
+
+
+class ProviderPayoutHistoryEntry(BaseModel):
+    """One row from the payout audit trail for a single provider (SVC-300).
+
+    Mirrors the ``payout_audits`` row directly rather than inventing new field
+    names — the admin history view is the ledger, and drift between the two
+    invites "the row I see is not the row that moved" bugs.
+    """
+
+    audit_id: UUID
+    # RazorpayX ``pout_XXXXX`` id. Null when the attempt failed before RazorpayX
+    # returned one (see ``PayoutService._resolve_audit`` outcome=="unknown").
+    payout_id: str | None
+    # Batch key (also sent to RazorpayX as reference_id). Lets reconciliation
+    # map an orphaned payout back — the admin sees it so a manual RazorpayX
+    # lookup during an incident carries the same string.
+    reference_id: str | None
+    amount_paise: int
+    booking_count: int
+    # Free-form ``payout_audits.outcome`` — attempting / unknown / initiated /
+    # processing / processed / completed / failed / rejected / reversed /
+    # requeued. Passed through verbatim so the UI can add cases without a
+    # backend enum change.
+    outcome: str
+    # "admin" | "reconciliation" — a reconciliation row is a repair by the
+    # nightly job, not an admin action, and reads differently in the audit
+    # history than a triggered payout.
+    source: str
+    # Null for reconciliation-authored rows (``PayoutAudit.admin_user_id`` is
+    # nullable for exactly this reason).
+    admin_user_id: UUID | None
+    admin_name: str | None
+    # Redacted failure reason; null on success. Already capped at 500 chars in
+    # ``_resolve_audit``.
+    error: str | None
+    created_at: datetime
+
+
+class ProviderPayoutHistoryResponse(BaseModel):
+    """Paginated payout history for one provider, newest-first."""
+
+    entries: list[ProviderPayoutHistoryEntry]
+    total: int
+    page: int
+    per_page: int
