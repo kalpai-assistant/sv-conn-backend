@@ -1006,6 +1006,85 @@ class BookingService:
         return booking
 
     # ------------------------------------------------------------------
+    # Admin force-cancel (SVC-299)
+    # ------------------------------------------------------------------
+
+    async def force_cancel(
+        self,
+        booking_id: uuid.UUID,
+        admin_id: uuid.UUID,
+        reason: str,
+    ) -> Booking:
+        """Admin-driven cancel on a customer's behalf (SVC-299).
+
+        Bypasses the customer/provider-only guard in ``transition_status``
+        and the ``VALID_TRANSITIONS`` gate — an admin can cancel from any of
+        REQUESTED / ACCEPTED / EN_ROUTE / IN_PROGRESS, states the state
+        machine otherwise forbids each other's direction on. Refuses when
+        the booking is already terminal (COMPLETED / CANCELLED / EXPIRED):
+        409 with a clear message rather than a silent no-op, so support
+        knows the row they're looking at is already closed.
+
+        Refund policy is inherited from ``_apply_cancellation_policy`` and
+        deliberately not reimplemented — the "captured PAID online payment
+        gets refunded, pending/cash do not, coupon-heavy bookings cap the
+        fee at what we hold" rules are already the ones support wants for
+        an admin cancel. The IN_PROGRESS branch there returns without a
+        refund on purpose (the job has already started, so an auto-refund
+        is not the safe default) — an admin who needs to refund a live
+        booking uses the payments surface.
+
+        The transition is recorded in ``booking_status_logs`` with the
+        admin as ``changed_by`` and the reason in the new ``note`` column,
+        so the audit trail shows both who acted and why. The reason is
+        also stamped on ``booking.cancellation_reason`` — the ticket asked
+        for both, and they answer different questions: the log is the
+        audit story, the column is the row's current explanation.
+        """
+        booking = await self.db.get(Booking, booking_id, with_for_update=True)
+        if not booking:
+            raise BookingNotFound(booking_id)
+
+        if booking.status in (
+            BookingStatus.COMPLETED,
+            BookingStatus.CANCELLED,
+            BookingStatus.EXPIRED,
+        ):
+            raise InvalidStateTransition(
+                f"Cannot force-cancel a booking that is already {booking.status.value}."
+            )
+
+        old_status = booking.status
+        booking.status = BookingStatus.CANCELLED
+        booking.cancellation_reason = reason
+        # Same OTP-wipe rule ``transition_status`` applies on CANCELLED — the
+        # PIN is meaningless once the booking is closed, and leaving a
+        # plaintext secret live on a long-lived row is the failure mode
+        # SVC-169 called out.
+        booking.doorstep_otp = None
+
+        # Reuse — not reimplement — the consumer cancel refund path (SVC-178).
+        # Ordering matches ``transition_status``: refund initiation runs
+        # before we log the transition, so a Razorpay failure rolls the whole
+        # state change back atomically instead of leaving a "cancelled but no
+        # refund started" row.
+        await self._apply_cancellation_policy(booking, old_status)
+
+        await self._log_transition(
+            booking_id=booking.id,
+            from_status=old_status.value,
+            to_status=BookingStatus.CANCELLED.value,
+            changed_by=admin_id,
+            metadata={"admin_override": True},
+            note=reason,
+        )
+
+        await self.attach_addresses([booking])
+        await self.attach_items([booking])
+        await self.attach_status_logs([booking])
+        return booking
+
+    # ------------------------------------------------------------------
     # Listing
     # ------------------------------------------------------------------
 
@@ -1129,6 +1208,7 @@ class BookingService:
         to_status: str,
         changed_by: uuid.UUID,
         metadata: dict | None = None,
+        note: str | None = None,
     ) -> None:
         log = BookingStatusLog(
             booking_id=booking_id,
@@ -1136,6 +1216,7 @@ class BookingService:
             to_status=to_status,
             changed_by=changed_by,
             metadata_=metadata or {},
+            note=note,
         )
         self.db.add(log)
 

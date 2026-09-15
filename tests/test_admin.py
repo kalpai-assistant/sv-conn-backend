@@ -348,6 +348,82 @@ async def test_get_any_booking_404s_for_an_unknown_id(client, auth_headers, db_s
 
 
 @pytest.mark.asyncio
+async def test_admin_list_and_get_hydrate_consumer_phone_and_provider_name(
+    client, auth_headers, db_session
+):
+    """SVC-299 admin surface: the list + single-booking endpoints must
+    populate ``consumer_phone`` and ``provider_name`` so the frontend
+    table (phone column, provider column) doesn't need one lookup per row.
+
+    Row with an assigned provider carries both fields; row without a
+    provider carries ``consumer_phone`` and ``provider_name = null``.
+    """
+    from app.models.address import Address
+    from app.models.booking import BookingStatus
+    from app.models.category import Category
+    from app.models.service import Service
+    from tests.factories.booking_factory import BookingFactory
+
+    admin = await UserFactory.create(db_session, role="admin")
+    consumer = await UserFactory.create(
+        db_session, role="consumer", phone="+919111100001", name="Consumer One"
+    )
+    provider = await UserFactory.create(
+        db_session, role="provider", phone="+919222200001", name="Provider One"
+    )
+
+    cat = Category(name="Cleaning", slug="cleaning", is_active=True, sort_order=1)
+    db_session.add(cat)
+    await db_session.flush()
+    svc = Service(
+        category_id=cat.id,
+        name="Deep Clean",
+        base_price=400.0,
+        duration_minutes=60,
+        is_active=True,
+    )
+    db_session.add(svc)
+    addr = Address(user_id=consumer.id, label="home", full_address="1 Party St")
+    db_session.add(addr)
+    await db_session.flush()
+
+    assigned = await BookingFactory.create(
+        db_session,
+        consumer_id=consumer.id,
+        provider_id=provider.id,
+        service_id=svc.id,
+        address_id=addr.id,
+        status=BookingStatus.ACCEPTED,
+    )
+    unassigned = await BookingFactory.create(
+        db_session,
+        consumer_id=consumer.id,
+        provider_id=provider.id,  # factory requires it; unset below to mimic REQUESTED shape
+        service_id=svc.id,
+        address_id=addr.id,
+        status=BookingStatus.REQUESTED,
+    )
+    unassigned.provider_id = None
+    await db_session.flush()
+
+    admin_headers = auth_headers(str(admin.id), "admin")
+
+    list_resp = await client.get("/api/v1/admin/bookings", headers=admin_headers)
+    assert list_resp.status_code == 200, list_resp.text
+    by_id = {row["id"]: row for row in list_resp.json()["bookings"]}
+    assert by_id[str(assigned.id)]["consumer_phone"] == "+919111100001"
+    assert by_id[str(assigned.id)]["provider_name"] == "Provider One"
+    assert by_id[str(unassigned.id)]["consumer_phone"] == "+919111100001"
+    assert by_id[str(unassigned.id)]["provider_name"] is None
+
+    single = await client.get(f"/api/v1/admin/bookings/{assigned.id}", headers=admin_headers)
+    assert single.status_code == 200, single.text
+    body = single.json()
+    assert body["consumer_phone"] == "+919111100001"
+    assert body["provider_name"] == "Provider One"
+
+
+@pytest.mark.asyncio
 async def test_get_any_booking_rejects_non_admin(client, auth_headers, db_session):
     """Ungated, this route would hand any provider any consumer's home address
     for a booking they have nothing to do with — a worse leak than the listing,

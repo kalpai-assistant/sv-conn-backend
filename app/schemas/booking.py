@@ -236,6 +236,14 @@ class BookingResponse(BaseModel):
     # True when any payment for this booking has been charged back. Only populated by
     # the admin bookings list (which computes it); defaults False elsewhere (SVC-134).
     is_disputed: bool = False
+    # Party display fields, populated only on admin routes (SVC-299). Every other
+    # BookingResponse consumer leaves them as None: the consumer's own booking
+    # list has one phone (theirs, already known) and rendering a provider name
+    # on a job card was never in scope. Kept as defaulted-None so this is a
+    # backward-compatible expansion — every existing route omits them from the
+    # payload and every existing client keeps working.
+    consumer_phone: str | None = None
+    provider_name: str | None = None
     scheduled_at: datetime | None
     created_at: datetime
 
@@ -419,6 +427,19 @@ class TipBookingRequest(BaseModel):
 
 class CancelBookingRequest(BaseModel):
     reason: str = Field(..., min_length=5, max_length=500)
+
+
+class ForceCancelBookingRequest(BaseModel):
+    """Admin-driven cancel request (SVC-299).
+
+    Same shape as ``KYCRejectionRequest`` — one required free-text reason,
+    500-char ceiling. ``min_length=1`` rather than the 5 the consumer cancel
+    schema imposes: support can legitimately write "duplicate" or "fraud"
+    and reserving stricter validation to the consumer path keeps that gate
+    where it exists to slow accidental one-tap cancels, not admin ones.
+    """
+
+    reason: str = Field(..., min_length=1, max_length=500)
 
 
 class BookingListResponse(BaseModel):

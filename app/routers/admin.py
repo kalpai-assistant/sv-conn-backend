@@ -20,7 +20,7 @@ from app.models.booking import Booking, BookingStatus, SettlementStatus
 from app.models.payment import Payment
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.user import User
-from app.schemas.booking import BookingListResponse, BookingResponse
+from app.schemas.booking import BookingListResponse, BookingResponse, ForceCancelBookingRequest
 from app.schemas.payout import PendingSettlementsResponse
 from app.schemas.provider import (
     KYCDocsResponse,
@@ -218,6 +218,19 @@ async def list_all_bookings(
     # per-booking transition log (SVC-248).
     await svc.attach_status_logs(bookings)
 
+    # SVC-299: the admin bookings page renders "consumer phone" and "provider
+    # name" columns, both of which live on `users` and neither of which is on
+    # `BookingResponse` by default. Fetching them here in one keyed SELECT
+    # rather than lazy-loading via the ORM relationships — the list is up to
+    # 200 rows and each row has two party pointers, which would otherwise
+    # fire 400 round-trips.
+    party_ids = {b.consumer_id for b in bookings}
+    party_ids.update(b.provider_id for b in bookings if b.provider_id is not None)
+    users_by_id: dict[UUID, User] = {}
+    if party_ids:
+        user_rows = await db.execute(select(User).where(User.id.in_(party_ids)))
+        users_by_id = {u.id: u for u in user_rows.scalars()}
+
     return BookingListResponse(
         # No viewer identity to compare against — an admin is never the booking's
         # consumer, so no row here carries its doorstep PIN. This listing spans
@@ -225,10 +238,23 @@ async def list_all_bookings(
         # reason no row carries a consumer address either, though the reasoning
         # differs — bulk PII minimisation rather than secrecy. Both rules live in
         # `for_viewer`; see its docstring (SVC-170). `is_disputed` is stitched in
-        # from the EXISTS in the query (SVC-134).
+        # from the EXISTS in the query (SVC-134). `consumer_phone` /
+        # `provider_name` are stitched from the batched user lookup above (SVC-299).
         bookings=[
             BookingResponse.for_viewer(booking, viewer_id=None).model_copy(
-                update={"is_disputed": is_disputed}
+                update={
+                    "is_disputed": is_disputed,
+                    "consumer_phone": (
+                        users_by_id[booking.consumer_id].phone
+                        if booking.consumer_id in users_by_id
+                        else None
+                    ),
+                    "provider_name": (
+                        users_by_id[booking.provider_id].name
+                        if booking.provider_id and booking.provider_id in users_by_id
+                        else None
+                    ),
+                }
             )
             for booking, is_disputed in rows
         ],
@@ -236,6 +262,57 @@ async def list_all_bookings(
         page=page,
         per_page=per_page,
     )
+
+
+@router.post(
+    "/bookings/{booking_id}/cancel",
+    response_model=BookingResponse,
+    responses={
+        404: {"description": "No such booking"},
+        409: {"description": "Booking is already in a terminal state"},
+    },
+)
+async def force_cancel_booking(
+    booking_id: UUID,
+    body: ForceCancelBookingRequest,
+    admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel a booking on a customer's behalf (SVC-299).
+
+    Support-only escape hatch — bypasses the customer/provider valid-transition
+    rules so a stuck booking (partner ghosted en_route, wrong service dispatched,
+    obvious fraud) can be closed without opening a psql shell.
+
+    Refund inherits the consumer cancel policy in
+    ``BookingService._apply_cancellation_policy`` (see there): a captured
+    online payment triggers a Razorpay refund minus the ``ACCEPTED`` / ``EN_ROUTE``
+    cancellation fee; PENDING and cash bookings are pure state changes with no
+    money movement. IN_PROGRESS is intentionally *not* auto-refunded — the
+    job has started, so support is expected to refund manually via the
+    payments surface after diagnosing.
+
+    ``booking_status_logs`` gets a row with ``changed_by=admin.id`` and the
+    reason in the ``note`` column; ``booking.cancellation_reason`` is stamped
+    with the same string. The other party gets the standard cancelled push
+    (SVC-278) with the admin as actor so the notification tone matches
+    consumer-initiated cancels — the customer/provider hears "your booking
+    was cancelled", not the internal detail that support did it.
+    """
+    booking = await BookingService(db).force_cancel(
+        booking_id=booking_id, admin_id=admin.id, reason=body.reason
+    )
+    # Mirror the consumer-cancel push. Both consumer and provider need to know,
+    # and passing the admin's id keeps the notification worker's actor→recipient
+    # routing coherent: whoever the admin is not is who gets pushed. Import here
+    # rather than at module top for the same reason ``pay_out_provider`` does —
+    # keeps FastAPI cold start off the Celery broker path.
+    from app.tasks.notification_tasks import send_booking_notification
+
+    send_booking_notification.delay(
+        booking_id=str(booking.id), event="cancelled", actor_id=str(admin.id)
+    )
+    return await _for_admin_with_parties(db, booking)
 
 
 @router.get(
@@ -266,7 +343,33 @@ async def get_any_booking(booking_id: UUID, db: AsyncSession = Depends(get_db)):
     await svc.attach_addresses([booking])
     await svc.attach_items([booking])
     await svc.attach_status_logs([booking])
-    return BookingResponse.for_admin(booking)
+    return await _for_admin_with_parties(db, booking)
+
+
+async def _for_admin_with_parties(db: AsyncSession, booking: Booking) -> BookingResponse:
+    """Serialise one booking for the admin side sheet + hydrate the party fields.
+
+    ``BookingResponse.for_admin`` widens the base response with the address
+    (SVC-170); this helper widens it further with ``consumer_phone`` and
+    ``provider_name`` (SVC-299) so the admin sheet — and the response we hand
+    back from POST /admin/bookings/{id}/cancel — can render "cancelled
+    booking for +91XXXXXXXXXX" without a follow-up round trip. Assumes
+    the ORM relationships (``consumer_address``, ``items``, ``status_logs``)
+    are already hydrated by the caller.
+    """
+    ids: set[UUID] = {booking.consumer_id}
+    if booking.provider_id is not None:
+        ids.add(booking.provider_id)
+    rows = await db.execute(select(User).where(User.id.in_(ids)))
+    users_by_id = {u.id: u for u in rows.scalars()}
+    consumer = users_by_id.get(booking.consumer_id)
+    provider = users_by_id.get(booking.provider_id) if booking.provider_id else None
+    return BookingResponse.for_admin(booking).model_copy(
+        update={
+            "consumer_phone": consumer.phone if consumer else None,
+            "provider_name": provider.name if provider else None,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
