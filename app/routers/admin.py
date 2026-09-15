@@ -22,7 +22,12 @@ from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.user import User
 from app.schemas.booking import BookingListResponse, BookingResponse
 from app.schemas.payout import PendingSettlementsResponse
-from app.schemas.provider import KYCDocsResponse, KYCRejectionRequest, KYCReviewResponse
+from app.schemas.provider import (
+    KYCDocsResponse,
+    KYCQueueRow,
+    KYCRejectionRequest,
+    KYCReviewResponse,
+)
 from app.schemas.user import UserResponse
 from app.services.booking_service import BookingService
 from app.services.payout_service import PayoutService
@@ -64,23 +69,51 @@ async def deactivate_user(user_id: UUID, db: AsyncSession = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/providers/kyc/pending", response_model=list[UserResponse], dependencies=[_admin_dep])
-async def list_pending_kyc(
+@router.get("/providers/kyc/pending", response_model=list[KYCQueueRow], dependencies=[_admin_dep])
+async def list_kyc_queue(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
+    kyc_status_filter: KYCStatus = Query(
+        KYCStatus.SUBMITTED,
+        alias="status",
+        description="Filter by KYC status. Default 'submitted' preserves the pre-SVC-298 shape.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    """List providers whose KYC is awaiting admin review."""
+    """List providers filtered by KYC status.
+
+    SVC-298: same endpoint answers both the pending review queue (default) and
+    the rejected view — one query param instead of a sibling route keeps the
+    pagination + response shape DRY. Rejected rows sort by most-recent review
+    first (that's the useful order when hunting a specific past rejection);
+    submitted rows keep oldest-first so the admin drains the queue FIFO.
+    """
+    order_col = (
+        ProviderProfile.kyc_reviewed_at.desc()
+        if kyc_status_filter == KYCStatus.REJECTED
+        else ProviderProfile.kyc_submitted_at.asc()
+    )
     stmt = (
-        select(User)
+        select(User, ProviderProfile)
         .join(ProviderProfile, ProviderProfile.user_id == User.id)
-        .where(ProviderProfile.kyc_status == KYCStatus.SUBMITTED)
-        .order_by(ProviderProfile.kyc_submitted_at.asc())
+        .where(ProviderProfile.kyc_status == kyc_status_filter)
+        .order_by(order_col)
         .offset((page - 1) * per_page)
         .limit(per_page)
     )
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    return [
+        KYCQueueRow(
+            id=user.id,
+            phone=user.phone,
+            name=user.name,
+            email=user.email,
+            kyc_submitted_at=profile.kyc_submitted_at,
+            kyc_reviewed_at=profile.kyc_reviewed_at,
+            kyc_rejection_reason=profile.kyc_rejection_reason,
+        )
+        for user, profile in result.all()
+    ]
 
 
 @router.get(

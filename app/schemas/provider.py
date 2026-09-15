@@ -208,6 +208,24 @@ class KYCDocsResponse(BaseModel):
     selfie_url: str | None
 
 
+class KYCQueueRow(BaseModel):
+    """One row in the admin KYC queue listing (SVC-298).
+
+    Shape is a UserResponse plus the three ProviderProfile timestamps the review
+    UI wants for aging + the rejected view. Kept separate from UserResponse
+    because those are provider-only columns — surfacing them on every user list
+    would be schema noise.
+    """
+
+    id: UUID
+    phone: str
+    name: str | None
+    email: str | None
+    kyc_submitted_at: datetime | None
+    kyc_reviewed_at: datetime | None
+    kyc_rejection_reason: str | None
+
+
 # ---------------------------------------------------------------------------
 # Earnings (SC-33)
 # ---------------------------------------------------------------------------
