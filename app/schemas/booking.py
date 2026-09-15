@@ -421,6 +421,19 @@ class CancelBookingRequest(BaseModel):
     reason: str = Field(..., min_length=5, max_length=500)
 
 
+class ForceCancelBookingRequest(BaseModel):
+    """Admin-driven cancel request (SVC-299).
+
+    Same shape as ``KYCRejectionRequest`` — one required free-text reason,
+    500-char ceiling. ``min_length=1`` rather than the 5 the consumer cancel
+    schema imposes: support can legitimately write "duplicate" or "fraud"
+    and reserving stricter validation to the consumer path keeps that gate
+    where it exists to slow accidental one-tap cancels, not admin ones.
+    """
+
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
 class BookingListResponse(BaseModel):
     bookings: list[BookingResponse]
     total: int

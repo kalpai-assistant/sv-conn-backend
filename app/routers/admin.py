@@ -20,7 +20,7 @@ from app.models.booking import Booking, BookingStatus, SettlementStatus
 from app.models.payment import Payment
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.user import User
-from app.schemas.booking import BookingListResponse, BookingResponse
+from app.schemas.booking import BookingListResponse, BookingResponse, ForceCancelBookingRequest
 from app.schemas.payout import PendingSettlementsResponse
 from app.schemas.provider import (
     KYCDocsResponse,
@@ -236,6 +236,57 @@ async def list_all_bookings(
         page=page,
         per_page=per_page,
     )
+
+
+@router.post(
+    "/bookings/{booking_id}/cancel",
+    response_model=BookingResponse,
+    responses={
+        404: {"description": "No such booking"},
+        409: {"description": "Booking is already in a terminal state"},
+    },
+)
+async def force_cancel_booking(
+    booking_id: UUID,
+    body: ForceCancelBookingRequest,
+    admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel a booking on a customer's behalf (SVC-299).
+
+    Support-only escape hatch — bypasses the customer/provider valid-transition
+    rules so a stuck booking (partner ghosted en_route, wrong service dispatched,
+    obvious fraud) can be closed without opening a psql shell.
+
+    Refund inherits the consumer cancel policy in
+    ``BookingService._apply_cancellation_policy`` (see there): a captured
+    online payment triggers a Razorpay refund minus the ``ACCEPTED`` / ``EN_ROUTE``
+    cancellation fee; PENDING and cash bookings are pure state changes with no
+    money movement. IN_PROGRESS is intentionally *not* auto-refunded — the
+    job has started, so support is expected to refund manually via the
+    payments surface after diagnosing.
+
+    ``booking_status_logs`` gets a row with ``changed_by=admin.id`` and the
+    reason in the ``note`` column; ``booking.cancellation_reason`` is stamped
+    with the same string. The other party gets the standard cancelled push
+    (SVC-278) with the admin as actor so the notification tone matches
+    consumer-initiated cancels — the customer/provider hears "your booking
+    was cancelled", not the internal detail that support did it.
+    """
+    booking = await BookingService(db).force_cancel(
+        booking_id=booking_id, admin_id=admin.id, reason=body.reason
+    )
+    # Mirror the consumer-cancel push. Both consumer and provider need to know,
+    # and passing the admin's id keeps the notification worker's actor→recipient
+    # routing coherent: whoever the admin is not is who gets pushed. Import here
+    # rather than at module top for the same reason ``pay_out_provider`` does —
+    # keeps FastAPI cold start off the Celery broker path.
+    from app.tasks.notification_tasks import send_booking_notification
+
+    send_booking_notification.delay(
+        booking_id=str(booking.id), event="cancelled", actor_id=str(admin.id)
+    )
+    return BookingResponse.for_admin(booking)
 
 
 @router.get(
