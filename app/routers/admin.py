@@ -218,6 +218,19 @@ async def list_all_bookings(
     # per-booking transition log (SVC-248).
     await svc.attach_status_logs(bookings)
 
+    # SVC-299: the admin bookings page renders "consumer phone" and "provider
+    # name" columns, both of which live on `users` and neither of which is on
+    # `BookingResponse` by default. Fetching them here in one keyed SELECT
+    # rather than lazy-loading via the ORM relationships — the list is up to
+    # 200 rows and each row has two party pointers, which would otherwise
+    # fire 400 round-trips.
+    party_ids = {b.consumer_id for b in bookings}
+    party_ids.update(b.provider_id for b in bookings if b.provider_id is not None)
+    users_by_id: dict[UUID, User] = {}
+    if party_ids:
+        user_rows = await db.execute(select(User).where(User.id.in_(party_ids)))
+        users_by_id = {u.id: u for u in user_rows.scalars()}
+
     return BookingListResponse(
         # No viewer identity to compare against — an admin is never the booking's
         # consumer, so no row here carries its doorstep PIN. This listing spans
@@ -225,10 +238,23 @@ async def list_all_bookings(
         # reason no row carries a consumer address either, though the reasoning
         # differs — bulk PII minimisation rather than secrecy. Both rules live in
         # `for_viewer`; see its docstring (SVC-170). `is_disputed` is stitched in
-        # from the EXISTS in the query (SVC-134).
+        # from the EXISTS in the query (SVC-134). `consumer_phone` /
+        # `provider_name` are stitched from the batched user lookup above (SVC-299).
         bookings=[
             BookingResponse.for_viewer(booking, viewer_id=None).model_copy(
-                update={"is_disputed": is_disputed}
+                update={
+                    "is_disputed": is_disputed,
+                    "consumer_phone": (
+                        users_by_id[booking.consumer_id].phone
+                        if booking.consumer_id in users_by_id
+                        else None
+                    ),
+                    "provider_name": (
+                        users_by_id[booking.provider_id].name
+                        if booking.provider_id and booking.provider_id in users_by_id
+                        else None
+                    ),
+                }
             )
             for booking, is_disputed in rows
         ],
@@ -286,7 +312,7 @@ async def force_cancel_booking(
     send_booking_notification.delay(
         booking_id=str(booking.id), event="cancelled", actor_id=str(admin.id)
     )
-    return BookingResponse.for_admin(booking)
+    return await _for_admin_with_parties(db, booking)
 
 
 @router.get(
@@ -317,7 +343,33 @@ async def get_any_booking(booking_id: UUID, db: AsyncSession = Depends(get_db)):
     await svc.attach_addresses([booking])
     await svc.attach_items([booking])
     await svc.attach_status_logs([booking])
-    return BookingResponse.for_admin(booking)
+    return await _for_admin_with_parties(db, booking)
+
+
+async def _for_admin_with_parties(db: AsyncSession, booking: Booking) -> BookingResponse:
+    """Serialise one booking for the admin side sheet + hydrate the party fields.
+
+    ``BookingResponse.for_admin`` widens the base response with the address
+    (SVC-170); this helper widens it further with ``consumer_phone`` and
+    ``provider_name`` (SVC-299) so the admin sheet — and the response we hand
+    back from POST /admin/bookings/{id}/cancel — can render "cancelled
+    booking for +91XXXXXXXXXX" without a follow-up round trip. Assumes
+    the ORM relationships (``consumer_address``, ``items``, ``status_logs``)
+    are already hydrated by the caller.
+    """
+    ids: set[UUID] = {booking.consumer_id}
+    if booking.provider_id is not None:
+        ids.add(booking.provider_id)
+    rows = await db.execute(select(User).where(User.id.in_(ids)))
+    users_by_id = {u.id: u for u in rows.scalars()}
+    consumer = users_by_id.get(booking.consumer_id)
+    provider = users_by_id.get(booking.provider_id) if booking.provider_id else None
+    return BookingResponse.for_admin(booking).model_copy(
+        update={
+            "consumer_phone": consumer.phone if consumer else None,
+            "provider_name": provider.name if provider else None,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
