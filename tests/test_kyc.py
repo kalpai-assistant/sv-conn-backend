@@ -240,11 +240,18 @@ async def test_non_admin_cannot_verify(client, auth_headers, db_session):
 
 @pytest.mark.asyncio
 async def test_admin_list_pending_kyc(client, auth_headers, db_session):
-    """List endpoint returns only SUBMITTED profiles."""
-    submitted_user, _ = await _seed_provider(db_session, kyc_status=KYCStatus.SUBMITTED)
+    """Default (no ?status) → only SUBMITTED profiles, with kyc_submitted_at surfaced."""
+    submitted_user, submitted_profile = await _seed_provider(
+        db_session, kyc_status=KYCStatus.SUBMITTED
+    )
+    from datetime import UTC, datetime
+
+    submitted_profile.kyc_submitted_at = datetime(2026, 9, 10, 12, 0, 0, tzinfo=UTC)
     verified_user, _ = await _seed_provider(db_session, kyc_status=KYCStatus.VERIFIED)
     pending_user, _ = await _seed_provider(db_session, kyc_status=KYCStatus.PENDING)
+    rejected_user, _ = await _seed_provider(db_session, kyc_status=KYCStatus.REJECTED)
     admin_user = await UserFactory.create(db_session, role="admin")
+    await db_session.flush()
 
     response = await client.get(
         "/api/v1/admin/providers/kyc/pending",
@@ -252,10 +259,48 @@ async def test_admin_list_pending_kyc(client, auth_headers, db_session):
     )
 
     assert response.status_code == 200
-    ids = {row["id"] for row in response.json()}
+    body = response.json()
+    ids = {row["id"] for row in body}
     assert str(submitted_user.id) in ids
     assert str(verified_user.id) not in ids
     assert str(pending_user.id) not in ids
+    assert str(rejected_user.id) not in ids
+    row = next(r for r in body if r["id"] == str(submitted_user.id))
+    assert row["kyc_submitted_at"] is not None
+    assert "kyc_reviewed_at" in row
+    assert "kyc_rejection_reason" in row
+
+
+@pytest.mark.asyncio
+async def test_admin_list_kyc_rejected(client, auth_headers, db_session):
+    """?status=rejected returns only REJECTED profiles, newest-review first, with reason."""
+    from datetime import UTC, datetime
+
+    older_rejected, older_profile = await _seed_provider(db_session, kyc_status=KYCStatus.REJECTED)
+    older_profile.kyc_reviewed_at = datetime(2026, 9, 1, 12, 0, 0, tzinfo=UTC)
+    older_profile.kyc_rejection_reason = "Aadhaar blurred"
+
+    newer_rejected, newer_profile = await _seed_provider(db_session, kyc_status=KYCStatus.REJECTED)
+    newer_profile.kyc_reviewed_at = datetime(2026, 9, 12, 12, 0, 0, tzinfo=UTC)
+    newer_profile.kyc_rejection_reason = "Selfie doesn't match Aadhaar"
+
+    submitted_user, _ = await _seed_provider(db_session, kyc_status=KYCStatus.SUBMITTED)
+    admin_user = await UserFactory.create(db_session, role="admin")
+    await db_session.flush()
+
+    response = await client.get(
+        "/api/v1/admin/providers/kyc/pending?status=rejected",
+        headers=auth_headers(str(admin_user.id), "admin"),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    ids = [row["id"] for row in body]
+    assert str(submitted_user.id) not in ids
+    assert ids.index(str(newer_rejected.id)) < ids.index(str(older_rejected.id))
+    newer_row = next(r for r in body if r["id"] == str(newer_rejected.id))
+    assert newer_row["kyc_rejection_reason"] == "Selfie doesn't match Aadhaar"
+    assert newer_row["kyc_reviewed_at"] is not None
 
 
 # ---------------------------------------------------------------------------
