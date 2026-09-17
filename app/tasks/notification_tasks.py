@@ -5,11 +5,53 @@ Uses a synchronous DB session (SyncSessionLocal) because Celery workers are not 
 
 import logging
 
+from firebase_admin import messaging as _fcm_messaging
+
 from app.models.booking import BookingStatus
 from app.tasks.celery_app import celery_app
 from app.utils.fcm_client import send_multicast, send_push_notification
 
 logger = logging.getLogger(__name__)
+
+# FCM error classes that mean this token will never succeed again — so clearing
+# `users.fcm_token` is safe and the next broadcast's SVC-276 eligibility filter
+# will exclude the provider by construction (SVC-301). Anything not in this
+# tuple stays raised and either is caught by the caller or retries the task.
+#
+# * ``UnregisteredError`` — token was deleted server-side (uninstall, expiry,
+#   OS revocation) or never registered.
+# * ``SenderIdMismatchError`` — token belongs to a different Firebase project;
+#   whoever registered it against ours cannot receive from us. Rare but
+#   definitively dead: no recovery without a re-register from the app.
+#
+# Deliberately NOT included: ``InvalidArgumentError``. FCM v1 raises it for a
+# malformed *request* too (bad payload, unknown field), not only bad tokens —
+# treating it as dead would nuke good tokens for a bug in our own send code.
+_DEAD_TOKEN_ERRORS: tuple[type[Exception], ...] = (
+    _fcm_messaging.UnregisteredError,
+    _fcm_messaging.SenderIdMismatchError,
+)
+
+
+def _clear_dead_fcm_token(db, user, error: Exception) -> None:
+    """Null a User's ``fcm_token`` after FCM confirmed the token is dead.
+
+    Commits inside the caller's session so the row is durable before we move
+    on to the next recipient — otherwise a later exception in the same task
+    would roll the clear back and we would re-hit the same dead token on the
+    task's retry. The commit is scoped to this small update; the surrounding
+    broadcast writes (booking-offer rows, etc.) are already committed by the
+    time the per-recipient send loop runs, so nothing else is in flight to
+    accidentally land.
+    """
+    logger.info(
+        "fcm_token_cleared_after_dead_response user_id=%s error_class=%s",
+        user.id,
+        type(error).__name__,
+    )
+    user.fcm_token = None
+    db.commit()
+
 
 # Android notification channel for new job requests (SVC-278 issue 6).
 #
@@ -300,7 +342,9 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                 recipients = [booking.provider if event == "accepted" else booking.consumer]
 
             for recipient in recipients:
-                if recipient and getattr(recipient, "fcm_token", None):
+                if not (recipient and getattr(recipient, "fcm_token", None)):
+                    continue
+                try:
                     send_push_notification(
                         token=recipient.fcm_token,
                         title=template["title"],
@@ -317,6 +361,14 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                         # booking is claimed. A push cannot be taken back.
                         data={"booking_id": booking_id, "event": event},
                     )
+                except _DEAD_TOKEN_ERRORS as dead:
+                    # SVC-301: FCM has confirmed this token can never succeed.
+                    # Null it so the next broadcast's SVC-276 filter excludes
+                    # this provider — the fix compounds — and carry on to the
+                    # remaining recipients rather than letting one dead token
+                    # abort the whole broadcast (which the pre-SVC-301
+                    # outer-only try/except used to do).
+                    _clear_dead_fcm_token(db, recipient, dead)
 
     except Exception as exc:
         self.retry(exc=exc)
@@ -363,12 +415,18 @@ def send_payout_notification(
             if payout_id:
                 data["payout_id"] = payout_id
 
-            send_push_notification(
-                token=provider.fcm_token,
-                title=template["title"],
-                body=template["body"].format(amount=_format_rupees(amount_paise)),
-                data=data,
-            )
+            try:
+                send_push_notification(
+                    token=provider.fcm_token,
+                    title=template["title"],
+                    body=template["body"].format(amount=_format_rupees(amount_paise)),
+                    data=data,
+                )
+            except _DEAD_TOKEN_ERRORS as dead:
+                # SVC-301. Same reasoning as the booking-broadcast send loop —
+                # clear once, let the missed push be caught by whatever the
+                # provider looks at next (offers list, payout history screen).
+                _clear_dead_fcm_token(db, provider, dead)
 
     except Exception as exc:
         self.retry(exc=exc)
