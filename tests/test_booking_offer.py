@@ -516,6 +516,37 @@ def _stub(**attrs):
     return obj
 
 
+def test_broadcast_recipient_count_is_logged(caplog):
+    """SVC-302: pins the log line dispatch-tuning and alarms key off.
+
+    ``booking.unbroadcastable`` on count=0 is the only broadcast-composition
+    line this task emitted before SVC-302. Everything with recipients was
+    silent — so "how many providers did we broadcast to" required a DB
+    bastion to answer, and any change to the eligibility rule (SVC-276,
+    SVC-301, whatever comes next) had no signal in CloudWatch.
+
+    Fields asserted verbatim rather than the free-form string, so a future
+    reformat doesn't invisibly break a CloudWatch alarm keyed on any of them.
+    """
+    import logging
+
+    booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(), service_id=uuid.uuid4())
+
+    with caplog.at_level(logging.INFO, logger="app.tasks.notification_tasks"):
+        _run_broadcast(
+            booking,
+            _stub(location=ADDRESS_POINT, full_address=FULL_ADDRESS),
+            _stub(name=SERVICE_NAME),
+            [_stub(fcm_token="tok_1"), _stub(fcm_token="tok_2")],
+        )
+
+    lines = [r.getMessage() for r in caplog.records if "broadcast.recipients" in r.getMessage()]
+    assert len(lines) == 1, f"expected exactly one broadcast.recipients line, got: {lines}"
+    line = lines[0]
+    assert f"booking_id={booking.id}" in line
+    assert "count=2" in line
+
+
 def test_broadcast_push_names_the_service():
     booking = _stub(id=uuid.uuid4(), consumer_address_id=uuid.uuid4(), service_id=uuid.uuid4())
     sent = _run_broadcast(
