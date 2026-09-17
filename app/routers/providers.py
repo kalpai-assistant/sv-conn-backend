@@ -10,6 +10,7 @@ from app.models.user import User
 from app.schemas.booking import BookingOfferResponse
 from app.schemas.provider import (
     EarningsResponse,
+    EarningsSummaryResponse,
     KYCSubmissionResponse,
     NearbyProviderResponse,
     PayoutMethodSelect,
@@ -188,6 +189,27 @@ async def list_my_offers(
     place they can be added, so the read writes the missing rows.
     """
     return await BookingService(db).list_open_offers(current_user.id)
+
+
+@router.get("/me/earnings/summary", response_model=EarningsSummaryResponse)
+async def get_my_earnings_summary(
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Lifetime earnings total for the signed-in provider (SVC-275).
+
+    A separate route rather than a fourth `range` value on the endpoint below,
+    because that one returns a row per booking: bounded over a window, unbounded
+    over a lifetime. Provider Home shows a single figure and should not pay for
+    every job the provider has ever done to render it.
+
+    Same definition of "earned" as the windowed endpoint (completed, not
+    refunded), shared via `ProviderService._earned_filter`. That is narrower than
+    the payout path's `_owed_filter`, which also excludes cash jobs: a cash job is
+    earned but not owed, since the provider already has the money.
+    """
+    return await ProviderService(db).get_earnings_summary(current_user.id)
 
 
 @router.get("/me/earnings", response_model=EarningsResponse)
