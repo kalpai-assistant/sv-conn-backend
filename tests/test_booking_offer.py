@@ -72,13 +72,19 @@ async def _provider(
     kyc: KYCStatus = KYCStatus.VERIFIED,
     subscribed: bool = True,
     radius_km: int = 10,
+    has_token: bool = True,
 ):
     """A provider positioned relative to the consumer address.
 
     Every knob here is one clause of the eligibility rule, so each refusal test
-    flips exactly one and leaves the rest valid.
+    flips exactly one and leaves the rest valid. ``has_token=False`` models
+    SVC-276's case: a provider still marked online but without an FCM token
+    (session expired, uninstall, token rotation failed) — the broadcast now
+    excludes them by construction.
     """
-    user = await UserFactory.create(db, role="provider")
+    user = await UserFactory.create(
+        db, role="provider", fcm_token=(f"fcm-{uuid.uuid4().hex[:16]}" if has_token else None)
+    )
     db.add(
         ProviderProfile(
             user_id=user.id,
@@ -246,6 +252,27 @@ async def test_provider_not_subscribed_to_the_service_is_refused(client, db_sess
 async def test_unverified_provider_is_refused(client, db_session, auth_headers):
     service = await _service(db_session)
     provider = await _provider(db_session, service, kyc=KYCStatus.PENDING)
+    _, _, booking = await _open_booking(db_session, service)
+
+    resp = await _get(client, booking.id, provider, auth_headers)
+
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_provider_without_fcm_token_is_refused(client, db_session, auth_headers):
+    """SVC-276: a provider we cannot reach must not receive the offer.
+
+    Before SVC-276, ``is_online`` alone gated eligibility — but the client is
+    the only actor that ever clears it, and there are at least five ways the
+    provider goes dark without the client running to do the cleanup (session
+    expiry, uninstall, notification-permission revoke, token rotation failure,
+    phone offline). A NULL token is the load-bearing signal for all of them.
+    The offer endpoint refuses them for the same reason the broadcast never
+    selected them — the two rules are the same rule (SVC-153).
+    """
+    service = await _service(db_session)
+    provider = await _provider(db_session, service, has_token=False)
     _, _, booking = await _open_booking(db_session, service)
 
     resp = await _get(client, booking.id, provider, auth_headers)
