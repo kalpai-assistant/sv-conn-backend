@@ -275,11 +275,19 @@ async def test_inactive_service_refuses_the_whole_cart(db_session):
 # ---------------------------------------------------------------------------
 
 
-async def _online_verified_provider(db_session, service_ids: list):
-    """Provider profile subscribed to every service_id passed."""
+async def _online_verified_provider(db_session, service_ids: list, *, has_token: bool = True):
+    """Provider profile subscribed to every service_id passed.
+
+    ``has_token=False`` models SVC-276: online but with no FCM token, so the
+    broadcast excludes them by construction.
+    """
     from app.models.provider_profile import KYCStatus, ProviderProfile
 
-    user = await UserFactory.create(db_session, role="provider")
+    user = await UserFactory.create(
+        db_session,
+        role="provider",
+        fcm_token=(f"fcm-{uuid.uuid4().hex[:16]}" if has_token else None),
+    )
     profile = ProviderProfile(
         user_id=user.id,
         kyc_status=KYCStatus.VERIFIED,
@@ -317,6 +325,43 @@ async def test_matching_policy_i_requires_provider_to_cover_every_service(db_ses
     ids = {u.id for u in users}
     assert full.id in ids
     assert partial.id not in ids
+
+
+@pytest.mark.asyncio
+async def test_null_token_provider_excluded_from_multi_broadcast_and_accept(db_session):
+    """SVC-276: a provider without an FCM token is unreachable, so the
+    multi-service broadcast must not select them, and — by the SVC-153
+    invariant — the accept-side membership check must refuse them for the
+    same reason. Otherwise a stranded provider could still be shown as
+    "eligible" and receive nothing.
+    """
+    _, _ = await _consumer_with_address(db_session)
+    svc_a = await _service(db_session, base_price=100.0)
+    svc_b = await _service(db_session, base_price=100.0)
+
+    reachable = await _online_verified_provider(db_session, [svc_a.id, svc_b.id])
+    unreachable = await _online_verified_provider(db_session, [svc_a.id, svc_b.id], has_token=False)
+    location = build_point_wkt(LAT, LNG)
+
+    stmt = eligible_providers_multi_stmt([svc_a.id, svc_b.id], location)
+    ids = {u.id for u in (await db_session.execute(stmt)).scalars().all()}
+    assert reachable.id in ids
+    assert unreachable.id not in ids, "unreachable provider was still broadcast to"
+
+    # And the accept-side check refuses them — the two sets must not drift.
+    still_ok = (
+        await db_session.execute(
+            is_eligible_provider_multi_stmt([svc_a.id, svc_b.id], location, reachable.id)
+        )
+    ).scalar_one_or_none()
+    assert still_ok is not None
+
+    now_no = (
+        await db_session.execute(
+            is_eligible_provider_multi_stmt([svc_a.id, svc_b.id], location, unreachable.id)
+        )
+    ).scalar_one_or_none()
+    assert now_no is None, "accept let a provider through the broadcast had excluded"
 
 
 @pytest.mark.asyncio

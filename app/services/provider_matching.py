@@ -29,10 +29,20 @@ def eligible_provider_conditions(service_id, address_location) -> list:
     """WHERE conditions selecting the providers eligible for one booking.
 
     A provider qualifies when they are subscribed to the booked service, online,
-    KYC-verified, and the consumer's address falls inside *their own* service
-    radius — the radius is per-provider (``service_area_radius_km``), which is why
-    this uses ``st_dwithin_column_radius`` and not ``st_dwithin_filter``, whose
-    radius is one constant for the whole query.
+    KYC-verified, reachable by push (SVC-276 — ``fcm_token IS NOT NULL``), and the
+    consumer's address falls inside *their own* service radius — the radius is
+    per-provider (``service_area_radius_km``), which is why this uses
+    ``st_dwithin_column_radius`` and not ``st_dwithin_filter``, whose radius is
+    one constant for the whole query.
+
+    The token predicate is what SVC-276 added. Before it, ``is_online`` was the
+    only reachability signal and the client is the only thing that ever cleared
+    it — so a provider whose session expired, or who uninstalled, or whose token
+    rotated and re-registration failed still passed this filter, got a
+    ``booking_offers`` row written for them, and heard nothing. Now the invariant
+    is by construction: broadcast only picks providers we can actually reach.
+    Defence-in-depth in ``notification_tasks.send_booking_notification`` still
+    skips a NULL token per-recipient, so the two remain redundant on purpose.
 
     ``address_location`` is the address's geography value, passed in rather than
     re-queried so the caller controls the fetch.
@@ -41,6 +51,7 @@ def eligible_provider_conditions(service_id, address_location) -> list:
         ProviderServiceModel.service_id == service_id,
         ProviderProfile.is_online.is_(True),
         ProviderProfile.kyc_status == KYCStatus.VERIFIED,
+        User.fcm_token.is_not(None),
         st_dwithin_column_radius(
             ProviderProfile.service_area_center,
             address_location,
@@ -72,6 +83,7 @@ def is_eligible_provider_stmt(service_id, address_location, provider_id) -> Sele
     """
     return (
         select(ProviderProfile.user_id)
+        .join(User, User.id == ProviderProfile.user_id)
         .join(ProviderServiceModel, ProviderServiceModel.provider_id == ProviderProfile.user_id)
         .where(
             ProviderProfile.user_id == provider_id,
@@ -117,6 +129,7 @@ def eligible_providers_multi_stmt(service_ids: Sequence, address_location) -> Se
     base_conditions = [
         ProviderProfile.is_online.is_(True),
         ProviderProfile.kyc_status == KYCStatus.VERIFIED,
+        User.fcm_token.is_not(None),
         st_dwithin_column_radius(
             ProviderProfile.service_area_center,
             address_location,
@@ -157,6 +170,7 @@ def is_eligible_provider_multi_stmt(service_ids: Sequence, address_location, pro
     base_conditions = [
         ProviderProfile.is_online.is_(True),
         ProviderProfile.kyc_status == KYCStatus.VERIFIED,
+        User.fcm_token.is_not(None),
         st_dwithin_column_radius(
             ProviderProfile.service_area_center,
             address_location,
@@ -165,6 +179,7 @@ def is_eligible_provider_multi_stmt(service_ids: Sequence, address_location, pro
     ]
     return (
         select(ProviderProfile.user_id)
+        .join(User, User.id == ProviderProfile.user_id)
         .join(ProviderServiceModel, ProviderServiceModel.provider_id == ProviderProfile.user_id)
         .where(
             ProviderProfile.user_id == provider_id,

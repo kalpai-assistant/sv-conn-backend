@@ -22,6 +22,9 @@ def _random_phone() -> str:
     return f"+91{6 + n % 4}{n // 4 % 10**9:09d}"
 
 
+_UNSET = object()
+
+
 class UserFactory:
     @staticmethod
     async def create(
@@ -30,13 +33,27 @@ class UserFactory:
         phone: str | None = None,
         name: str = "Test User",
         is_active: bool = True,
+        fcm_token: str | None = _UNSET,  # type: ignore[assignment]
     ) -> User:
+        """Create a User row.
+
+        ``fcm_token`` defaults to a unique test token when ``role='provider'``
+        (SVC-276 — the broadcast eligibility filter now requires one; without
+        this default every existing provider fixture would go silently
+        ineligible), and to ``None`` for every other role so that
+        ``test_user_fcm_token`` continues to observe the real "no token
+        registered yet" starting state. Pass ``fcm_token=None`` explicitly on a
+        provider to model an unreachable one.
+        """
+        if fcm_token is _UNSET:
+            fcm_token = f"fcm-test-{uuid.uuid4().hex[:16]}" if role == "provider" else None
         user = User(
             id=uuid.uuid4(),
             phone=phone or _random_phone(),
             name=name,
             role=UserRole(role),
             is_active=is_active,
+            fcm_token=fcm_token,
         )
         db.add(user)
         await db.flush()

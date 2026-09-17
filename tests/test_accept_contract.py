@@ -95,14 +95,18 @@ async def _eligible_provider(
     subscribed: bool = True,
     point: str = NEAR_POINT,
     radius_km: int = 10,
+    has_token: bool = True,
 ):
     """A provider set up to pass the SVC-168 eligibility check for `service`.
 
     Every knob here is one clause of the eligibility rule — flip one and the
     provider becomes ineligible in that specific way. Tests use this to prove
-    each ineligibility path returns 403.
+    each ineligibility path returns 403. ``has_token`` covers SVC-276:
+    a provider still marked online but without an FCM token.
     """
-    user = await UserFactory.create(db, role="provider")
+    user = await UserFactory.create(
+        db, role="provider", fcm_token=(f"fcm-{uuid.uuid4().hex[:16]}" if has_token else None)
+    )
     db.add(
         ProviderProfile(
             user_id=user.id,
@@ -273,13 +277,17 @@ async def test_provider_with_no_profile_cannot_accept(client, db_session, auth_h
             {"point": "SRID=4326;POINT(78.2000 12.9700)", "radius_km": 5},
             id="out-of-radius",
         ),
+        # SVC-276: unreachable — no FCM token, so the broadcast never
+        # selected them and accept must refuse for the same reason.
+        pytest.param({"has_token": False}, id="no-fcm-token"),
     ],
 )
 async def test_ineligible_provider_cannot_accept(client, db_session, auth_headers, make_ineligible):
     """SVC-168: eligibility drift protection. A provider eligible when the
     broadcast fired but who has since gone offline, lost KYC, unsubscribed
-    from the service, or (for a bookmarked id) never was in radius —
-    cannot accept. The set of accepters cannot drift from the offered set."""
+    from the service, (for a bookmarked id) never was in radius, or has no
+    reachable push token — cannot accept. The set of accepters cannot drift
+    from the offered set."""
     service = await _service(db_session)
     provider = await _eligible_provider(db_session, service, **make_ineligible)
     _, booking = await _booking(db_session, service=service)
