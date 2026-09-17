@@ -14,6 +14,8 @@ from app.schemas.provider import (
     KYCSubmissionResponse,
     NearbyProviderResponse,
     PayoutMethodSelect,
+    ProviderPayoutListResponse,
+    ProviderPayoutSummaryResponse,
     ProviderProfileUpdate,
     ProviderResponse,
     ProviderServiceSubscribeRequest,
@@ -21,6 +23,7 @@ from app.schemas.provider import (
     ProviderStatusUpdate,
 )
 from app.services.booking_service import BookingService
+from app.services.payout_service import PayoutService
 from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/providers", tags=["Providers"])
@@ -189,6 +192,55 @@ async def list_my_offers(
     place they can be added, so the read writes the missing rows.
     """
     return await BookingService(db).list_open_offers(current_user.id)
+
+
+@router.get("/me/payouts/summary", response_model=ProviderPayoutSummaryResponse)
+async def get_my_payout_summary(
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """What the provider's next transfer will actually be (SVC-303).
+
+    Distinct from `/me/earnings/summary`, which answers "what have I earned".
+    This answers "what is coming to me", and the two differ by real money:
+
+    * **cash commission** — on a cash job the provider collected the full amount
+      at the door, so the platform's 20% is netted off their next online
+      transfer;
+    * **the T+1 settlement gate** — a completed job is only payable once
+      Razorpay has deposited that money with us, since paying from platform
+      float is not permitted.
+
+    So `pending_amount` is the wallet-derived figure the payout will really
+    send, `gross_amount` is what the queued jobs are worth before netting, and
+    the frontend shows the difference rather than letting the provider discover
+    it at the bank.
+
+    Names no future payout date: payouts are admin-triggered and there is no
+    schedule, so any date here would be invented.
+    """
+    return await PayoutService(db).get_provider_payout_summary(current_user.id)
+
+
+@router.get("/me/payouts", response_model=ProviderPayoutListResponse)
+async def list_my_payouts(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """The provider's own payout statement, newest first (SVC-303).
+
+    Reads `settlement_statements` — the artifact built to be the snapshot a
+    provider actually sees — rather than `payout_audits`, which records
+    *attempts* (RazorpayX's status frozen at creation, never updated when the
+    money lands) plus internal retries and nightly reconciliation repairs. A
+    provider reading those raw would see several rows for one payment.
+
+    Carries no admin id, gateway id or error text: a provider learns what
+    happened to their money, not who moved it or through which processor.
+    """
+    return await PayoutService(db).list_my_payouts(current_user.id, page=page, per_page=per_page)
 
 
 @router.get("/me/earnings/summary", response_model=EarningsSummaryResponse)

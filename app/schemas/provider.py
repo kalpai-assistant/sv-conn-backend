@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.models.booking import PaymentMethod, SettlementStatus
 from app.models.provider_profile import KYCStatus, PayoutMethod
 
 # VPA: local-part@handle, e.g. "name@okhdfcbank". IFSC: 4 letters + 0 + 6 alnum.
@@ -242,6 +243,21 @@ class EarningsBookingItem(BaseModel):
     # tips exist without doing the subtraction itself.
     tip_amount: float = 0.0
 
+    # SVC-303: where this job's money is, so the provider can see why the
+    # earned total and the transfer differ instead of inferring it.
+    #
+    # All three default, so an older client and the SVC-260 screen keep working
+    # untouched — this is purely additive to the existing response.
+    settlement_status: SettlementStatus | None = None
+    # Cash is not a settlement state: such a booking never enters the payout
+    # path at all, because the provider collected at the door. Surfaced
+    # separately so the UI can label it as its own thing rather than as a
+    # variant of "paid", which would imply a transfer that never happened.
+    payment_method: PaymentMethod | None = None
+    # The bank's own words on a failed payout, so the error block can say what
+    # actually went wrong rather than apologising generically.
+    settlement_failure_reason: str | None = None
+
     model_config = {"from_attributes": True}
 
 
@@ -263,3 +279,64 @@ class EarningsSummaryResponse(BaseModel):
 
     lifetime_payout: float
     completed_count: int
+
+
+# ---------------------------------------------------------------------------
+# Payouts (SVC-303)
+# ---------------------------------------------------------------------------
+
+
+class ProviderPayoutSummaryResponse(BaseModel):
+    """What the next transfer will actually send, and what the last one did.
+
+    Three money figures rather than one, because they genuinely differ and the
+    difference is the thing this ticket exists to explain:
+
+    * ``pending_amount`` is ``min(wallet_balance, booking_sum)`` — what the
+      payout will really send.
+    * ``gross_amount`` is what those jobs are worth before netting.
+    * ``balance_owed`` is set only when the provider owes the platform more than
+      it owes them, which happens after a run of cash work.
+
+    A provider told "₹3,480 coming" who receives ₹2,900 has been misled by their
+    own app, so the headline figure is the net one and the gap is named.
+    """
+
+    # Rupees throughout — this sits beside the earnings endpoints on screen,
+    # which speak rupees. The payout path speaks paise; the service converts.
+    pending_amount: float
+    gross_amount: float
+    balance_owed: float
+    # Jobs queued for the next payout. A count, not a money figure — it comes
+    # from ``_owed_filter`` while the amounts come from the wallet.
+    pending_booking_count: int
+    # Null, not zero, for a provider never paid: zero renders as "₹0 on —",
+    # where null lets the UI say "no payouts yet", which is true.
+    last_paid_at: datetime | None = None
+    last_paid_amount: float | None = None
+    # Whether a payout destination is on file. Lets the frontend render "we
+    # can't send this yet" without a second request.
+    payout_set: bool
+
+
+class ProviderPayoutEntry(BaseModel):
+    """One settlement cycle, as the provider sees it.
+
+    Deliberately carries no ``payout_audit_id``, RazorpayX id, admin or error.
+    A provider learns what happened to their money, never who moved it or
+    through which processor.
+    """
+
+    id: UUID
+    paid_at: datetime
+    amount: float
+    # The difference between what the provider expected and what arrived. A
+    # smaller transfer with no explanation is the complaint this field prevents.
+    cash_commission_deducted: float
+
+
+class ProviderPayoutListResponse(BaseModel):
+    entries: list[ProviderPayoutEntry]
+    total: int
+    page: int
+    per_page: int

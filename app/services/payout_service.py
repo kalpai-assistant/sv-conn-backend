@@ -216,6 +216,182 @@ class PayoutService:
             "per_page": per_page,
         }
 
+    # ------------------------------------------------------------------
+    # Provider-facing reads (SVC-303)
+    #
+    # Everything below answers "what is happening to *my* money" for the
+    # signed-in provider. Deliberately separate from the admin reads above:
+    # those surface the ledger as it lands, including who authorised a payout
+    # and which gateway id carried it. A provider learns what happened to
+    # their money, never who moved it or through what — see the outcome
+    # filter and the projections here.
+    # ------------------------------------------------------------------
+
+    async def get_provider_payout_summary(self, provider_id: UUID) -> dict:
+        """What a provider will actually be paid, and when they last were (SVC-303).
+
+        ## Why this is the wallet, not ``_owed_filter``
+
+        The obvious implementation — sum the bookings matching ``_owed_filter`` —
+        is wrong, and wrong in the direction that matters: it **overstates** what
+        the provider will receive, in two independent ways.
+
+        ``create_provider_payout`` pays ``min(wallet_balance, booking_sum)``, and
+        the wallet differs from the booking sum because:
+
+        1. **Cash commission is netted off.** On a cash job the provider collected
+           the full amount at the door, so the platform's 20% is a debt
+           (``CASH_COMMISSION``) that comes out of their next *online* transfer.
+           ₹2,000 of cash work means ₹400 less in the bank, with no failure and
+           nothing wrong.
+        2. **A T+1 settlement gate.** A ``BOOKING_COMPLETED`` credit only counts
+           once Razorpay has actually deposited that money with us
+           (``bookings.settled_at IS NOT NULL``). Paying before that would be from
+           platform float, which the RBI PA rules forbid. So a job completed an
+           hour ago is genuinely owed and genuinely not yet payable.
+
+        A provider told "₹3,480 coming" who receives ₹2,900 has been misled by
+        their own app. The whole point of this ticket is to close that gap, so the
+        headline figure has to be the one the payout will use.
+
+        ``pending_booking_count`` still comes from ``_owed_filter`` — that is a
+        count of *jobs queued for the next payout*, which is exactly what it
+        means, and it is not a money figure.
+
+        ## The rest
+
+        ``last_paid_*`` read ``settlement_statements``, not ``payout_audits``. An
+        audit row's ``outcome`` is RazorpayX's status at *creation* ("queued"),
+        never updated when the webhook later confirms the money landed —
+        ``handle_payout_webhook`` writes no audit row at all. ``SettlementStatement``
+        is the artifact built for this, with ``net_paid_paise`` being what actually
+        left our account.
+
+        Both are **null, not zero**, for a provider never paid: zero renders as
+        "₹0 on —", where null lets the UI say "no payouts yet", which is true.
+
+        No row locks — this renders a page. ``_pending_settlements`` takes them,
+        because it is about to spend money.
+        """
+        from app.services.ledger_service import wallet_balance_paise
+
+        # The figure the payout will actually use, capped the same way
+        # `create_provider_payout` caps it. Negative means the provider owes the
+        # platform more than it owes them; surfaced as its own field rather than
+        # clamped away, because "you owe us ₹200" is a fact they need.
+        wallet = await wallet_balance_paise(self.db, provider_id)
+
+        owed_stmt = select(
+            func.coalesce(func.sum(Booking.provider_payout + Booking.tip_amount), 0),
+            func.count(Booking.id),
+        ).where(Booking.provider_id == provider_id, *self._owed_filter())
+        booking_sum, pending_count = (await self.db.execute(owed_stmt)).one()
+        booking_sum_paise = to_paise(booking_sum)
+
+        payable_paise = max(0, min(wallet, booking_sum_paise))
+
+        last_stmt = (
+            select(SettlementStatement.created_at, SettlementStatement.net_paid_paise)
+            .where(
+                SettlementStatement.provider_id == provider_id,
+                SettlementStatement.net_paid_paise > 0,
+            )
+            .order_by(SettlementStatement.created_at.desc())
+            .limit(1)
+        )
+        last = (await self.db.execute(last_stmt)).first()
+
+        payout_method = (
+            await self.db.execute(
+                select(ProviderProfile.payout_method).where(ProviderProfile.user_id == provider_id)
+            )
+        ).scalar_one_or_none()
+
+        return {
+            # Rupees throughout — this sits beside the earnings endpoints on
+            # screen, which speak rupees. The payout path speaks paise; the
+            # conversion happens here, once.
+            "pending_amount": round(payable_paise / 100, 2),
+            "pending_booking_count": pending_count,
+            # What those jobs are worth before netting. The frontend shows the
+            # difference rather than making the provider discover it at the bank.
+            "gross_amount": round(float(booking_sum), 2),
+            # Positive only when the provider owes the platform — cash commission
+            # exceeding online earnings. Zero otherwise, never negative.
+            "balance_owed": round(max(0, -wallet) / 100, 2),
+            "last_paid_at": last.created_at if last is not None else None,
+            "last_paid_amount": (round(last.net_paid_paise / 100, 2) if last is not None else None),
+            # Lets the frontend render "we cannot send this yet" without a second
+            # request. A provider with money pending and no destination is the
+            # most actionable state on the screen.
+            "payout_set": payout_method is not None,
+        }
+
+    async def list_my_payouts(
+        self, provider_id: UUID, *, page: int = 1, per_page: int = 20
+    ) -> dict:
+        """A provider's own payout statement, newest first (SVC-303).
+
+        Reads ``settlement_statements`` — the row the module docstring calls "the
+        snapshot the provider actually saw" — rather than ``payout_audits``, for
+        the reason in :meth:`get_provider_payout_summary`: an audit row records an
+        *attempt* and its RazorpayX status at creation, never updated on success,
+        and includes internal retries and nightly reconciliation repairs. A
+        provider reading those raw would see several rows for one payment.
+
+        ``net_paid_paise > 0`` keeps this a list of money received. A cycle that
+        moved nothing produced a statement but not a payment, and a failed payout
+        belongs on the job it blocked — where the provider can act on it — not in
+        a statement that otherwise reads as money arriving.
+
+        Deliberately exposes no ``payout_audit_id``, gateway id or admin. A
+        provider learns what happened to their money, not who moved it or through
+        which processor.
+        """
+        where = (
+            SettlementStatement.provider_id == provider_id,
+            SettlementStatement.net_paid_paise > 0,
+        )
+
+        total = (
+            await self.db.execute(
+                select(func.count()).select_from(SettlementStatement).where(*where)
+            )
+        ).scalar_one()
+
+        rows = (
+            await self.db.execute(
+                select(
+                    SettlementStatement.id,
+                    SettlementStatement.created_at,
+                    SettlementStatement.net_paid_paise,
+                    SettlementStatement.cash_commission_deducted_paise,
+                )
+                .where(*where)
+                .order_by(SettlementStatement.created_at.desc())
+                .offset((page - 1) * per_page)
+                .limit(per_page)
+            )
+        ).all()
+
+        return {
+            "entries": [
+                {
+                    "id": row.id,
+                    "paid_at": row.created_at,
+                    "amount": round(row.net_paid_paise / 100, 2),
+                    # Surfaced because it is the difference between what the
+                    # provider expected and what arrived. A smaller transfer with
+                    # no explanation is the complaint this column prevents.
+                    "cash_commission_deducted": round(row.cash_commission_deducted_paise / 100, 2),
+                }
+                for row in rows
+            ],
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+        }
+
     async def estimate_pending_payout(self, provider_id: UUID) -> dict:
         """Booking count + net payable for a single provider's PENDING bookings.
 
