@@ -250,3 +250,16 @@ class EarningsResponse(BaseModel):
     total_payout: float
     completed_count: int
     bookings: list[EarningsBookingItem]
+
+
+class EarningsSummaryResponse(BaseModel):
+    """All-time totals, with no per-booking breakdown (SVC-275).
+
+    Deliberately two scalars. ``EarningsResponse`` carries one row per booking,
+    which is fine over a window and unbounded over a lifetime — Provider Home
+    would download every job a provider has ever completed to render a single
+    number.
+    """
+
+    lifetime_payout: float
+    completed_count: int

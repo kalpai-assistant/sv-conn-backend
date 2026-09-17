@@ -575,6 +575,61 @@ class ProviderService:
     # Earnings (SC-33)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _earned_filter() -> tuple:
+        """What counts as money a provider has **earned** — the single definition.
+
+        Deliberately distinct from ``PayoutService._owed_filter``, which answers a
+        different question: what the platform still has to *send*. The gap is cash.
+        A cash job is earned — the provider collected it in hand at the door — but
+        never owed, because paying it again would send them the money twice.
+
+        Reusing the payout filter here would be the tempting mistake: it looks like
+        the authoritative definition of provider money, and it is, for payouts. On
+        an earnings figure it would silently omit every cash job — understating what
+        the provider made, in the platform's favour, with nothing on screen to
+        explain the gap.
+
+        Shared by :meth:`get_earnings` and :meth:`get_earnings_summary` so a window
+        and the lifetime total cannot disagree about which bookings count.
+        """
+        return (
+            Booking.status == BookingStatus.COMPLETED,
+            Booking.payment_status != PaymentStatus.REFUNDED,
+        )
+
+    async def get_earnings_summary(self, provider_user_id: uuid.UUID) -> dict:
+        """Lifetime payout total and completed count — no per-booking breakdown.
+
+        Separate from :meth:`get_earnings` rather than a fourth ``range`` value,
+        because that method returns one row per booking. Over a window that is a
+        handful; over a lifetime it is every job the provider has ever done, and
+        Provider Home would download all of it to render a single number. This
+        returns two scalars whatever the history looks like.
+
+        No ``BookingStatusLog`` join, unlike the windowed query. That join exists
+        only to bucket a booking by the instant it completed, which a lifetime total
+        has no need for — and it is an inner join on ``to_status == COMPLETED``, so a
+        booking carrying two COMPLETED log rows would be counted **twice**. A
+        window hides that; a lifetime sum would show it as a wrong total.
+
+        Tips are included for the same reason they are in the windowed figure: a tip
+        is 100% provider-side (see ``Booking.tip_amount``).
+        """
+        stmt = select(
+            func.coalesce(func.sum(Booking.provider_payout + Booking.tip_amount), 0),
+            func.count(Booking.id),
+        ).where(Booking.provider_id == provider_user_id, *self._earned_filter())
+
+        total, count = (await self.db.execute(stmt)).one()
+        return {
+            # A provider with no completed jobs gets 0.0, not null — the row on
+            # Home reads "₹0" rather than rendering an empty space that looks
+            # like a failed fetch.
+            "lifetime_payout": round(float(total), 2),
+            "completed_count": count,
+        }
+
     async def get_earnings(
         self,
         provider_user_id: uuid.UUID,
@@ -637,8 +692,9 @@ class ProviderService:
                 & (BookingStatusLog.to_status == BookingStatus.COMPLETED.value),
             )
             .where(Booking.provider_id == provider_user_id)
-            .where(Booking.status == BookingStatus.COMPLETED)
-            .where(Booking.payment_status != PaymentStatus.REFUNDED)
+            # Shared with the lifetime summary, so a window and the all-time
+            # total cannot disagree about which bookings count as earned.
+            .where(*self._earned_filter())
             .where(BookingStatusLog.created_at >= start_utc)
             .order_by(BookingStatusLog.created_at.desc())
         )
