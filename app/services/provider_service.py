@@ -685,6 +685,16 @@ class ProviderService:
                 Booking.tip_amount,
                 service_names_subq.label("service_name"),
                 BookingStatusLog.created_at.label("completed_at"),
+                # SVC-303: where this job's money is. Plain columns on the
+                # booking — no extra join, so the cost of the query is
+                # unchanged. A per-job *paid date* would need a join onto
+                # payout_audits through settlement_payout_id, which is both
+                # unindexed and duplicated (a reconciled payout writes two
+                # rows sharing one payout_id), so it would double this
+                # window's total. The dates live on the settlement statement.
+                Booking.settlement_status,
+                Booking.payment_method,
+                Booking.settlement_failure_reason,
             )
             .join(
                 BookingStatusLog,
@@ -708,6 +718,9 @@ class ProviderService:
                 "completed_at": row.completed_at,
                 "payout_amount": row.payout,
                 "tip_amount": row.tip_amount,
+                "settlement_status": row.settlement_status,
+                "payment_method": row.payment_method,
+                "settlement_failure_reason": row.settlement_failure_reason,
             }
             for row in rows
         ]
