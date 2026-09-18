@@ -137,6 +137,30 @@ Rate limiting: 5 OTP attempts per phone per hour, tracked in Redis.
 
 5 services: `api`, `celery-worker`, `celery-beat`, `postgres` (PostGIS image), `redis`. Postgres requires the PostGIS extension — do not use a plain postgres image.
 
+### Beta DB (RDS, SVC-304)
+
+Beta backend runs on App Runner (`eazyserv-backend` + `eazyserv-worker`) in `ap-south-1`. Postgres moved from Neon to AWS RDS on 2026-09-18 after Neon's free-tier compute quota was exhausted (see SVC-304).
+
+- **Instance:** `eazyserv-beta-postgres` (PostgreSQL 16.15, db.t3.micro, gp3 20 GB, single-AZ)
+- **Endpoint:** `eazyserv-beta-postgres.cruawyqc2v1u.ap-south-1.rds.amazonaws.com:5432`
+- **DB / user:** `eazyserv` / `eazyserv_admin`
+- **Master password:** SSM SecureString `/eazyserv/beta/RDS_MASTER_PASSWORD`
+- **Connection URLs:** SSM `/eazyserv/beta/DATABASE_URL` (asyncpg, `?ssl=require`) and `/eazyserv/beta/SYNC_DATABASE_URL` (psycopg2, `?sslmode=require`)
+- **Networking:** publicly accessible, SG `eazyserv-beta-rds-sg` opens `5432/tcp` from `0.0.0.0/0`. Temporary — tightened via VPC Connector in the SVC-304 follow-up.
+- **Guardrails:** `DeletionProtection=True`, `StorageEncrypted=True`, `rds.force_ssl=1` (parameter group `eazyserv-beta-postgres16`), 7-day PITR, auto-minor-version-upgrade on.
+
+psql from a workstation:
+
+```bash
+export AWS_PROFILE=eazyserv AWS_DEFAULT_REGION=ap-south-1
+export PGPASSWORD=$(aws ssm get-parameter --name /eazyserv/beta/RDS_MASTER_PASSWORD \
+  --with-decryption --query 'Parameter.Value' --output text)
+psql -h eazyserv-beta-postgres.cruawyqc2v1u.ap-south-1.rds.amazonaws.com \
+     -U eazyserv_admin -d eazyserv
+```
+
+Run `alembic upgrade head` from `backend/` with `DATABASE_URL` + `SYNC_DATABASE_URL` set from the SSM params above. Deploys no longer auto-migrate (Neon shadow-branch path removed); `alembic check` in ci.yml catches missing migrations at PR time.
+
 ## Environment
 
 Copy `.env.example` to `.env`. Key variable groups: JWT secrets, OTP config, SMS provider (MSG91/Twilio), Razorpay keys, Firebase credentials, S3/MinIO, Google Maps API, AES encryption key, CORS origins, E2E bypass (staging only), observability (Sentry DSN, LOG_JSON, LOG_LEVEL, ENVIRONMENT).
