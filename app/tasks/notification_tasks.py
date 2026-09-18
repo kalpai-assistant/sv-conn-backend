@@ -270,6 +270,20 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                     return
                 stmt = eligible_providers_multi_stmt(service_ids, address.location)
                 recipients = db.execute(stmt).scalars().all()
+                # SVC-302: the observability half of SVC-276 / SVC-301. Without
+                # this line, "how many providers did we broadcast to" is not in
+                # any log — the only signal that leaves this task is
+                # ``booking.unbroadcastable`` on the count=0 tail. Emitting the
+                # count for every broadcast makes dispatch-tuning and
+                # eligibility-rule changes observable in CloudWatch without a DB
+                # bastion. Payload is booking_id + service_ids + count; nothing
+                # provider- or consumer-identifying rides along.
+                logger.info(
+                    "broadcast.recipients booking_id=%s service_ids=%s count=%d",
+                    booking.id,
+                    [str(s) for s in service_ids],
+                    len(recipients),
+                )
 
                 # SVC-254: persist the offer before pushing.
                 #
