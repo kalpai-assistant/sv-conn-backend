@@ -1,19 +1,16 @@
-# Deploy backend to beta (App Runner via ECR), with an optional pre-deploy
-# alembic upgrade gated on the merged PR carrying the `db-migrate` label.
+# Deploy backend to beta (App Runner via ECR).
 #
 # Auth via GitHub OIDC → assume `eazyserv-github-deploy` IAM role.
 #
 # Triggers:
-#   - push: main       → auto-deploy every merge. If the merge commit's PR
-#                        has the `db-migrate` label, run migrations first.
-#   - workflow_dispatch → manual bypass. Toggle `run_migration` to also run
-#                         alembic upgrade head before deploying.
+#   - push: main       → auto-deploy every merge.
+#   - workflow_dispatch → manual bypass.
 #
-# Ordering guarantee: migrate (if requested) always completes before the
-# ECR push, so App Runner never rolls new pods against an unmigrated schema.
-#
-# Failure guarantee: if migrate fails, the deploy step is skipped — old
-# code + old schema keeps serving. Loud alert, zero silent downtime.
+# Migrations: NOT run by this workflow (SVC-304 removed the Neon-based
+# shadow-branch pre-deploy). `alembic check` in ci.yml catches missing
+# migrations at PR time. Actual `alembic upgrade head` against beta RDS
+# is a manual step for now — see backend/CLAUDE.md for the psql/alembic
+# recipe.
 #
 # Concurrency: single group, no cancels. Two rapid merges queue.
 
@@ -27,11 +24,6 @@ on:
       - '.gitignore'
       - 'docs/**'
   workflow_dispatch:
-    inputs:
-      run_migration:
-        description: "Also run 'alembic upgrade head' before deploying"
-        type: boolean
-        default: false
 
 concurrency:
   group: deploy-beta
@@ -43,101 +35,7 @@ env:
   IMAGE_TAG: beta
 
 jobs:
-  # --------------------------------------------------------------------
-  # Look up the PR that produced this merge commit and inspect its labels.
-  # `should_migrate=true` iff the label is present (push path) OR the
-  # manual toggle was set (workflow_dispatch path).
-  # --------------------------------------------------------------------
-  detect_label:
-    runs-on: ubuntu-latest
-    # BOTH scopes needed. `commits/{sha}/pulls` requires
-    # `pull-requests: read` (returns PRs associated with a commit),
-    # and `gh pr view` also needs `contents: read`. Without these the
-    # step exits with `Resource not accessible by integration`,
-    # `should_migrate` defaults to false, and a labeled PR is silently
-    # deployed against an unmigrated schema — SVC-pricing (2026-08-20)
-    # merged this way and the migration had to be run by hand.
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      should_migrate: ${{ steps.check.outputs.should_migrate }}
-    steps:
-      - name: Determine whether to run migrations
-        id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "workflow_dispatch: honoring run_migration=${{ inputs.run_migration }}"
-            echo "should_migrate=${{ inputs.run_migration }}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # push path — find the PR the merge commit came from. Squash-merges
-          # produce one commit → one PR association; the API returns [] for
-          # direct-to-main pushes (no PR), in which case we skip migrations.
-          # NOTE: don't 2>/dev/null the gh api call — it hides permission
-          # errors, and a silent-skip on failure is exactly the bug we
-          # just paid for.
-          PR_NUMBER=$(gh api \
-            "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
-            --jq '.[0].number // empty')
-          if [ -z "$PR_NUMBER" ]; then
-            echo "No PR associated with ${{ github.sha }} — skipping migration."
-            echo "should_migrate=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          LABELS=$(gh pr view "$PR_NUMBER" \
-            --repo ${{ github.repository }} \
-            --json labels --jq '[.labels[].name] | join(",")')
-          echo "PR #$PR_NUMBER labels: $LABELS"
-          # Comma-wrap both sides so a partial name match ("db-migrate-later")
-          # doesn't false-positive.
-          if echo ",$LABELS," | grep -q ',db-migrate,'; then
-            echo "db-migrate label present → will run migrations."
-            echo "should_migrate=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "db-migrate label absent → skipping migration."
-            echo "should_migrate=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  # --------------------------------------------------------------------
-  # Call the reusable migration workflow. Only fires when detect_label
-  # says so. `alembic upgrade head` runs against the beta Neon DB.
-  # --------------------------------------------------------------------
-  migrate:
-    needs: detect_label
-    if: needs.detect_label.outputs.should_migrate == 'true'
-    permissions:
-      id-token: write
-      contents: read
-    uses: ./.github/workflows/migrate-beta.yml
-    with:
-      direction: upgrade
-      target: head
-
-  # --------------------------------------------------------------------
-  # Build the image and push to ECR. App Runner is configured with
-  # auto_deployments_enabled=true so pushing :beta triggers a rolling
-  # redeploy within 2-3 min.
-  #
-  # `if: always() && needs.migrate.result != 'failure' && ...` runs the
-  # deploy when:
-  #   - migrate succeeded         (result == 'success')
-  #   - migrate was skipped       (result == 'skipped'; no label present)
-  # and BLOCKS the deploy when:
-  #   - migrate failed
-  #   - migrate was cancelled
-  # `always()` is needed to override GHA's default "skip if any need was
-  # skipped" behaviour.
-  # --------------------------------------------------------------------
   deploy:
-    needs: [detect_label, migrate]
-    if: |
-      always()
-      && needs.migrate.result != 'failure'
-      && needs.migrate.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -195,10 +93,6 @@ jobs:
           for arn in "$BACKEND_ARN" "$WORKER_ARN"; do
             svc=$(echo "$arn" | awk -F/ '{print $2}')
             echo "::group::$svc — trigger"
-            # Small window so auto-deploy from the ECR push has a chance
-            # to fire before our explicit call; if it did, the tail here
-            # returns InvalidStateException, which we treat as "someone
-            # else already started the deploy we wanted."
             sleep 5
             if op=$(aws apprunner start-deployment --service-arn "$arn" \
                      --query 'OperationId' --output text 2>&1); then
@@ -241,8 +135,7 @@ jobs:
 
       - name: Summary
         run: |
-          echo "Migration ran: ${{ needs.detect_label.outputs.should_migrate }}"
-          echo "Image:         ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:beta"
-          echo "Git SHA:       ${{ github.sha }}"
+          echo "Image:   ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:beta"
+          echo "Git SHA: ${{ github.sha }}"
           echo ""
           echo "Both App Runner services confirmed RUNNING on this image."
