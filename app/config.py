@@ -210,6 +210,44 @@ class Settings(BaseSettings):
     # returns 501 and the /download page falls back to QR-code-only.
     SMS_DOWNLOAD_LINK_ENABLED: bool = False
 
+    # SVC-307: AI-based Aadhaar KYC verifier
+    # ---------------------------------------------------------------------
+    # Auth is Workload Identity Federation, not an API key: the App Runner
+    # instance-role AWS credentials are exchanged (via GCP STS) for a Google
+    # access token that impersonates the eazy-serv service account. The
+    # google-genai SDK does all of that transparently once
+    # ``GOOGLE_APPLICATION_CREDENTIALS`` points at the WIF config JSON, so
+    # this file only carries the knobs the service reads at request time.
+    #
+    # ``GCP_WIF_CONFIG_SSM_PARAM`` is the SSM path holding the WIF client-
+    # config JSON (plain String, not SecureString — URIs + audience refs
+    # only, not sensitive). ``app.main`` reads it on startup, writes to
+    # ``GCP_WIF_CONFIG_PATH``, and sets ``GOOGLE_APPLICATION_CREDENTIALS``.
+    # Empty string = skip the bootstrap and rely on the developer's local
+    # ADC (``gcloud auth application-default login``), which is what the
+    # test suite and local dev do.
+    GCP_WIF_CONFIG_SSM_PARAM: str = ""
+    GCP_WIF_CONFIG_PATH: str = "/tmp/gcp-wif-config.json"  # noqa: S108 — App Runner ephemeral
+    GCP_PROJECT_ID: str = "eazy-serv-509209"
+    GCP_LOCATION: str = "asia-south1"
+    GEMINI_MODEL: str = "gemini-3.8-flash"
+    # Kill switch for the auto-transition path. Read at request-handling
+    # time (see ``kyc_verifier.get_auto_approve_enabled``) so a flip on SSM
+    # doesn't need a redeploy — the same param lives at
+    # ``/eazyserv/beta/AI_KYC_AUTO_APPROVE``. Default False keeps beta safe:
+    # the AI annotates every submission, admin still clicks verify.
+    AI_KYC_AUTO_APPROVE: bool = False
+    AI_KYC_AUTO_APPROVE_SSM_PARAM: str = ""
+    # Deterministic UUID seeded by the SVC-307 migration; the verifier
+    # service stamps this into ``provider_profiles.kyc_reviewed_by`` on the
+    # auto-approve path. Exposed as a setting so no service references the
+    # literal string.
+    KYC_VERIFIER_BOT_USER_ID: str = "00000000-0000-0000-0000-000000000307"
+    # LLM call budget. 15s matches the ticket; the retry doubles the
+    # wall-clock ceiling to ~30s worst case, which still fits inside the
+    # submit_kyc request without offloading to Celery.
+    AI_KYC_LLM_TIMEOUT_SECONDS: float = 15.0
+
     # Observability (SVC-46)
     # Environment tag propagated to Sentry + log records. staging | production | dev.
     ENVIRONMENT: str = "dev"

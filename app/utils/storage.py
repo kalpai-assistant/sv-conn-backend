@@ -49,6 +49,21 @@ def upload_file(file_obj, key: str, content_type: str = "application/octet-strea
     return f"https://{settings.S3_BUCKET_NAME}.s3.amazonaws.com/{key}"
 
 
+def download_bytes(key: str) -> bytes:
+    """Read an S3 object into memory (SVC-307).
+
+    Used by the KYC verifier to score exactly the docs we stored, without
+    threading the raw bytes through two service methods. Small objects
+    only — Aadhaar images cap at 5 MB per the ``/providers/me/kyc``
+    validator — so an in-memory read is fine.
+    """
+    import io
+
+    buf = io.BytesIO()
+    _get_client().download_fileobj(settings.S3_BUCKET_NAME, key, buf)
+    return buf.getvalue()
+
+
 def delete_file(key: str) -> None:
     """Remove an object from the bucket."""
     _get_client().delete_object(Bucket=settings.S3_BUCKET_NAME, Key=key)
