@@ -118,7 +118,13 @@ class ProviderProfile(Base):
     is_online: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Relationships
-    user: Mapped["User"] = relationship("User", back_populates="provider_profile")
+    # ``foreign_keys=[user_id]`` because SVC-307 added a second FK to
+    # ``users`` (``kyc_reviewed_by``) — without this, SQLAlchemy can't
+    # decide which FK the ``user`` relationship should join on and refuses
+    # to initialise the mapper.
+    user: Mapped["User"] = relationship(
+        "User", back_populates="provider_profile", foreign_keys=[user_id]
+    )
 
     @property
     def service_area_lat(self) -> float | None:
