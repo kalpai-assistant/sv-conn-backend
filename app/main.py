@@ -30,6 +30,7 @@ from app.routers import (
     tracking,
     users,
 )
+from app.utils.gcp_wif import bootstrap_gcp_credentials
 
 settings = get_settings()
 
@@ -50,6 +51,16 @@ if settings.SENTRY_DSN:
         # Don't leak JWTs / request bodies into Sentry by default.
         send_default_pii=False,
     )
+
+# SVC-307: Vertex AI credentials for the KYC verifier. Reads the WIF client
+# config from SSM (plain String — URIs + audience refs only, not sensitive)
+# and points ADC at it. No-op when GOOGLE_APPLICATION_CREDENTIALS is already
+# set (dev) or when the SSM param isn't configured. Failure is logged and
+# non-fatal: the verifier itself falls back to a needs_review verdict.
+bootstrap_gcp_credentials(
+    ssm_param=settings.GCP_WIF_CONFIG_SSM_PARAM,
+    dest_path=settings.GCP_WIF_CONFIG_PATH,
+)
 
 
 @asynccontextmanager

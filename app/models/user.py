@@ -34,8 +34,14 @@ class User(Base):
     )
 
     # Relationships
+    # ``foreign_keys`` disambiguates: SVC-307 added a second FK from
+    # ``provider_profiles`` to ``users`` (``kyc_reviewed_by``), and without
+    # this SQLAlchemy can't decide which FK this relationship should join on.
     provider_profile: Mapped["ProviderProfile"] = relationship(
-        "ProviderProfile", back_populates="user", uselist=False
+        "ProviderProfile",
+        back_populates="user",
+        uselist=False,
+        foreign_keys="ProviderProfile.user_id",
     )
     addresses: Mapped[list["Address"]] = relationship("Address", back_populates="user")
     bookings_as_consumer: Mapped[list["Booking"]] = relationship(

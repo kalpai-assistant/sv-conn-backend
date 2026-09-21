@@ -207,6 +207,11 @@ class KYCDocsResponse(BaseModel):
     # Presigned S3 URLs; nil if the provider hasn't uploaded yet.
     aadhaar_url: str | None
     selfie_url: str | None
+    # SVC-307: full KYCVerdict payload from the AI verifier — extraction,
+    # flags, outcome, confidence, and raw LLM response for audit. Null on
+    # pre-SVC-307 submissions that were never scored, so the admin UI can
+    # distinguish "AI said needs review" from "AI never looked".
+    ai_verdict: dict | None = None
 
 
 class KYCQueueRow(BaseModel):

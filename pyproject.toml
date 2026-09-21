@@ -35,6 +35,12 @@ dependencies = [
     "setuptools>=75.0,<81",
     "sentry-sdk[fastapi]>=2.19,<3.0",
     "structlog>=24.4,<25.0",
+    # SVC-307: AI KYC verifier. google-genai talks to Vertex AI via WIF
+    # (ADC discovers the WIF config written to disk at boot from SSM);
+    # rapidfuzz does the local name-match cross-check that the LLM's
+    # judgement alone isn't reliable enough for.
+    "google-genai>=1.0,<2.0",
+    "rapidfuzz>=3.10,<4.0",
 ]
 
 [dependency-groups]

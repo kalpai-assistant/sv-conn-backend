@@ -3,7 +3,7 @@ Admin router: user management, booking oversight, and KYC approval.
 All endpoints require the "admin" role.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import get_db
 from app.dependencies import require_role
 from app.exceptions import BookingNotFound
@@ -73,10 +74,14 @@ async def deactivate_user(user_id: UUID, db: AsyncSession = Depends(get_db)):
 async def list_kyc_queue(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
-    kyc_status_filter: KYCStatus = Query(
-        KYCStatus.SUBMITTED,
+    status_filter: str = Query(
+        KYCStatus.SUBMITTED.value,
         alias="status",
-        description="Filter by KYC status. Default 'submitted' preserves the pre-SVC-298 shape.",
+        description=(
+            "Filter: one of the KYCStatus values (submitted/verified/rejected/pending), "
+            "OR the virtual value 'auto_approved' — profiles verified by the AI "
+            "verifier bot in the last 7 days (SVC-307), for the admin spot-check tab."
+        ),
     ),
     db: AsyncSession = Depends(get_db),
 ):
@@ -87,20 +92,58 @@ async def list_kyc_queue(
     pagination + response shape DRY. Rejected rows sort by most-recent review
     first (that's the useful order when hunting a specific past rejection);
     submitted rows keep oldest-first so the admin drains the queue FIFO.
+
+    SVC-307: ``?status=auto_approved`` is a virtual filter (not a KYCStatus
+    enum value) that SVC-308's frontend spot-check tab consumes — profiles
+    the AI verifier bot moved to VERIFIED in the last 7 days. Semantics:
+    ``kyc_status = VERIFIED AND kyc_reviewed_by = <bot_id> AND
+    kyc_reviewed_at > now() - 7d``. Sorted by most-recent-review first, same
+    as the rejected tab.
     """
-    order_col = (
-        ProviderProfile.kyc_reviewed_at.desc()
-        if kyc_status_filter == KYCStatus.REJECTED
-        else ProviderProfile.kyc_submitted_at.asc()
-    )
-    stmt = (
-        select(User, ProviderProfile)
-        .join(ProviderProfile, ProviderProfile.user_id == User.id)
-        .where(ProviderProfile.kyc_status == kyc_status_filter)
-        .order_by(order_col)
-        .offset((page - 1) * per_page)
-        .limit(per_page)
-    )
+    settings = get_settings()
+
+    if status_filter == "auto_approved":
+        # SVC-307 spot-check tab. Deliberately not a KYCStatus value — the
+        # profile IS verified; the filter is on who verified it.
+        bot_id = UUID(settings.KYC_VERIFIER_BOT_USER_ID)
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+        stmt = (
+            select(User, ProviderProfile)
+            .join(ProviderProfile, ProviderProfile.user_id == User.id)
+            .where(
+                ProviderProfile.kyc_status == KYCStatus.VERIFIED,
+                ProviderProfile.kyc_reviewed_by == bot_id,
+                ProviderProfile.kyc_reviewed_at > cutoff,
+            )
+            .order_by(ProviderProfile.kyc_reviewed_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+    else:
+        try:
+            kyc_status_filter = KYCStatus(status_filter)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Unknown status filter {status_filter!r}. Expected one of "
+                    f"{[s.value for s in KYCStatus]} or 'auto_approved'."
+                ),
+            ) from exc
+        order_col = (
+            ProviderProfile.kyc_reviewed_at.desc()
+            if kyc_status_filter == KYCStatus.REJECTED
+            else ProviderProfile.kyc_submitted_at.asc()
+        )
+        stmt = (
+            select(User, ProviderProfile)
+            .join(ProviderProfile, ProviderProfile.user_id == User.id)
+            .where(ProviderProfile.kyc_status == kyc_status_filter)
+            .order_by(order_col)
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+
     result = await db.execute(stmt)
     return [
         KYCQueueRow(

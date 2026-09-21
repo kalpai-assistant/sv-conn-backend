@@ -7,11 +7,16 @@ import asyncio
 import io
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Literal
+
+# SVC-307: type-only import so the ``verifier`` param signature can name the
+# class without pulling google-genai + ADC discovery into the module import
+# path (that would fail at test collection time when creds aren't wired).
+from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.exceptions import (
     AppException,
     DuplicateSubscription,
@@ -27,9 +32,13 @@ from app.models.booking_status_log import BookingStatusLog
 from app.models.provider_profile import KYCStatus, PayoutMethod, ProviderProfile
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.service import Service
+from app.models.user import User
 from app.utils import storage
 from app.utils.encryption import decrypt, encrypt
 from app.utils.geo import build_point_wkt, distance_expression, st_dwithin_filter
+
+if TYPE_CHECKING:
+    from app.services.kyc_verifier import KYCVerifier
 
 # Indian Standard Time — earnings windows are user-facing ("today", "this
 # week", "this month") so they must respect the user's local calendar boundary,
@@ -425,6 +434,7 @@ class ProviderService:
         selfie_bytes: bytes,
         selfie_content_type: str,
         selfie_ext: str,
+        verifier: "KYCVerifier | None" = None,
     ) -> ProviderProfile:
         """
         Upload KYC documents to S3 and mark the profile as SUBMITTED.
@@ -486,12 +496,104 @@ class ProviderService:
         }
         profile.kyc_status = KYCStatus.SUBMITTED
         profile.kyc_submitted_at = datetime.now(UTC)
-        # Clear any prior rejection notes so the admin UI doesn't surface stale ones.
+        # Clear any prior rejection notes / reviewer stamps so the admin UI
+        # doesn't surface stale ones from an earlier reject that this
+        # submission is trying to fix.
         profile.kyc_reviewed_at = None
         profile.kyc_rejection_reason = None
+        profile.kyc_reviewed_by = None
+        profile.kyc_ai_verdict = None
 
         await self.db.flush()
+
+        # SVC-307: score the submission with the AI verifier and (optionally)
+        # auto-transition. Runs after the S3 uploads succeed, on the same
+        # request thread — the LLM call is ~15s worst case, which fits in
+        # the submit_kyc request. The verifier itself never raises: on any
+        # LLM failure it returns a ``needs_review`` verdict flagged
+        # ``llm_unavailable``, so the submission still lands in the admin
+        # queue rather than 500'ing the provider.
+        await self._score_and_maybe_auto_approve(profile, verifier=verifier)
+        await self.db.flush()
         return profile
+
+    async def _score_and_maybe_auto_approve(
+        self,
+        profile: ProviderProfile,
+        *,
+        verifier: "KYCVerifier | None" = None,
+    ) -> None:
+        """Run the KYC verifier over the just-uploaded docs and apply outcome.
+
+        Extracted from ``submit_kyc`` so the auto-transition rule lives in one
+        place; passing an injected ``verifier`` keeps the unit tests off the
+        real Vertex client. See ``app.services.kyc_verifier`` for the LLM
+        call itself.
+        """
+        from app.services.kyc_verifier import (
+            KYCVerdict,
+            KYCVerifier,
+            get_auto_approve_enabled,
+        )
+
+        # Re-read the bytes from S3 so we score exactly what we stored — this
+        # is one round-trip on the submit path, in exchange for not carrying
+        # the raw bytes through two service methods. boto3 is sync → thread.
+        docs = profile.kyc_docs or {}
+        try:
+            front_bytes, back_bytes, selfie_bytes = await asyncio.gather(
+                asyncio.to_thread(storage.download_bytes, docs["aadhaar_front_key"]),
+                asyncio.to_thread(storage.download_bytes, docs["aadhaar_back_key"]),
+                asyncio.to_thread(storage.download_bytes, docs["selfie_key"]),
+            )
+        except Exception as exc:  # noqa: BLE001 — treated as verifier-unavailable
+            verdict = KYCVerdict(
+                outcome="needs_review",
+                confidence=0.0,
+                extracted={},
+                flags=["docs_unreadable"],
+                raw_response={"error": str(exc)},
+            )
+        else:
+            # Fetch stated name off the user row — the LLM cross-checks against
+            # this to catch aadhaar-under-a-different-name submissions. DOB
+            # isn't captured during onboarding today (no field on users), so
+            # the DOB check silently no-ops until that changes.
+            user = await self.db.get(User, profile.user_id)
+            stated_name = (user.name if user else "") or ""
+            v = verifier or KYCVerifier()
+            verdict = await v.verify(
+                front_bytes=front_bytes,
+                back_bytes=back_bytes,
+                selfie_bytes=selfie_bytes,
+                stated_name=stated_name,
+                stated_dob=None,
+            )
+
+        profile.kyc_ai_verdict = verdict.model_dump()
+
+        # Auto-transition is gated on: (1) the SSM flag being on AND
+        # (2) an ``auto_approve`` outcome. Rejects NEVER auto-transition —
+        # the ticket's cheap safety valve for LLM false negatives, so a
+        # reject verdict always lands in the admin queue with the flags
+        # visible rather than short-circuiting to REJECTED.
+        settings = get_settings()
+        if verdict.outcome == "auto_approve" and get_auto_approve_enabled():
+            profile.kyc_status = KYCStatus.VERIFIED
+            profile.kyc_reviewed_at = datetime.now(UTC)
+            profile.kyc_reviewed_by = uuid.UUID(settings.KYC_VERIFIER_BOT_USER_ID)
+            # Structured event so we can grep the audit trail for AI-driven
+            # transitions later — "who reviewed this" is answerable via the
+            # kyc_reviewed_by FK, but "why did the AI say auto_approve" needs
+            # the flags + confidence at the moment of decision.
+            import structlog
+
+            structlog.get_logger(__name__).info(
+                "kyc_ai_auto_approved",
+                user_id=str(profile.user_id),
+                confidence=verdict.confidence,
+                flags=verdict.flags,
+            )
 
     async def verify_kyc(self, user_id: uuid.UUID) -> ProviderProfile:
         """Admin-only: approve a provider's submitted KYC."""
@@ -569,6 +671,9 @@ class ProviderService:
             "kyc_rejection_reason": profile.kyc_rejection_reason,
             "aadhaar_url": aadhaar_url,
             "selfie_url": selfie_url,
+            # SVC-307: full AI verdict JSONB. Present when the submission was
+            # scored, None for pre-SVC-307 rows that were never scored.
+            "ai_verdict": profile.kyc_ai_verdict,
         }
 
     # ------------------------------------------------------------------

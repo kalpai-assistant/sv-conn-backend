@@ -103,11 +103,28 @@ class ProviderProfile(Base):
     kyc_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     kyc_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     kyc_rejection_reason: Mapped[str | None] = mapped_column(String(500))
+    # SVC-307: full KYCVerdict payload from the AI verifier, stored for audit
+    # + surfaced on the admin review page. Nullable — pre-SVC-307 profiles
+    # were never scored and a placeholder would misrepresent that on the UI.
+    kyc_ai_verdict: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # SVC-307: who moved this out of SUBMITTED. Populated by the auto-approve
+    # path with the verifier-bot's id; manual admin approvals may stamp it in
+    # a follow-up ticket. FK to users(id) with ON DELETE SET NULL so removing
+    # a deprecated bot row doesn't cascade-null profiles it has never touched.
+    kyc_reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
     is_online: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Relationships
-    user: Mapped["User"] = relationship("User", back_populates="provider_profile")
+    # ``foreign_keys=[user_id]`` because SVC-307 added a second FK to
+    # ``users`` (``kyc_reviewed_by``) — without this, SQLAlchemy can't
+    # decide which FK the ``user`` relationship should join on and refuses
+    # to initialise the mapper.
+    user: Mapped["User"] = relationship(
+        "User", back_populates="provider_profile", foreign_keys=[user_id]
+    )
 
     @property
     def service_area_lat(self) -> float | None:
