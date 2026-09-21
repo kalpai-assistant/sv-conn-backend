@@ -65,13 +65,15 @@ def upgrade() -> None:
     )
 
     # Idempotent seed — safe to re-run and safe against a prior manual insert
-    # of the same email/phone from a rehearsal DB.
+    # of the same email/phone from a rehearsal DB. Explicit ``::uuid`` cast on
+    # the bindparam because bindparam-through-sqlalchemy binds it as text and
+    # asyncpg refuses ``uuid = varchar`` without an explicit cast.
     op.execute(
         sa.text(
             """
             INSERT INTO users (id, phone, name, email, role, is_active, created_at, updated_at)
             VALUES (
-                :id,
+                CAST(:id AS uuid),
                 :phone,
                 :name,
                 :email,
@@ -93,7 +95,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        sa.text("DELETE FROM users WHERE id = :id").bindparams(
+        sa.text("DELETE FROM users WHERE id = CAST(:id AS uuid)").bindparams(
             id=str(KYC_VERIFIER_BOT_USER_ID)
         )
     )
