@@ -6,11 +6,20 @@
 #   - push: main       → auto-deploy every merge.
 #   - workflow_dispatch → manual bypass.
 #
-# Migrations: NOT run by this workflow (SVC-304 removed the Neon-based
-# shadow-branch pre-deploy). `alembic check` in ci.yml catches missing
-# migrations at PR time. Actual `alembic upgrade head` against beta RDS
-# is a manual step for now — see backend/CLAUDE.md for the psql/alembic
-# recipe.
+# Migrations: run by this workflow, but ONLY when the merged PR carried the
+# `db-migrate` label. The gate is deliberate — it makes the PR author decide
+# whether their change needs a migration, rather than running alembic against
+# beta on every merge.
+#
+# They run BEFORE App Runner rolls forward, so the schema is ready when the new
+# container boots, and a failed migration stops the deploy rather than leaving
+# code and schema disagreeing.
+#
+# `alembic check` in ci.yml still catches a *missing* migration at PR time;
+# this catches an *unapplied* one at deploy time. SVC-304 removed the Neon
+# shadow-branch step and took the whole migration step with it, which left
+# `alembic upgrade head` as a manual action nobody was reminded to perform —
+# PR #175 then deployed with its column missing from beta for ~20 hours.
 #
 # Concurrency: single group, no cancels. Two rapid merges queue.
 
@@ -82,6 +91,77 @@ jobs:
       #   2. Poll each service's latest op until SUCCEEDED (green) or
       #      FAILED / ROLLBACK_* (red). Workflow reflects reality.
       # ------------------------------------------------------------------
+      # Did the merged PR ask for a migration?
+      #
+      # Read off the label rather than inspecting alembic/versions/ for new
+      # files: a PR can add a revision it does not want applied yet (a
+      # long-running backfill, a change coordinated with a later deploy), and
+      # the label is where that intent is already expressed in this repo.
+      #
+      # `workflow_dispatch` has no associated PR, so it never migrates — a
+      # manual redeploy is for rolling the image, and silently applying a
+      # migration from it would be a surprise. Run alembic by hand for that.
+      - name: Check for db-migrate label
+        id: migrate-gate
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "not a push event — skipping migrations"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A merge commit maps to its PR; a direct push to main maps to none.
+          PR=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls"             --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -z "$PR" ]; then
+            echo "no PR for this commit — skipping migrations"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if gh pr view "$PR" --json labels --jq '.labels[].name' | grep -qx 'db-migrate'; then
+            echo "PR #$PR carries db-migrate — will run alembic upgrade head"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "PR #$PR has no db-migrate label — skipping migrations"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install uv
+        if: steps.migrate-gate.outputs.run == 'true'
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # Ordered before the App Runner deploy on purpose: if this fails the job
+      # stops here, and beta keeps serving the previous image against the
+      # schema it was written for. Rolling forward first would leave the new
+      # container reading columns that do not exist.
+      #
+      # DATABASE_URL comes from SSM via the OIDC role already assumed above —
+      # its `ssm-read-beta-db-urls` inline policy covers this parameter and the
+      # KMS decrypt. No static credentials.
+      #
+      # RDS is publicly accessible with 5432 open, so a GitHub-hosted runner
+      # reaches it directly; no VPC connector or self-hosted runner needed.
+      - name: Run alembic upgrade head against beta
+        if: steps.migrate-gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          uv python install 3.13
+          uv sync --frozen
+
+          DATABASE_URL=$(aws ssm get-parameter             --name /eazyserv/beta/DATABASE_URL             --with-decryption --query 'Parameter.Value' --output text)
+          echo "::add-mask::$DATABASE_URL"
+          export DATABASE_URL
+
+          echo "before: $(uv run alembic current 2>&1 | tail -1)"
+          uv run alembic upgrade head
+          echo "after:  $(uv run alembic current 2>&1 | tail -1)"
+
       - name: Trigger + wait for App Runner deploys
         env:
           BACKEND_ARN: arn:aws:apprunner:ap-south-1:018272776203:service/eazyserv-backend/7f383544153d4cf799fba30ced3ae033
