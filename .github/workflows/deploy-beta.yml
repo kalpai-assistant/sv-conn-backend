@@ -49,6 +49,11 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      # Required by the db-migrate gate below, which reads the merged PR's
+      # labels. Declaring ANY permissions block replaces the defaults, so this
+      # is not inherited — without it `gh api .../pulls` 403s and the gate
+      # silently concludes there is no PR.
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -112,14 +117,30 @@ jobs:
           fi
 
           # A merge commit maps to its PR; a direct push to main maps to none.
-          PR=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls"             --jq '.[0].number // empty' 2>/dev/null || true)
+          #
+          # Errors are NOT swallowed here. The first version wrapped this in
+          # `2>/dev/null || true`, which turned a 403 from a missing
+          # `pull-requests: read` permission into a silent "no PR" — the gate
+          # skipped a labelled migration and looked like it had worked.
+          # An API failure must fail the step, not quietly decide not to migrate.
+          if ! PULLS=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls"); then
+            echo "::error::Could not read PRs for ${{ github.sha }} — refusing to guess whether a migration was wanted"
+            exit 1
+          fi
+          PR=$(printf '%s' "$PULLS" | jq -r '.[0].number // empty')
+
           if [ -z "$PR" ]; then
             echo "no PR for this commit — skipping migrations"
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if gh pr view "$PR" --json labels --jq '.labels[].name' | grep -qx 'db-migrate'; then
+          if ! LABELS=$(gh pr view "$PR" --json labels --jq '.labels[].name'); then
+            echo "::error::Could not read labels on PR #$PR — refusing to guess"
+            exit 1
+          fi
+
+          if grep -qx 'db-migrate' <<< "$LABELS"; then
             echo "PR #$PR carries db-migrate — will run alembic upgrade head"
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
