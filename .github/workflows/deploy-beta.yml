@@ -179,6 +179,25 @@ jobs:
           echo "::add-mask::$DATABASE_URL"
           export DATABASE_URL
 
+          # `Settings` requires REDIS_URL and JWT_SECRET_KEY as well as
+          # DATABASE_URL, and alembic/env.py imports app.models -> app.database,
+          # which constructs it. Without these the step dies on a pydantic
+          # ValidationError before touching the database at all.
+          #
+          # Deliberately placeholders, not the real values:
+          #
+          #   * Nothing under alembic/ reads either one — migrations are DDL
+          #     against the connection alembic opens from DATABASE_URL.
+          #   * The deploy role's `ssm-read-beta-db-urls` policy does not grant
+          #     them, and widening it to hand a schema-migration job the JWT
+          #     signing key would be the wrong trade for a value it never uses.
+          #
+          # If a future migration genuinely needs one of these, that is the
+          # moment to extend the policy — not pre-emptively now.
+          export REDIS_URL="redis://localhost:6379/0"
+          export JWT_SECRET_KEY="unused-by-migrations"
+
+
           echo "before: $(uv run alembic current 2>&1 | tail -1)"
           uv run alembic upgrade head
           echo "after:  $(uv run alembic current 2>&1 | tail -1)"
