@@ -159,7 +159,35 @@ psql -h eazyserv-beta-postgres.cruawyqc2v1u.ap-south-1.rds.amazonaws.com \
      -U eazyserv_admin -d eazyserv
 ```
 
-Run `alembic upgrade head` from `backend/` with `DATABASE_URL` + `SYNC_DATABASE_URL` set from the SSM params above. Deploys no longer auto-migrate (Neon shadow-branch path removed); `alembic check` in ci.yml catches missing migrations at PR time.
+### Migrations on beta
+
+**Label your PR `db-migrate` and the deploy applies it for you.** `deploy-beta.yml`
+runs `alembic upgrade head` against beta RDS before App Runner rolls forward, so
+the schema is ready when the new container boots. No label, no migration — the
+gate is there to make you decide, not to guess from the diff.
+
+Two things follow from the ordering:
+
+- A failed migration **stops the deploy**. Beta keeps serving the previous image
+  against the schema it was written for, rather than booting new code onto a
+  schema that never changed.
+- A `workflow_dispatch` run **never migrates** — there is no PR to read a label
+  from, and a manual redeploy is for rolling the image. Run alembic by hand if
+  that is what you actually want.
+
+Forgetting the label is what bit PR #175: it merged, deployed, and left
+`kyc_ai_verdict` missing from beta for ~20 hours.
+
+Running it manually (rollback, a dispatch deploy, or a migration you held back):
+
+```bash
+export AWS_PROFILE=eazyserv AWS_DEFAULT_REGION=ap-south-1
+export DATABASE_URL=$(aws ssm get-parameter --name /eazyserv/beta/DATABASE_URL   --with-decryption --query 'Parameter.Value' --output text)
+uv run alembic upgrade head     # or `downgrade -1` to undo
+```
+
+`alembic check` in ci.yml is the other half of this: it catches a *missing*
+migration at PR time, where the deploy step catches an *unapplied* one.
 
 ## Environment
 
