@@ -38,52 +38,22 @@ from sqlalchemy.dialects.postgresql import UUID
 
 from alembic import op
 
+# Import the L1/L2 hierarchy from app.seed_data so this migration and
+# scripts/seed_categories.py share one source of truth (SVC-312). Editing
+# the tile list or L2 mapping now happens in one place; the migration's
+# own upgrade/downgrade behaviour is unchanged.
+from app.seed_data.l1_hierarchy import (
+    L1_TILES,
+    L2_TO_L1,
+    MISCELLANEOUS_L1_SLUG,
+    MISCELLANEOUS_L1_SORT_ORDER,
+)
+
 # revision identifiers, used by Alembic.
 revision: str = "f2b8d31c5a67"
 down_revision: str | None = "e8f21c4a9b73"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
-
-
-# Explicit list so downgrade knows exactly which rows it inserted. Editing the
-# names here after ship is fine; editing the slugs would orphan any frontend
-# code that references them by slug (currently: category-images.ts).
-_L1_ROWS = [
-    ("salon-spa-women", "Salon & Spa for Women", 0),
-    ("salon-massage-men", "Salon & Massage for Men", 1),
-    ("cleaning-pest-control", "Cleaning & Pest Control", 2),
-    ("ac-appliance-repair", "AC & Appliance Repair", 3),
-    ("electrician-plumber-carpenter", "Electrician, Plumber & Carpenter", 4),
-    ("painting-home-improvement", "Painting & Home Improvement", 5),
-    # 'miscellaneous' is intentionally NOT in this list — it exists already
-    # and gets promoted (sort_order bumped to 6). Deleting it in downgrade
-    # would blow up any booking that ever referenced a service inside it.
-]
-
-# Mapping of existing L2 slug → its new L1 parent slug. See SVC-286
-# "Proposed mapping". Two open questions in the ticket were resolved to:
-#   - Toilet Cleaning (Commercial) + Vehicle Wash → under Cleaning & Pest
-#     Control (no separate B2B tile yet).
-#   - Miscellaneous stays L1, not a bucket-with-sub-cat.
-_L2_PARENT = {
-    "salon-women": "salon-spa-women",
-    "nail-art": "salon-spa-women",
-    "salon-men": "salon-massage-men",
-    "massage": "salon-massage-men",
-    "cleaning": "cleaning-pest-control",
-    "pest-control": "cleaning-pest-control",
-    "toilet-cleaning-commercial": "cleaning-pest-control",
-    "vehicle-wash-cleaning": "cleaning-pest-control",
-    "ac": "ac-appliance-repair",
-    "appliances": "ac-appliance-repair",
-    "ro-purifier": "ac-appliance-repair",
-    "electrician": "electrician-plumber-carpenter",
-    "plumber": "electrician-plumber-carpenter",
-    "carpenter": "electrician-plumber-carpenter",
-    "furniture": "electrician-plumber-carpenter",
-    "painting": "painting-home-improvement",
-    "cctv-light-event": "painting-home-improvement",
-}
 
 
 def upgrade() -> None:
@@ -112,7 +82,7 @@ def upgrade() -> None:
     #    which Neon has enabled by default; if this ever runs against a raw
     #    Postgres without it, the migration will error loudly rather than
     #    silently produce NULLs.
-    for slug, name, sort_order in _L1_ROWS:
+    for slug, name, sort_order in L1_TILES:
         op.execute(
             sa.text(
                 "INSERT INTO categories (id, slug, name, sort_order, is_active, created_at) "
@@ -123,13 +93,17 @@ def upgrade() -> None:
     # 3. Bump miscellaneous sort_order so it lands after the 6 new L1s. Its id
     #    and slug are untouched — any provider_services / bookings that
     #    referenced services under it keep working.
-    op.execute("UPDATE categories SET sort_order = 6 WHERE slug = 'miscellaneous'")
+    op.execute(
+        sa.text("UPDATE categories SET sort_order = :sort_order WHERE slug = :slug").bindparams(
+            sort_order=MISCELLANEOUS_L1_SORT_ORDER, slug=MISCELLANEOUS_L1_SLUG
+        )
+    )
 
     # 4. Link the 17 existing L2 rows to their new L1 parent by slug. Wrapped
     #    as one statement per row rather than a CASE expression — Postgres
     #    query planner handles either the same, and this diff is easier to
     #    read at review time.
-    for l2_slug, l1_slug in _L2_PARENT.items():
+    for l2_slug, l1_slug in L2_TO_L1.items():
         op.execute(
             sa.text(
                 "UPDATE categories SET parent_id = "
@@ -144,14 +118,18 @@ def downgrade() -> None:
     # the column disappears out from under any lingering references.
 
     # 1. Restore miscellaneous sort_order to its pre-migration slot.
-    op.execute("UPDATE categories SET sort_order = 11 WHERE slug = 'miscellaneous'")
+    op.execute(
+        sa.text("UPDATE categories SET sort_order = 11 WHERE slug = :slug").bindparams(
+            slug=MISCELLANEOUS_L1_SLUG
+        )
+    )
 
     # 2. Delete the 6 seeded L1 rows. If any service or category was linked to
     #    them between upgrade and downgrade, the FK ON services.category_id
     #    (and the SET NULL on categories.parent_id) fires — the SET NULL
     #    handles the parent_id case; a service pointing at an L1 row would
     #    error and abort the downgrade, which is the correct loud failure.
-    slugs_to_delete = tuple(row[0] for row in _L1_ROWS)
+    slugs_to_delete = tuple(row[0] for row in L1_TILES)
     op.execute(
         sa.text("DELETE FROM categories WHERE slug IN :slugs").bindparams(
             sa.bindparam("slugs", slugs_to_delete, expanding=True)

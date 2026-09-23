@@ -27,9 +27,19 @@ celery -A app.tasks.celery_app beat --loglevel=info     # Scheduler
 ```bash
 uv run alembic revision --autogenerate -m "message"
 uv run alembic upgrade head
-uv run python scripts/seed_categories.py
 uv run python scripts/create_admin.py +91XXXXXXXXXX
 ```
+
+**Seed ritual (SVC-312).** Run in this exact order against a freshly-migrated DB. Each step is idempotent — re-runs are safe and never wipe categories.
+
+```bash
+uv run alembic upgrade head                             # creates the 7 L1 tiles
+uv run python scripts/seed_categories.py                # re-asserts hierarchy + parent_id links
+uv run python scripts/seed_services.py                  # curated service names
+uv run python scripts/seed_pricing_from_xlsx.py         # pricing + variants only, no category churn
+```
+
+`seed_pricing_from_xlsx.py` **refuses to run** unless the SVC-286 hierarchy (17 L2 slugs + `miscellaneous`) is already present — this is the guardrail added in SVC-312 so a re-run can never wipe the L1 tiles the way it did on 2026-09-23. The single source of truth for the tile list + L2→L1 mapping is `app/seed_data/l1_hierarchy.py`; both the migration and `seed_categories.py` import from there.
 
 **Lint & format** — Ruff does both. CI enforces both blocking:
 ```bash
