@@ -1,8 +1,15 @@
 """Reseed the catalogue from ``backend/EazyServ_Pune_Pricing_List.xlsx``.
 
-Wipes every row in categories/services/service_variants (and
-provider_services which FKs into services), then loads the workbook's
-18 categories → services → variants.
+Wipes every row in services/service_variants (and provider_services which
+FKs into services), then reloads services + variants under the categories
+that ``seed_categories.py`` already created. Categories themselves are
+never touched — the SVC-286 L1/L2 hierarchy is a precondition of this
+script, not something it manages (SVC-312).
+
+Refuses to run if the SVC-286 hierarchy isn't in place: seed_categories.py
+must have run against the current DB first. This prevents the historical
+bug (SVC-312) where a re-run wiped the 7 L1 tiles + parent_id links and
+left the home page rendering the flat 18-category list.
 
 The workbook has two shape families:
 
@@ -57,6 +64,7 @@ from app.models.category import Category  # noqa: E402
 from app.models.provider_service import ProviderService  # noqa: E402
 from app.models.service import Service  # noqa: E402
 from app.models.service_variant import ServiceVariant  # noqa: E402
+from app.seed_data.l1_hierarchy import L2_SLUGS, MISCELLANEOUS_L1_SLUG  # noqa: E402
 
 DEFAULT_XLSX = Path(__file__).resolve().parent.parent / "EazyServ_Pune_Pricing_List.xlsx"
 
@@ -257,12 +265,45 @@ def parse_workbook(path: Path) -> list[VariantRow]:
     return rows
 
 
-async def wipe_catalog(db, force: bool = False) -> None:
-    """DELETE all rows from categories/services/variants — after confirming
-    booking_items is empty (or ``--force``).
+async def ensure_hierarchy_seeded(db) -> dict[str, Category]:
+    """Precondition check for SVC-312: seed_categories.py must have run.
 
-    Order matters: variants → services → categories (FKs point the other
-    way). provider_services also references services, so it goes first.
+    Loads every category currently in the DB and confirms:
+
+    * All 17 SVC-286 L2 slugs are present.
+    * The ``miscellaneous`` L1 slug is present.
+
+    If anything is missing we bail out BEFORE the wipe. Rerunning the pricing
+    seed against a half-seeded DB used to wipe the L1 hierarchy on the way
+    in and leave the home page rendering the flat 18-category list; this
+    guard prevents a repeat.
+
+    Returns a slug → Category dict so the caller can look up FK targets
+    without re-querying.
+    """
+    all_cats = (await db.execute(select(Category))).scalars().all()
+    by_slug = {c.slug: c for c in all_cats}
+
+    required = L2_SLUGS | {MISCELLANEOUS_L1_SLUG}
+    missing = sorted(required - by_slug.keys())
+    if missing:
+        raise SystemExit(
+            "Refusing to reseed pricing: the SVC-286 category hierarchy isn't "
+            "in place yet. Missing slugs: "
+            f"{', '.join(missing)}. Run `uv run python scripts/seed_categories.py` "
+            "first (see backend/CLAUDE.md → Seed ritual, SVC-312)."
+        )
+    return by_slug
+
+
+async def wipe_services_and_variants(db, force: bool = False) -> None:
+    """DELETE all rows from services/variants (and provider_services which
+    FKs into services). Categories are deliberately preserved — the
+    SVC-286 hierarchy is a precondition of this script, not something it
+    manages (SVC-312).
+
+    Order matters: variants → services (FKs point the other way).
+    provider_services also references services, so it goes first.
     """
     bi_count = (await db.execute(select(func.count()).select_from(BookingItem))).scalar_one()
     if bi_count and not force:
@@ -273,32 +314,45 @@ async def wipe_catalog(db, force: bool = False) -> None:
     await db.execute(delete(ProviderService))
     await db.execute(delete(ServiceVariant))
     await db.execute(delete(Service))
-    await db.execute(delete(Category))
     await db.flush()
 
 
 async def seed(rows: list[VariantRow], force: bool = False) -> None:
-    """Insert every parsed row, upserting the (category, service) uniqueness."""
+    """Insert every parsed row, upserting the (category, service) uniqueness.
+
+    Categories are looked up by slug against the existing hierarchy
+    (seeded by ``scripts/seed_categories.py``) — this script neither
+    creates nor deletes categories (SVC-312).
+    """
     if not rows:
         raise SystemExit("Parsed zero rows from workbook — refusing to wipe an empty catalog.")
 
     async with AsyncSessionLocal() as db:
-        await wipe_catalog(db, force=force)
+        cats_by_slug = await ensure_hierarchy_seeded(db)
+        await wipe_services_and_variants(db, force=force)
 
-        # Materialise categories in insertion order preserving first
-        # appearance — makes UI sort_order match the sheet's category ordering.
+        # Map each workbook category name to its existing L2 (or Miscellaneous
+        # L1) row by slug. If a workbook row references a slug the DB doesn't
+        # know about — a new sheet name, or a typo — refuse loudly rather
+        # than silently dropping the pricing rows.
         categories_by_name: dict[str, Category] = {}
+        unknown_slugs: set[str] = set()
         for r in rows:
-            if r.category_name not in categories_by_name:
-                cat = Category(
-                    name=r.category_name,
-                    slug=_slug(r.category_name),
-                    is_active=True,
-                    sort_order=len(categories_by_name),
-                )
-                categories_by_name[r.category_name] = cat
-                db.add(cat)
-        await db.flush()
+            if r.category_name in categories_by_name:
+                continue
+            slug = _slug(r.category_name)
+            cat = cats_by_slug.get(slug)
+            if cat is None:
+                unknown_slugs.add(slug)
+                continue
+            categories_by_name[r.category_name] = cat
+        if unknown_slugs:
+            raise SystemExit(
+                "Workbook references categories not present in the DB: "
+                f"{', '.join(sorted(unknown_slugs))}. Either add them to "
+                "app.seed_data.l1_hierarchy + seed_categories.py or fix the "
+                "workbook sheet names."
+            )
 
         # Materialise services keyed by (category_id, name). The workbook
         # can name the same service under two categories (Bathroom deep
