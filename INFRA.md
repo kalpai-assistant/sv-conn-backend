@@ -11,6 +11,15 @@ the admin IP allowlist).
 bucket. Everything is separate between environments — no shared DB, cache,
 or credentials.
 
+> **Beta status (2026-09-25):** the beta environment currently runs on App
+> Runner rather than Fargate, in the default VPC rather than a dedicated
+> one, and shares a single region. SVC-305 closed the biggest divergence
+> from the target topology below — RDS is no longer publicly accessible and
+> only the App Runner VPC Connector's SG can reach `5432/tcp`. See the
+> "Beta DB" section in [CLAUDE.md](CLAUDE.md#beta-db-rds-svc-304--svc-305)
+> for the beta-specific IDs. The Fargate/ALB target topology below is what
+> production will look like when we cut over.
+
 ---
 
 ## The topology at a glance

@@ -147,26 +147,77 @@ Rate limiting: 5 OTP attempts per phone per hour, tracked in Redis.
 
 5 services: `api`, `celery-worker`, `celery-beat`, `postgres` (PostGIS image), `redis`. Postgres requires the PostGIS extension — do not use a plain postgres image.
 
-### Beta DB (RDS, SVC-304)
+### Beta DB (RDS, SVC-304 + SVC-305)
 
-Beta backend runs on App Runner (`eazyserv-backend` + `eazyserv-worker`) in `ap-south-1`. Postgres moved from Neon to AWS RDS on 2026-09-18 after Neon's free-tier compute quota was exhausted (see SVC-304).
+Beta backend runs on App Runner (`eazyserv-backend` + `eazyserv-worker`) in `ap-south-1`. Postgres moved from Neon to AWS RDS on 2026-09-18 after Neon's free-tier compute quota was exhausted (SVC-304). SVC-305 (2026-09-25) then tightened the networking off `0.0.0.0/0`.
 
 - **Instance:** `eazyserv-beta-postgres` (PostgreSQL 16.15, db.t3.micro, gp3 20 GB, single-AZ)
 - **Endpoint:** `eazyserv-beta-postgres.cruawyqc2v1u.ap-south-1.rds.amazonaws.com:5432`
 - **DB / user:** `eazyserv` / `eazyserv_admin`
 - **Master password:** SSM SecureString `/eazyserv/beta/RDS_MASTER_PASSWORD`
 - **Connection URLs:** SSM `/eazyserv/beta/DATABASE_URL` (asyncpg, `?ssl=require`) and `/eazyserv/beta/SYNC_DATABASE_URL` (psycopg2, `?sslmode=require`)
-- **Networking:** publicly accessible, SG `eazyserv-beta-rds-sg` opens `5432/tcp` from `0.0.0.0/0`. Temporary — tightened via VPC Connector in the SVC-304 follow-up.
+- **Networking (SVC-305):**
+  - `PubliclyAccessible=false` — endpoint DNS resolves to a private VPC IP only; unreachable from the public internet.
+  - Active SG: `eazyserv-beta-rds-private-sg` (`sg-0c137ea3e4a77fec4`). Only inbound rule: `5432/tcp` from `eazyserv-beta-apprunner-connector-sg` (`sg-0e56366ab2ca979ea`).
+  - App Runner path: both `eazyserv-backend` and `eazyserv-worker` run with `EgressType=VPC` on the App Runner VPC Connector `eazyserv-beta-connector` (`arn:aws:apprunner:ap-south-1:018272776203:vpcconnector/eazyserv-beta-connector/1/5037c8cd1d6343b89dc34e65834966e8`). The connector's ENIs live in the private subnets `subnet-0adc6a3d6e5db46f3` (ap-south-1a) + `subnet-06785632e8fac8e19` (ap-south-1b), which route `0.0.0.0/0` via NAT Gateway `nat-08bea3c684076467d` (EIP `13.235.105.131`) for outbound calls to Razorpay / MSG91 / FCM / SSM / etc.
+  - The RDS instance itself stayed in the `default` subnet group (AWS refuses cross-subnet-group swaps within the same VPC). Security posture is equivalent because RDS has no public IP and its SG only lets the connector SG in — the "public" subnet designation is only about the subnet's route table, which the RDS ENI never uses inbound.
+  - Retired: `eazyserv-beta-rds-sg` (`sg-0eb76db639631b190`) is detached from the instance and its `0.0.0.0/0:5432` rule was revoked. SG is kept empty as a paper trail; safe to delete after any followup review.
 - **Guardrails:** `DeletionProtection=True`, `StorageEncrypted=True`, `rds.force_ssl=1` (parameter group `eazyserv-beta-postgres16`), 7-day PITR, auto-minor-version-upgrade on.
 
-psql from a workstation:
+#### psql from a workstation (via SSM bastion tunnel)
+
+There is no direct path from a workstation to RDS anymore. Spin an ephemeral t4g.nano bastion in the private subnet, port-forward through SSM Session Manager, then terminate. Cost: ~₹0.60 / hour. Do NOT leave the bastion running.
 
 ```bash
 export AWS_PROFILE=eazyserv AWS_DEFAULT_REGION=ap-south-1
+
+# 1. One-time (first use): create an IAM role + instance profile that grants
+#    the bastion the SSM Session Manager permissions. If it already exists,
+#    skip — reuse the same role/profile every time.
+aws iam create-role --role-name eazyserv-beta-bastion-role --assume-role-policy-document '{
+  "Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' 2>/dev/null || true
+aws iam attach-role-policy --role-name eazyserv-beta-bastion-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore 2>/dev/null || true
+aws iam create-instance-profile --instance-profile-name eazyserv-beta-bastion-profile 2>/dev/null || true
+aws iam add-role-to-instance-profile --instance-profile-name eazyserv-beta-bastion-profile \
+  --role-name eazyserv-beta-bastion-role 2>/dev/null || true
+
+# 2. Launch a t4g.nano in a private subnet using the latest Amazon Linux 2023
+#    ARM AMI. Connector SG has no inbound but egress-all, which is fine —
+#    SSM connects outbound to the SSM endpoints via NAT.
+AMI=$(aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 \
+  --query 'Parameter.Value' --output text)
+INSTANCE=$(aws ec2 run-instances --image-id "$AMI" --instance-type t4g.nano \
+  --subnet-id subnet-0adc6a3d6e5db46f3 \
+  --security-group-ids sg-0e56366ab2ca979ea \
+  --iam-instance-profile Name=eazyserv-beta-bastion-profile \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=eazyserv-beta-bastion},{Key=env,Value=beta},{Key=purpose,Value=svc-305-psql-tunnel}]' \
+  --query 'Instances[0].InstanceId' --output text)
+echo "bastion instance: $INSTANCE"
+aws ec2 wait instance-running --instance-ids "$INSTANCE"
+# SSM registration takes an extra ~60s after "running"
+for i in $(seq 1 20); do
+  s=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$INSTANCE" \
+        --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)
+  echo "ssm ping: $s"
+  [ "$s" = "Online" ] && break
+  sleep 10
+done
+
+# 3. Port-forward RDS 5432 → localhost:15432 via Session Manager.
+#    Requires the Session Manager plugin locally:
+#      brew install --cask session-manager-plugin
+aws ssm start-session --target "$INSTANCE" \
+  --document-name AWS-StartPortForwardingSessionToRemoteHost \
+  --parameters host=eazyserv-beta-postgres.cruawyqc2v1u.ap-south-1.rds.amazonaws.com,portNumber=5432,localPortNumber=15432
+
+# 4. In a second terminal: psql to localhost:15432 as if it were RDS.
 export PGPASSWORD=$(aws ssm get-parameter --name /eazyserv/beta/RDS_MASTER_PASSWORD \
   --with-decryption --query 'Parameter.Value' --output text)
-psql -h eazyserv-beta-postgres.cruawyqc2v1u.ap-south-1.rds.amazonaws.com \
-     -U eazyserv_admin -d eazyserv
+psql "host=localhost port=15432 user=eazyserv_admin dbname=eazyserv sslmode=require"
+
+# 5. When done: Ctrl-C the port-forward, then terminate the bastion.
+aws ec2 terminate-instances --instance-ids "$INSTANCE"
 ```
 
 ### Migrations on beta
