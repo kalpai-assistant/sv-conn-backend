@@ -73,7 +73,8 @@ class AuthService:
             raise RateLimitExceeded(retry_after=retry)
 
         otp = generate_otp(settings.OTP_LENGTH)
-        logger.info(f"\n{'='*40}\n🔑 [MOCK OTP] Use {otp} to login for {phone}\n{'='*40}\n")
+        if settings.LOG_MOCK_OTP:
+            logger.info(f"\n{'='*40}\n🔑 [MOCK OTP] Use {otp} to login for {phone}\n{'='*40}\n")
         await store_otp(self.redis, phone, otp)
         try:
             await self._sms.send_otp(phone, otp)

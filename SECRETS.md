@@ -30,6 +30,7 @@ compromise or personnel change."
 | **S3 access keys** | Should be IAM role, not keys — see below | — | N/A (role-based) | KYC docs (highest PII sensitivity). |
 | **AWS root account** | Console credentials | 1Password, MFA-only | **Never used routinely** — break-glass only | Full AWS account takeover. Cannot recover. |
 | **Sentry DSN** | `SENTRY_DSN` | `/sc/{env}/SENTRY_DSN` | On project reset | Attacker can flood our Sentry quota. No PII. |
+| **Mock-OTP log flag** (SVC-265) | `LOG_MOCK_OTP` | `/sc/{env}/LOG_MOCK_OTP` (beta only) | N/A — **never true in real production** | If flipped on in real prod, any active OTP for any phone becomes readable to anyone with CloudWatch Logs read. Beta uses it because test numbers aren't real SIMs. |
 
 ---
 
