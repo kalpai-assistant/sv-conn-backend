@@ -203,6 +203,12 @@ class Settings(BaseSettings):
     E2E_TEST_PHONES: str = ""  # comma-separated E.164 numbers
     E2E_TEST_OTP: str = ""  # fixed OTP to store for those numbers
 
+    # SVC-265: log the OTP at INFO level when true. Convenience knob for
+    # beta/staging where the number under test may not be a real SIM. Never
+    # set in real production — the log will emit any active OTP for any
+    # phone that requested one.
+    LOG_MOCK_OTP: bool = False
+
     # SVC-161: SMS-a-link on the /download page. Off by default because
     # sending a URL via MSG91's OTP template produces "Your Eazyserv OTP is
     # https://..." — misleading. Flip on AFTER a dedicated MSG91 template
