@@ -27,27 +27,7 @@ else
     echo "entrypoint: FCM_CREDENTIALS_JSON not set — running in log-only push mode"
 fi
 
-# SVC-305: opt-in in-container alembic upgrade. deploy-beta.yml sets
-# RUN_MIGRATIONS_ON_BOOT=1 on the backend App Runner service only for the
-# deploy cycle that carries the db-migrate label, and clears it after. The
-# worker service never has it set, so this branch is a no-op there.
-#
-# We run alembic here rather than from the GitHub-hosted runner because
-# after SVC-305 lands, RDS is only reachable from inside the VPC — the
-# runner can't reach it. The App Runner container is inside the VPC by
-# construction.
-#
-# Failure here exits non-zero, App Runner marks the deploy failed and
-# rolls back — same "failed migration stops the deploy" invariant the
-# runner-side step provided.
-#
-# Concurrent instances on a rolling deploy: alembic locks alembic_version
-# during the upgrade transaction, so parallel runs serialise; the loser
-# sees head and exits 0.
-if [ "${RUN_MIGRATIONS_ON_BOOT:-0}" = "1" ]; then
-    echo "entrypoint: alembic upgrade head — starting"
-    alembic upgrade head
-    echo "entrypoint: alembic upgrade complete"
-fi
-
+# Alembic runs from docker-api-entrypoint.sh (the API service's CMD wrapper),
+# not from here — this outer entrypoint is shared with the Celery worker,
+# which must NOT migrate. See docker-api-entrypoint.sh + docker-worker-entrypoint.sh.
 exec "$@"

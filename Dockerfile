@@ -39,14 +39,18 @@ RUN pip install --no-cache-dir uv && uv sync --no-dev --frozen
 # App source.
 COPY . .
 
-# Entrypoint materialises any base64-encoded secrets from SSM-injected env
-# vars into on-disk files the app expects (currently just FCM_CREDENTIALS_JSON
-# → FCM_CREDENTIALS_PATH). See docker-entrypoint.sh comments.
-# docker-worker-entrypoint.sh is the CMD override the Celery worker App
-# Runner service passes as StartCommand (SVC-228) — chmod both here so
-# either can be exec'd from the outer entrypoint.
-RUN chmod +x /code/docker-entrypoint.sh /code/docker-worker-entrypoint.sh
+# Entrypoints:
+#  - docker-entrypoint.sh (ENTRYPOINT): materialises base64-encoded secrets
+#    from SSM-injected env vars into on-disk files (currently just
+#    FCM_CREDENTIALS_JSON → FCM_CREDENTIALS_PATH), then execs $@.
+#  - docker-api-entrypoint.sh (default CMD wrapper, SVC-305): runs
+#    `alembic upgrade head` on the API container's boot, then execs uvicorn.
+#  - docker-worker-entrypoint.sh: CMD override the Celery worker App Runner
+#    service passes as ImageConfiguration.StartCommand (SVC-228). Does NOT
+#    run alembic — see its header for the rationale.
+# Chmod all three so any can be exec'd from the outer entrypoint.
+RUN chmod +x /code/docker-entrypoint.sh /code/docker-api-entrypoint.sh /code/docker-worker-entrypoint.sh
 ENTRYPOINT ["/code/docker-entrypoint.sh"]
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/code/docker-api-entrypoint.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
