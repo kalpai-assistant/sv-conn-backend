@@ -222,33 +222,46 @@ aws ec2 terminate-instances --instance-ids "$INSTANCE"
 
 ### Migrations on beta
 
-**Label your PR `db-migrate` and the deploy applies it for you.** `deploy-beta.yml`
-runs `alembic upgrade head` against beta RDS before App Runner rolls forward, so
-the schema is ready when the new container boots. No label, no migration — the
-gate is there to make you decide, not to guess from the diff.
+**Commit the migration, merge, and the API container runs it on boot.**
+`docker-api-entrypoint.sh` runs `alembic upgrade head` unconditionally
+every time the backend App Runner container starts. Alembic is idempotent
+— when the schema is already at HEAD, it's a ~1-second no-op — so this is
+safe on every deploy, every scale-up, every restart.
 
-Two things follow from the ordering:
+Only the API service migrates. The Celery worker uses a different CMD
+(`docker-worker-entrypoint.sh`) that never touches alembic, deliberately
+— see that file's header for the "don't add it for symmetry" note.
 
-- A failed migration **stops the deploy**. Beta keeps serving the previous image
-  against the schema it was written for, rather than booting new code onto a
-  schema that never changed.
-- A `workflow_dispatch` run **never migrates** — there is no PR to read a label
-  from, and a manual redeploy is for rolling the image. Run alembic by hand if
-  that is what you actually want.
+Rollback story: a failed `alembic upgrade head` exits the entrypoint
+non-zero, App Runner marks the deploy failed and auto-rolls back to the
+previous image. Beta keeps serving the old code against its own schema —
+same "failed migration stops the deploy" invariant we had before SVC-305.
 
-Forgetting the label is what bit PR #175: it merged, deployed, and left
-`kyc_ai_verdict` missing from beta for ~20 hours.
+The `db-migrate` label is still required on any PR that adds a migration
+file (enforced by `migration-label-check` in `ci.yml`). It has no runtime
+effect anymore — the container always migrates on boot — but it forces
+the human to confirm the schema change is intentional. Forgetting to
+apply a schema change is what bit PR #175 (`kyc_ai_verdict` missing from
+beta for ~20 hours); the label + on-boot alembic together make both
+"missing migration" and "unapplied migration" fail loudly.
 
-Running it manually (rollback, a dispatch deploy, or a migration you held back):
+**Manual alembic (rollbacks, out-of-band schema surgery):** you cannot
+reach RDS from a workstation directly anymore (SVC-305 tightened it to
+the App Runner connector SG only). Use the SSM-bastion recipe from the
+"Beta DB (RDS, SVC-304 + SVC-305)" section above to tunnel 5432 through,
+then use `ALEMBIC_DATABASE_URL` (psycopg2, `?sslmode=require`) to point
+alembic at the tunnel:
 
 ```bash
-export AWS_PROFILE=eazyserv AWS_DEFAULT_REGION=ap-south-1
-export DATABASE_URL=$(aws ssm get-parameter --name /eazyserv/beta/DATABASE_URL   --with-decryption --query 'Parameter.Value' --output text)
-uv run alembic upgrade head     # or `downgrade -1` to undo
+export ALEMBIC_DATABASE_URL=$(aws ssm get-parameter --name /eazyserv/beta/SYNC_DATABASE_URL \
+  --with-decryption --query 'Parameter.Value' --output text \
+  | sed 's|@eazyserv-beta-postgres[^/]*|@localhost:15432|')
+uv run alembic downgrade -1      # or `upgrade <revision>` for a specific target
 ```
 
-`alembic check` in ci.yml is the other half of this: it catches a *missing*
-migration at PR time, where the deploy step catches an *unapplied* one.
+`alembic check` in ci.yml catches a *missing* migration at PR time; the
+on-boot alembic + App Runner auto-rollback catches an *unapplied* one at
+deploy time.
 
 ## Environment
 

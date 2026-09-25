@@ -194,6 +194,8 @@ jobs:
             echo "OK — db-migrate label present."
           else
             echo "::error::This PR adds a new alembic migration but is missing the 'db-migrate' label."
-            echo "::error::Add the label to have 'alembic upgrade head' run on merge (deploy-beta.yml)."
+            echo "::error::alembic runs unconditionally on API-container boot after merge (docker-api-entrypoint.sh),"
+            echo "::error::but the label is still required as a human intent flag — if the schema change wasn't intentional,"
+            echo "::error::pull the migration file. If it was intentional, add the label so the deploy owner is aware."
             exit 1
           fi

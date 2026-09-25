@@ -6,6 +6,16 @@
 # FCM credentials — so we don't repeat that step here. The image
 # entrypoint's `exec "$@"` hands off to this script.
 #
+# NO ALEMBIC HERE (SVC-305). Only the API container's CMD wrapper
+# (docker-api-entrypoint.sh) runs `alembic upgrade head`. Do not add
+# an alembic call to this script "for symmetry": the worker and the
+# API are the same image, they scale independently, and having both
+# migrate on boot would put two `alembic upgrade head` calls in a
+# race on every rolling deploy. Alembic serialises via its version
+# table so the race is technically safe, but it's noise + confusing
+# logs + a second surface for migration failures to trip on. The API
+# service is the single point of migration by design.
+#
 # App Runner requires an HTTP port even for background workers (its
 # health probe hits /health, failing probes restart the service). We
 # run BOTH the celery worker + beat AND a tiny uvicorn health server

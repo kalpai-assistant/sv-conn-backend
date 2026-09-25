@@ -6,30 +6,30 @@
 #   - push: main       → auto-deploy every merge.
 #   - workflow_dispatch → manual bypass.
 #
-# Migrations: run inside the App Runner container at boot, but ONLY when the
-# merged PR carried the `db-migrate` label. The gate is deliberate — it makes
-# the PR author decide whether their change needs a migration, rather than
-# running alembic against beta on every merge.
+# Migrations: run unconditionally inside the API container at boot — see
+# docker-api-entrypoint.sh. Idempotent (alembic no-ops when the schema is
+# already at HEAD), so this workflow does nothing migration-specific: the
+# image is built + pushed, App Runner rolls forward, and the new API
+# container calls `alembic upgrade head` on start. A failed migration
+# exits the entrypoint non-zero, App Runner marks the deploy failed and
+# auto-rolls back — same "failed migration stops the deploy" invariant
+# the runner-side alembic step provided before SVC-305.
 #
-# The mechanics: this workflow flips a RUN_MIGRATIONS_ON_BOOT=1 runtime env
-# var on the backend App Runner service before rolling forward. The container
-# entrypoint (docker-entrypoint.sh) checks it and runs `alembic upgrade head`
-# before uvicorn starts. A failed migration exits the entrypoint non-zero,
-# App Runner marks the deploy failed and rolls back — same invariant as
-# before: failed migration stops the deploy rather than leaving code and
-# schema disagreeing. The env var is cleared after the deploy completes so
-# a plain redeploy of an unchanged image does not re-run alembic (SVC-305).
+# Why in-container: after SVC-305 moved RDS onto private ingress
+# (5432/tcp only from the App Runner connector SG), a GitHub-hosted
+# runner cannot reach beta RDS anymore. The App Runner container reaches
+# it via the VPC Connector `eazyserv-beta-connector`.
 #
-# Why in-container: after SVC-305 moves RDS onto private subnets, a
-# GitHub-hosted runner cannot reach 5432 anymore. The App Runner container
-# runs inside the VPC via the eazyserv-beta-connector VPC Connector, so it
-# has the only path to RDS that this workflow can drive without new
-# self-hosted-runner infra.
+# The `db-migrate` label check lives in ci.yml — it fails a PR that adds
+# an alembic revision but forgot the label. Runtime effect is nil now
+# (the container always migrates), but the label still forces the human
+# to think about whether the schema change is intentional and to be
+# ready if it fails.
 #
-# `alembic check` in ci.yml still catches a *missing* migration at PR time;
-# this catches an *unapplied* one at deploy time. PR #175 previously deployed
-# with its column missing from beta for ~20 hours before the label + gate
-# existed.
+# `alembic check` in ci.yml catches a *missing* migration at PR time;
+# the on-boot alembic + App Runner rollback catches an *unapplied* one
+# at deploy time. PR #175 previously deployed with its column missing
+# from beta for ~20 hours before either gate existed.
 #
 # Concurrency: single group, no cancels. Two rapid merges queue.
 
@@ -59,11 +59,6 @@ jobs:
     permissions:
       id-token: write
       contents: read
-      # Required by the db-migrate gate below, which reads the merged PR's
-      # labels. Declaring ANY permissions block replaces the defaults, so this
-      # is not inherited — without it `gh api .../pulls` 403s and the gate
-      # silently concludes there is no PR.
-      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -77,136 +72,6 @@ jobs:
       - name: Log in to Amazon ECR
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
-
-      # Did the merged PR ask for a migration?
-      #
-      # Read off the label rather than inspecting alembic/versions/ for new
-      # files: a PR can add a revision it does not want applied yet (a
-      # long-running backfill, a change coordinated with a later deploy), and
-      # the label is where that intent is already expressed in this repo.
-      #
-      # `workflow_dispatch` has no associated PR, so it never migrates — a
-      # manual redeploy is for rolling the image, and silently applying a
-      # migration from it would be a surprise. Run alembic by hand for that.
-      #
-      # Runs BEFORE the image build so the env-var flip and the image push
-      # sequence cleanly — see the "Set RUN_MIGRATIONS_ON_BOOT" step below.
-      - name: Check for db-migrate label
-        id: migrate-gate
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" != "push" ]; then
-            echo "not a push event — skipping migrations"
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # A merge commit maps to its PR; a direct push to main maps to none.
-          #
-          # Errors are NOT swallowed here. The first version wrapped this in
-          # `2>/dev/null || true`, which turned a 403 from a missing
-          # `pull-requests: read` permission into a silent "no PR" — the gate
-          # skipped a labelled migration and looked like it had worked.
-          # An API failure must fail the step, not quietly decide not to migrate.
-          if ! PULLS=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls"); then
-            echo "::error::Could not read PRs for ${{ github.sha }} — refusing to guess whether a migration was wanted"
-            exit 1
-          fi
-          PR=$(printf '%s' "$PULLS" | jq -r '.[0].number // empty')
-
-          if [ -z "$PR" ]; then
-            echo "no PR for this commit — skipping migrations"
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if ! LABELS=$(gh pr view "$PR" --json labels --jq '.labels[].name'); then
-            echo "::error::Could not read labels on PR #$PR — refusing to guess"
-            exit 1
-          fi
-
-          if grep -qx 'db-migrate' <<< "$LABELS"; then
-            echo "PR #$PR carries db-migrate — RUN_MIGRATIONS_ON_BOOT will be set on backend"
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "PR #$PR has no db-migrate label — skipping migrations"
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ------------------------------------------------------------------
-      # SVC-305: alembic runs inside the App Runner container at boot,
-      # gated on RUN_MIGRATIONS_ON_BOOT=1 (see docker-entrypoint.sh). The
-      # GitHub-hosted runner cannot reach beta RDS once 0.0.0.0/0 is
-      # revoked from the RDS SG.
-      #
-      # Sequence for a db-migrate deploy:
-      #   1. Set RUN_MIGRATIONS_ON_BOOT=1 on the backend service. This
-      #      triggers a deploy of the CURRENT :beta image, which will
-      #      execute `alembic upgrade head` at boot — a no-op because the
-      #      schema is already at head for the current code. Wait for it.
-      #   2. Build + push new :beta image. Auto-deploy fires and pulls the
-      #      new image with the env var still set → runs alembic and
-      #      upgrades to the new revision. The "Trigger + wait" step
-      #      polls it to SUCCEEDED (or piggy-backs on the auto-deploy).
-      #   3. Verify "alembic upgrade complete" appears in the backend
-      #      application log for the just-completed deploy. Missing line
-      #      means the entrypoint didn't hit the gated branch → fail.
-      #   4. Clear RUN_MIGRATIONS_ON_BOOT from the backend service. This
-      #      triggers a plain redeploy without the env var so a future
-      #      workflow_dispatch or unlabelled push doesn't re-run alembic.
-      #
-      # Cleanup runs with `if: always()` so a failed migration deploy
-      # still clears the env var and doesn't leave the service configured
-      # to re-migrate on the next redeploy.
-      # ------------------------------------------------------------------
-      - name: Set RUN_MIGRATIONS_ON_BOOT=1 on backend + wait
-        if: steps.migrate-gate.outputs.run == 'true'
-        env:
-          BACKEND_ARN: arn:aws:apprunner:ap-south-1:018272776203:service/eazyserv-backend/7f383544153d4cf799fba30ced3ae033
-        run: |
-          set -euo pipefail
-
-          # update-service refuses if the service is mid-deploy. Wait for it
-          # to settle before we mutate the source config.
-          echo "backend: waiting for RUNNING before update-service"
-          for i in $(seq 1 60); do
-            s=$(aws apprunner describe-service --service-arn "$BACKEND_ARN" --query 'Service.Status' --output text)
-            echo "  $(date -u +%H:%M:%S) status=$s"
-            [ "$s" = "RUNNING" ] && break
-            sleep 15
-          done
-
-          # Merge RUN_MIGRATIONS_ON_BOOT=1 into the existing SourceConfiguration
-          # (RuntimeEnvironmentVariables and RuntimeEnvironmentSecrets are a
-          # full replace inside ImageConfiguration, so we fetch + edit).
-          CUR=$(aws apprunner describe-service --service-arn "$BACKEND_ARN" --query 'Service.SourceConfiguration' --output json)
-          NEW=$(printf '%s' "$CUR" | jq '.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables += {"RUN_MIGRATIONS_ON_BOOT":"1"}')
-
-          op=$(aws apprunner update-service --service-arn "$BACKEND_ARN" \
-                 --source-configuration "$NEW" \
-                 --query 'OperationId' --output text)
-          echo "backend: env-set update-service op=$op"
-
-          echo "=== waiting for env-set deploy (max ~15 min) ==="
-          for i in $(seq 1 60); do
-            status=$(aws apprunner list-operations --service-arn "$BACKEND_ARN" \
-                      --max-results 5 \
-                      --query "OperationSummaryList[?Id=='$op'].Status | [0]" \
-                      --output text)
-            echo "$(date -u +%H:%M:%S) op $op: $status"
-            case "$status" in
-              SUCCEEDED) echo "backend env-set: green"; break ;;
-              FAILED|ROLLBACK_FAILED|ROLLBACK_SUCCEEDED)
-                echo "::error::backend env-set $status"; exit 1 ;;
-            esac
-            sleep 15
-          done
-          if [ "$status" != "SUCCEEDED" ]; then
-            echo "::error::backend env-set deploy timed out after 15 min in status $status"
-            exit 1
-          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -237,16 +102,11 @@ jobs:
       #      FAILED / ROLLBACK_* (red). Workflow reflects reality.
       # ------------------------------------------------------------------
       - name: Trigger + wait for App Runner deploys
-        id: trigger-wait
         env:
           BACKEND_ARN: arn:aws:apprunner:ap-south-1:018272776203:service/eazyserv-backend/7f383544153d4cf799fba30ced3ae033
           WORKER_ARN: arn:aws:apprunner:ap-south-1:018272776203:service/eazyserv-worker/7b356f4c329243a5a2208c2bb8713e92
         run: |
           set -euo pipefail
-
-          # Capture a window-start timestamp for the alembic-log verification
-          # step below so it only searches logs from this deploy forward.
-          echo "log_window_start_ms=$(( $(date +%s) * 1000 ))" >> "$GITHUB_OUTPUT"
 
           declare -A ops
           for arn in "$BACKEND_ARN" "$WORKER_ARN"; do
@@ -292,88 +152,10 @@ jobs:
             echo "::endgroup::"
           done
 
-      # Confirms the entrypoint actually hit the gated alembic branch on the
-      # new image. Absence of the line means the env-var flip didn't take, or
-      # the container was rolled with the old image — either way a silent
-      # "code deployed, schema didn't" bug.
-      - name: Verify alembic ran in-container
-        if: steps.migrate-gate.outputs.run == 'true'
-        env:
-          LOG_GROUP: /aws/apprunner/eazyserv-backend/7f383544153d4cf799fba30ced3ae033/application
-          START_MS: ${{ steps.trigger-wait.outputs.log_window_start_ms }}
-        run: |
-          set -euo pipefail
-          echo "grepping $LOG_GROUP from START_MS=$START_MS for 'alembic upgrade complete'"
-          # Give CloudWatch a beat to flush the tail of the deploy's log lines.
-          sleep 20
-          n=$(aws logs filter-log-events \
-                --log-group-name "$LOG_GROUP" \
-                --start-time "$START_MS" \
-                --filter-pattern '"alembic upgrade complete"' \
-                --query 'length(events)' --output text)
-          echo "matches=$n"
-          if [ "$n" = "0" ]; then
-            echo "::error::migrations were requested but 'alembic upgrade complete' never appeared in the backend log after the deploy — the entrypoint did not run alembic on the new image"
-            exit 1
-          fi
-
-      - name: Clear RUN_MIGRATIONS_ON_BOOT on backend + wait
-        # if: always() so a failed migration deploy still cleans up the env
-        # var — otherwise the next unrelated push would re-run alembic on boot.
-        if: always() && steps.migrate-gate.outputs.run == 'true'
-        env:
-          BACKEND_ARN: arn:aws:apprunner:ap-south-1:018272776203:service/eazyserv-backend/7f383544153d4cf799fba30ced3ae033
-        run: |
-          set -euo pipefail
-
-          # Wait for whatever op is currently in flight (successful deploy,
-          # rollback, whatever) before mutating the source config.
-          echo "backend: waiting for RUNNING before cleanup update-service"
-          for i in $(seq 1 60); do
-            s=$(aws apprunner describe-service --service-arn "$BACKEND_ARN" --query 'Service.Status' --output text)
-            echo "  $(date -u +%H:%M:%S) status=$s"
-            [ "$s" = "RUNNING" ] && break
-            sleep 15
-          done
-
-          CUR=$(aws apprunner describe-service --service-arn "$BACKEND_ARN" --query 'Service.SourceConfiguration' --output json)
-          # Idempotent: if the key isn't there, del is a no-op and update-service
-          # sees no diff → InvalidRequestException. Skip the API call in that case.
-          has=$(printf '%s' "$CUR" | jq -r '.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables.RUN_MIGRATIONS_ON_BOOT // empty')
-          if [ -z "$has" ]; then
-            echo "backend: RUN_MIGRATIONS_ON_BOOT already absent — nothing to clear"
-            exit 0
-          fi
-          NEW=$(printf '%s' "$CUR" | jq 'del(.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables.RUN_MIGRATIONS_ON_BOOT)')
-
-          op=$(aws apprunner update-service --service-arn "$BACKEND_ARN" \
-                 --source-configuration "$NEW" \
-                 --query 'OperationId' --output text)
-          echo "backend: env-clear update-service op=$op"
-
-          echo "=== waiting for env-clear deploy (max ~15 min) ==="
-          for i in $(seq 1 60); do
-            status=$(aws apprunner list-operations --service-arn "$BACKEND_ARN" \
-                      --max-results 5 \
-                      --query "OperationSummaryList[?Id=='$op'].Status | [0]" \
-                      --output text)
-            echo "$(date -u +%H:%M:%S) op $op: $status"
-            case "$status" in
-              SUCCEEDED) echo "backend env-clear: green"; break ;;
-              FAILED|ROLLBACK_FAILED|ROLLBACK_SUCCEEDED)
-                echo "::error::backend env-clear $status"; exit 1 ;;
-            esac
-            sleep 15
-          done
-          if [ "$status" != "SUCCEEDED" ]; then
-            echo "::error::backend env-clear deploy timed out after 15 min in status $status"
-            exit 1
-          fi
-
       - name: Summary
         run: |
           echo "Image:   ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:beta"
           echo "Git SHA: ${{ github.sha }}"
-          echo "Migrations: ${{ steps.migrate-gate.outputs.run }}"
           echo ""
           echo "Both App Runner services confirmed RUNNING on this image."
+          echo "Alembic ran on the backend container at boot (see docker-api-entrypoint.sh)."
