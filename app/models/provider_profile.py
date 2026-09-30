@@ -88,6 +88,13 @@ class ProviderProfile(Base):
     razorpayx_contact_id: Mapped[str | None] = mapped_column(String(64))
     razorpayx_fund_account_id: Mapped[str | None] = mapped_column(String(64))
     profile_photo_url: Mapped[str | None] = mapped_column(String(512))
+    # SVC-336: the business the provider trades as, and its logo — separate from
+    # the person (``users.name``, ``profile_photo_url``). Onboarding requires the
+    # name; the image is optional and the app shows a default logo when it is
+    # NULL. Both nullable because providers created before onboarding asked for
+    # them have neither.
+    business_name: Mapped[str | None] = mapped_column(String(100))
+    business_image_url: Mapped[str | None] = mapped_column(String(512))
     # Languages the provider speaks (e.g. ["Hindi", "English"]). text[] so we can
     # filter discovery by language (`'Hindi' = ANY(languages)`); defaults to empty.
     languages: Mapped[list[str]] = mapped_column(

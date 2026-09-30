@@ -90,6 +90,7 @@ async def update_provider_profile(
         payout_account_number=request.payout_account_number,
         payout_ifsc=request.payout_ifsc,
         languages=request.languages,
+        business_name=request.business_name,
     )
 
 
@@ -104,6 +105,22 @@ async def upload_profile_photo(
     return await ProviderService(db).update_photo(
         user_id=current_user.id,
         photo_bytes=photo_bytes,
+        content_type=content_type,
+        ext=ext,
+    )
+
+
+@router.post("/me/business-image", response_model=ProviderResponse)
+async def upload_business_image(
+    image: UploadFile = File(..., description="Business image (logo)"),
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload/replace the provider's business image (SVC-336). Returns the updated profile."""
+    image_bytes, content_type, ext = await _read_image_upload(image, "image")
+    return await ProviderService(db).update_business_image(
+        user_id=current_user.id,
+        image_bytes=image_bytes,
         content_type=content_type,
         ext=ext,
     )

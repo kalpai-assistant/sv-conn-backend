@@ -102,6 +102,7 @@ class ProviderService:
         payout_account_number: str | None = None,
         payout_ifsc: str | None = None,
         languages: list[str] | None = None,
+        business_name: str | None = None,
     ) -> ProviderProfile:
         profile, _ = await self.get_or_create_profile(user_id)
 
@@ -161,6 +162,11 @@ class ProviderService:
         if languages is not None:
             profile.languages = languages
 
+        # SVC-336: already trimmed and non-blank from the schema. Not KYC-gated —
+        # onboarding sets it in step 1, before KYC is submitted.
+        if business_name is not None:
+            profile.business_name = business_name
+
         await self.db.flush()
         return profile
 
@@ -179,7 +185,9 @@ class ProviderService:
         """
         profile, _ = await self.get_or_create_profile(user_id)
 
-        # Unguessable key; bucket is never public but this blocks enumeration.
+        # provider-photos/* is served public-read by the bucket policy on
+        # eazyserv-uploads (SVC-338); kyc/* stays private. The unguessable key is
+        # what keeps photos from being enumerated — the policy grants no ListBucket.
         key = f"provider-photos/{user_id}/{uuid.uuid4().hex}.{ext}"
 
         # boto3 is sync — offload to a thread so the event loop stays responsive.
@@ -197,6 +205,42 @@ class ProviderService:
             ) from exc
 
         profile.profile_photo_url = url
+        await self.db.flush()
+        return profile
+
+    async def update_business_image(
+        self,
+        user_id: uuid.UUID,
+        image_bytes: bytes,
+        content_type: str,
+        ext: str,
+    ) -> ProviderProfile:
+        """Store/replace the provider's business image (logo) in S3 (SVC-336).
+
+        Same shape as ``update_photo``, and deliberately the same public-read
+        prefix: a logo is shown to consumers exactly like a profile photo, so it
+        needs no bucket-policy change (SVC-338). The ``business-`` file-name prefix
+        keeps logos distinguishable from profile photos in the bucket.
+        """
+        profile, _ = await self.get_or_create_profile(user_id)
+
+        key = f"provider-photos/{user_id}/business-{uuid.uuid4().hex}.{ext}"
+
+        # boto3 is sync — offload to a thread so the event loop stays responsive.
+        try:
+            url = await asyncio.to_thread(
+                storage.upload_file,
+                io.BytesIO(image_bytes),
+                key,
+                content_type=content_type,
+            )
+        except Exception as exc:
+            raise AppException(
+                f"Business image upload failed: {exc}",
+                status_code=502,
+            ) from exc
+
+        profile.business_image_url = url
         await self.db.flush()
         return profile
 

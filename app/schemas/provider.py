@@ -32,6 +32,19 @@ class ProviderProfileUpdate(BaseModel):
     # List of languages the provider speaks. Strings are trimmed and
     # de-duplicated (case-insensitive); an empty list clears the field.
     languages: list[str] | None = Field(None, max_length=20)
+    # SVC-336: the business the provider trades as. Trimmed; blank is rejected
+    # rather than stored, since onboarding requires a real name.
+    business_name: str | None = Field(None, max_length=100)
+
+    @field_validator("business_name")
+    @classmethod
+    def _clean_business_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("business_name must not be blank")
+        return value
 
     @field_validator("payout_vpa")
     @classmethod
@@ -111,6 +124,10 @@ class ProviderResponse(BaseModel):
     id: UUID
     user_id: UUID
     profile_photo_url: str | None
+    # SVC-336: NULL for a provider who has not set them. The app shows a default
+    # logo when business_image_url is NULL.
+    business_name: str | None = None
+    business_image_url: str | None = None
     languages: list[str] = []
     avg_rating: float
     total_completed_jobs: int
