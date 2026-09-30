@@ -143,6 +143,10 @@ Rate limiting: 5 OTP attempts per phone per hour, tracked in Redis.
 - **Celery + async DB**: Workers use `SyncSessionLocal` (derived from async URL) since Celery is sync
 - **CORS**: `CORS_ALLOWED_ORIGINS` env var, comma-separated. Dev default in `config.py` covers localhost + Capacitor + prod web. Wildcard deliberately not accepted (spec violation with `allow_credentials=True`).
 
+### Provider team model (SVC-318, Phase A: SVC-319)
+
+`provider_profiles.parent_provider_id` is a nullable self-reference to the team owner's `provider_profiles.user_id` (`ON DELETE SET NULL`). `NULL` means a solo provider *or* a team owner; the two look the same until a member points at the owner. Set means a team member. Everyone keeps the single `"provider"` role, and dispatch is unchanged. The payout rule lives in one place, `ProviderProfile.payout_target_id`: `parent_provider_id or user_id`, so a member's earnings belong to their owner. `booking.provider_id` keeps meaning "who accepted the job". No payout code reads `payout_target_id` yet (payouts wait on RazorpayX); route payee lookups through it when they do. Chain depth is 1, enforced in service code at invite-accept time (Phase B), not by a DB constraint.
+
 ### Infrastructure (docker-compose)
 
 5 services: `api`, `celery-worker`, `celery-beat`, `postgres` (PostGIS image), `redis`. Postgres requires the PostGIS extension — do not use a plain postgres image.

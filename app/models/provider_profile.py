@@ -37,6 +37,13 @@ class ProviderProfile(Base):
     __table_args__ = (
         # GiST spatial index — enables fast ST_DWithin queries
         Index("idx_provider_service_area", "service_area_center", postgresql_using="gist"),
+        # SVC-319: "find the team members of X". Partial, so it stays empty while
+        # every provider is solo — which is every provider on beta today.
+        Index(
+            "ix_provider_profiles_parent",
+            "parent_provider_id",
+            postgresql_where="parent_provider_id IS NOT NULL",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -117,6 +124,24 @@ class ProviderProfile(Base):
 
     is_online: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # SVC-319 (team model, Phase A): the team owner this provider works under.
+    # NULL = a solo provider, or a team owner — the two look the same until a
+    # member points at the owner. Set = a team member. Chain depth is 1, enforced
+    # in service code when invites are accepted (Phase B), not by the schema.
+    # References ``user_id`` (unique) rather than the ``id`` primary key, because
+    # ``user_id`` is the provider identifier used everywhere else, e.g.
+    # ``bookings.provider_id``. SET NULL: an owner row removed turns its members
+    # solo rather than deleting them.
+    parent_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "provider_profiles.user_id",
+            name="fk_provider_profiles_parent",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
     # Relationships
     # ``foreign_keys=[user_id]`` because SVC-307 added a second FK to
     # ``users`` (``kyc_reviewed_by``) — without this, SQLAlchemy can't
@@ -124,6 +149,16 @@ class ProviderProfile(Base):
     # to initialise the mapper.
     user: Mapped["User"] = relationship(
         "User", back_populates="provider_profile", foreign_keys=[user_id]
+    )
+    # SVC-319: the owner's own profile row. Self-referencing, so ``remote_side``
+    # names the column on the *parent* side of the join. Lazy by default: under
+    # AsyncSession, reading ``.parent`` without eager-loading it raises
+    # ``MissingGreenlet``, so callers load it explicitly (``selectinload``) or
+    # read ``parent_provider_id`` instead — as ``payout_target_id`` does.
+    parent: Mapped["ProviderProfile | None"] = relationship(
+        "ProviderProfile",
+        remote_side=[user_id],
+        foreign_keys=[parent_provider_id],
     )
 
     @property
@@ -185,3 +220,17 @@ class ProviderProfile(Base):
         if self.payout_account_number_encrypted and self.payout_ifsc_encrypted:
             stored.append(PayoutMethod.BANK)
         return stored
+
+    @property
+    def payout_target_id(self) -> uuid.UUID:
+        """The provider whose payout account receives this provider's earnings.
+
+        A team member → their team owner; a solo provider or team owner → themselves
+        (SVC-319). Kept on the model so the "parent, else self" rule lives in one
+        place rather than being restated at each call site.
+
+        Not yet read by any payout code: payouts wait on RazorpayX, so routing
+        them through this is deferred (Vipul, 2026-09-29). Reads the column, not
+        the ``parent`` relationship, so it never triggers a lazy load.
+        """
+        return self.parent_provider_id or self.user_id
