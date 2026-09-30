@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Professional entity — wireframes</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root { --primary: #7C3AED; }
+  body { background: #f4f4f5; }
+  .phone {
+    width: 390px; height: 780px;
+    border-radius: 40px; border: 8px solid #111;
+    background: #fff; overflow: hidden;
+    box-shadow: 0 25px 60px -20px rgba(0,0,0,0.25);
+    display: flex; flex-direction: column;
+  }
+  .phone-header { background: #fff; padding: 12px 16px; border-bottom: 1px solid #f4f4f5; flex-shrink: 0; }
+  .phone-body { flex: 1; overflow-y: auto; }
+  .phone-nav { border-top: 1px solid #f4f4f5; padding: 10px 0 22px; flex-shrink: 0; background: #fff; }
+  .nav-item { flex: 1; text-align: center; font-size: 10px; color: #71717a; }
+  .nav-item.active { color: var(--primary); }
+  .nav-dot { width: 22px; height: 22px; margin: 0 auto 2px; }
+  .caption { color: #52525b; font-size: 13px; line-height: 1.5; max-width: 420px; margin-top: 12px; }
+  .tag { display: inline-block; padding: 2px 8px; font-size: 10px; border-radius: 999px; font-weight: 500; }
+  .frame-title { font-size: 13px; font-weight: 600; color: #18181b; margin-bottom: 8px; }
+  .badge-primary { background: rgba(124,58,237,0.1); color: var(--primary); }
+  .badge-success { background: #dcfce7; color: #166534; }
+  .badge-warning { background: #fef3c7; color: #92400e; }
+  .badge-muted { background: #f4f4f5; color: #52525b; }
+  h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
+  h2 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin-top: 48px; margin-bottom: 12px; color: #18181b; }
+  h3 { font-size: 14px; font-weight: 600; color: #71717a; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 32px; margin-bottom: 12px; }
+</style>
+</head>
+<body class="p-8">
+
+<div class="max-w-6xl mx-auto">
+  <h1>Professional entity — key screens</h1>
+  <p class="caption">Draft wireframes for HLD/LLD review. All screens fit the current app's shell (max-w-md, purple #7C3AED accents, bottom nav pattern). Roles determine which tabs are visible — the same APK covers Solo Pro, Team Pro, and Provider-with-team.</p>
+
+  <!-- =========================================================== -->
+  <h2>1. Solo Pro — Home ("Work" tab)</h2>
+  <h3>Persona: Sunita, freelance beautician. No team management. Just work.</h3>
+  <div class="flex gap-8 items-start flex-wrap">
+
+    <!-- 1A: Offline -->
+    <div>
+      <p class="frame-title">1A · Offline</p>
+      <div class="phone">
+        <div class="phone-header flex items-center justify-between">
+          <div>
+            <div class="text-xs text-gray-500">Good morning,</div>
+            <div class="font-semibold text-lg">Sunita</div>
+          </div>
+          <div class="w-9 h-9 rounded-full bg-purple-100"></div>
+        </div>
+        <div class="phone-body p-4">
+          <div class="bg-white border border-gray-200 rounded-2xl p-5 text-center">
+            <div class="w-16 h-16 mx-auto rounded-full bg-gray-100 flex items-center justify-center mb-3">
+              <span class="text-gray-400 text-2xl">⏸</span>
+            </div>
+            <div class="font-semibold">You're offline</div>
+            <div class="text-xs text-gray-500 mt-1">Go online to receive service requests</div>
+            <button class="mt-4 bg-purple-600 text-white rounded-xl px-6 py-3 font-semibold w-full">Go online</button>
+          </div>
+          <div class="mt-6">
+            <div class="text-xs uppercase font-semibold text-gray-500 mb-2">Today so far</div>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="bg-white border border-gray-200 rounded-xl p-3">
+                <div class="text-2xl font-bold">0</div>
+                <div class="text-xs text-gray-500">Jobs</div>
+              </div>
+              <div class="bg-white border border-gray-200 rounded-xl p-3">
+                <div class="text-2xl font-bold">₹0</div>
+                <div class="text-xs text-gray-500">Earnings</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="phone-nav flex">
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Home</div>
+          <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Work</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Jobs</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+        </div>
+      </div>
+      <p class="caption">Offline is the safe default. No location tracking, no dispatch. Big single CTA. Bottom nav shows Work tab (Consumer role hidden here for space — in reality this user also has a Consumer role).</p>
+    </div>
+
+    <!-- 1B: Online, waiting -->
+    <div>
+      <p class="frame-title">1B · Online, waiting for a job</p>
+      <div class="phone">
+        <div class="phone-header flex items-center justify-between">
+          <div>
+            <div class="text-xs text-gray-500">Good morning,</div>
+            <div class="font-semibold text-lg">Sunita</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+            <span class="text-xs text-green-700 font-medium">Online</span>
+          </div>
+        </div>
+        <div class="phone-body p-4">
+          <div class="bg-gradient-to-br from-purple-50 to-purple-100 border border-purple-200 rounded-2xl p-5 text-center">
+            <div class="text-4xl mb-2">🔍</div>
+            <div class="font-semibold text-purple-900">Looking for jobs nearby</div>
+            <div class="text-xs text-purple-700 mt-1">3 km radius · you'll get a notification</div>
+          </div>
+          <div class="mt-4 flex items-center gap-3">
+            <span class="tag badge-warning">🚗 Busy elsewhere?</span>
+            <span class="text-xs text-gray-500">Toggle to pause without going offline</span>
+          </div>
+          <div class="mt-6">
+            <div class="text-xs uppercase font-semibold text-gray-500 mb-2">Today so far</div>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="bg-white border border-gray-200 rounded-xl p-3">
+                <div class="text-2xl font-bold">2</div>
+                <div class="text-xs text-gray-500">Jobs</div>
+              </div>
+              <div class="bg-white border border-gray-200 rounded-xl p-3">
+                <div class="text-2xl font-bold">₹1,240</div>
+                <div class="text-xs text-gray-500">Earnings</div>
+              </div>
+            </div>
+          </div>
+          <button class="w-full mt-4 border border-gray-300 text-gray-700 rounded-xl py-3 font-medium">Go offline</button>
+        </div>
+        <div class="phone-nav flex">
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Home</div>
+          <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Work</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Jobs</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+        </div>
+      </div>
+      <p class="caption">Online + waiting. Location heartbeat is active. The "Busy elsewhere?" chip is the manual toggle for the V1 external-busy state — useful when the same person is also driving for Ola.</p>
+    </div>
+
+    <!-- 1C: Incoming job -->
+    <div>
+      <p class="frame-title">1C · Incoming job request (modal)</p>
+      <div class="phone">
+        <div class="phone-header flex items-center justify-between">
+          <div>
+            <div class="text-xs text-gray-500">Good morning,</div>
+            <div class="font-semibold text-lg">Sunita</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+            <span class="text-xs text-green-700 font-medium">Online</span>
+          </div>
+        </div>
+        <div class="phone-body p-4 relative">
+          <div class="opacity-30 pointer-events-none">
+            <div class="bg-gradient-to-br from-purple-50 to-purple-100 border border-purple-200 rounded-2xl p-5 text-center">
+              <div class="text-4xl mb-2">🔍</div>
+              <div class="font-semibold text-purple-900">Looking for jobs nearby</div>
+            </div>
+          </div>
+          <div class="absolute inset-x-4 bottom-4 bg-white border-2 border-purple-500 rounded-2xl p-5 shadow-2xl">
+            <div class="flex items-center justify-between mb-3">
+              <span class="tag badge-primary">New request · 12s</span>
+              <span class="text-xs text-gray-500">2.1 km · 8 min away</span>
+            </div>
+            <div class="font-semibold text-lg">Basic manicure</div>
+            <div class="text-sm text-gray-600 mt-1">₹499 · duration 45 min</div>
+            <div class="mt-3 border-t border-gray-100 pt-3">
+              <div class="text-xs text-gray-500 mb-1">Customer address</div>
+              <div class="text-sm">Kothrud, near Nal Stop, Pune 411038</div>
+            </div>
+            <div class="mt-4 flex gap-2">
+              <button class="flex-1 border border-gray-300 text-gray-700 rounded-xl py-3 font-medium">Skip</button>
+              <button class="flex-1 bg-purple-600 text-white rounded-xl py-3 font-semibold">Accept</button>
+            </div>
+            <div class="mt-2 text-xs text-center text-gray-400">Auto-declines in 12 seconds</div>
+          </div>
+        </div>
+        <div class="phone-nav flex">
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Home</div>
+          <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Work</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Jobs</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+        </div>
+      </div>
+      <p class="caption">Job request as a bottom sheet, with 12s countdown. Skip returns to waiting. Accept navigates to the in-progress view (screen 2). Countdown ensures the dispatch pool isn't held indefinitely.</p>
+    </div>
+  </div>
+
+  <!-- =========================================================== -->
+  <h2>2. Team Pro — Home with employer branding</h2>
+  <h3>Persona: Rohan, works for Sparkle Cleaners (his Provider). Same UI shell as Solo Pro; the employer's brand shows on incoming jobs.</h3>
+  <div class="flex gap-8 items-start flex-wrap">
+
+    <!-- 2A: Team Pro online -->
+    <div>
+      <p class="frame-title">2A · Online — showing employer</p>
+      <div class="phone">
+        <div class="phone-header flex items-center justify-between">
+          <div>
+            <div class="text-xs text-gray-500">Working for</div>
+            <div class="font-semibold text-sm">Sparkle Cleaners</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+            <span class="text-xs text-green-700 font-medium">Online</span>
+          </div>
+        </div>
+        <div class="phone-body p-4">
+          <div class="bg-gradient-to-br from-purple-50 to-purple-100 border border-purple-200 rounded-2xl p-5 text-center">
+            <div class="text-4xl mb-2">🔍</div>
+            <div class="font-semibold text-purple-900">Looking for jobs nearby</div>
+            <div class="text-xs text-purple-700 mt-1">Sparkle Cleaners · 5 km radius</div>
+          </div>
+          <div class="mt-4 bg-white border border-gray-200 rounded-xl p-3 flex items-center justify-between">
+            <div>
+              <div class="text-xs text-gray-500">You're linked to 2 providers</div>
+              <div class="text-sm font-medium">Change active employer →</div>
+            </div>
+            <div class="text-purple-600">›</div>
+          </div>
+          <div class="mt-6">
+            <div class="text-xs uppercase font-semibold text-gray-500 mb-2">This week</div>
+            <div class="grid grid-cols-3 gap-3">
+              <div class="bg-white border border-gray-200 rounded-xl p-3">
+                <div class="text-xl font-bold">12</div>
+                <div class="text-xs text-gray-500">Jobs</div>
+              </div>
+              <div class="bg-white border border-gray-200 rounded-xl p-3">
+                <div class="text-xl font-bold">₹6.4k</div>
+                <div class="text-xs text-gray-500">Earned</div>
+              </div>
+              <div class="bg-white border border-gray-200 rounded-xl p-3">
+                <div class="text-xl font-bold">4.8★</div>
+                <div class="text-xs text-gray-500">Rating</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="phone-nav flex">
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Home</div>
+          <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Work</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Jobs</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+        </div>
+      </div>
+      <p class="caption">Same shell as Solo Pro. Header shows employer name. Multi-provider link discoverable but tucked away — most Pros work under just one at a time. Earnings surface the Pro's take (post-Provider commission).</p>
+    </div>
+
+    <!-- 2B: Multi-provider picker -->
+    <div>
+      <p class="frame-title">2B · Multi-provider active selector</p>
+      <div class="phone">
+        <div class="phone-header flex items-center justify-between">
+          <button class="text-purple-600 text-sm">← Back</button>
+          <div class="font-semibold">Active employer</div>
+          <div class="w-8"></div>
+        </div>
+        <div class="phone-body p-4">
+          <p class="text-sm text-gray-600 mb-4">Choose which employer you're taking jobs for right now. You'll only get requests linked to this provider.</p>
+          <div class="space-y-3">
+            <div class="border-2 border-purple-500 bg-purple-50 rounded-xl p-4 flex items-center justify-between">
+              <div>
+                <div class="font-semibold">Sparkle Cleaners</div>
+                <div class="text-xs text-gray-600">Kothrud · 4.7★ · 82 jobs done</div>
+              </div>
+              <div class="w-5 h-5 rounded-full bg-purple-600 flex items-center justify-center text-white text-xs">✓</div>
+            </div>
+            <div class="border border-gray-200 rounded-xl p-4 flex items-center justify-between">
+              <div>
+                <div class="font-semibold">HomeShine Services</div>
+                <div class="text-xs text-gray-600">Aundh · 4.5★ · 24 jobs done</div>
+              </div>
+              <div class="w-5 h-5 rounded-full border-2 border-gray-300"></div>
+            </div>
+          </div>
+          <button class="w-full mt-6 border border-dashed border-gray-300 text-gray-500 rounded-xl py-3 text-sm">+ Accept a new invite</button>
+        </div>
+        <div class="phone-nav flex">
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Home</div>
+          <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Work</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Jobs</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+        </div>
+      </div>
+      <p class="caption">Only shows for Pros linked to 2+ Providers. Radio selection because V1 assumes a Pro works under one employer at a time. V2 could allow "any of my employers" mode.</p>
+    </div>
+  </div>
+
+  <!-- =========================================================== -->
+  <h2>3. Provider — My Team screen</h2>
+  <h3>Persona: Priya, owner of Sparkle Cleaners. Manages 4 Pros. Doesn't do jobs herself.</h3>
+  <div class="flex gap-8 items-start flex-wrap">
+
+    <!-- 3A: Team list -->
+    <div>
+      <p class="frame-title">3A · Team roster</p>
+      <div class="phone">
+        <div class="phone-header flex items-center justify-between">
+          <button class="text-purple-600 text-sm">← Back</button>
+          <div class="font-semibold">My Team</div>
+          <button class="text-purple-600 text-sm font-medium">+ Invite</button>
+        </div>
+        <div class="phone-body p-4">
+          <div class="grid grid-cols-3 gap-2 mb-4">
+            <div class="bg-green-50 border border-green-200 rounded-lg p-2 text-center">
+              <div class="text-lg font-bold text-green-700">2</div>
+              <div class="text-xs text-green-700">Available</div>
+            </div>
+            <div class="bg-amber-50 border border-amber-200 rounded-lg p-2 text-center">
+              <div class="text-lg font-bold text-amber-700">1</div>
+              <div class="text-xs text-amber-700">On job</div>
+            </div>
+            <div class="bg-gray-50 border border-gray-200 rounded-lg p-2 text-center">
+              <div class="text-lg font-bold text-gray-600">1</div>
+              <div class="text-xs text-gray-600">Offline</div>
+            </div>
+          </div>
+          <div class="space-y-2">
+            <div class="bg-white border border-gray-200 rounded-xl p-3 flex items-center gap-3">
+              <div class="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center font-semibold text-purple-700">R</div>
+              <div class="flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-semibold">Rohan</span>
+                  <span class="tag badge-warning">On job</span>
+                </div>
+                <div class="text-xs text-gray-500">Bathroom deep cleaning · ETA 20 min back</div>
+              </div>
+              <div class="text-purple-600">›</div>
+            </div>
+            <div class="bg-white border border-gray-200 rounded-xl p-3 flex items-center gap-3">
+              <div class="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center font-semibold text-purple-700">S</div>
+              <div class="flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-semibold">Suresh</span>
+                  <span class="tag badge-success">Available</span>
+                </div>
+                <div class="text-xs text-gray-500">Aundh · online for 2 hrs</div>
+              </div>
+              <div class="text-purple-600">›</div>
+            </div>
+            <div class="bg-white border border-gray-200 rounded-xl p-3 flex items-center gap-3">
+              <div class="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center font-semibold text-purple-700">A</div>
+              <div class="flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-semibold">Anjali</span>
+                  <span class="tag badge-success">Available</span>
+                </div>
+                <div class="text-xs text-gray-500">Kothrud · online for 45 min</div>
+              </div>
+              <div class="text-purple-600">›</div>
+            </div>
+            <div class="bg-white border border-gray-200 rounded-xl p-3 flex items-center gap-3 opacity-60">
+              <div class="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center font-semibold text-gray-500">M</div>
+              <div class="flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-semibold">Mahesh</span>
+                  <span class="tag badge-muted">Offline</span>
+                </div>
+                <div class="text-xs text-gray-500">Last seen 3 hrs ago</div>
+              </div>
+              <div class="text-purple-600">›</div>
+            </div>
+          </div>
+        </div>
+        <div class="phone-nav flex">
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Home</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Bookings</div>
+          <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Business</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+        </div>
+      </div>
+      <p class="caption">Live team status. Traffic-light chips. Tap any Pro to see their detail — active jobs, earnings this month, deactivate. Header CTA sends an SMS invite.</p>
+    </div>
+
+    <!-- 3B: Invite -->
+    <div>
+      <p class="frame-title">3B · Invite a Pro to the team</p>
+      <div class="phone">
+        <div class="phone-header flex items-center justify-between">
+          <button class="text-purple-600 text-sm">← Back</button>
+          <div class="font-semibold">Invite to team</div>
+          <div class="w-8"></div>
+        </div>
+        <div class="phone-body p-4">
+          <p class="text-sm text-gray-600 mb-4">We'll send them an SMS with a link. They install the app (if new), verify their phone, and accept the invite.</p>
+          <div class="mb-4">
+            <label class="text-xs uppercase font-semibold text-gray-500 mb-1 block">Phone number</label>
+            <div class="flex gap-2">
+              <div class="border border-gray-300 rounded-xl px-3 py-3 text-sm bg-gray-50">+91</div>
+              <input class="flex-1 border border-gray-300 rounded-xl px-3 py-3 text-sm" placeholder="98765 43210">
+            </div>
+          </div>
+          <div class="mb-4">
+            <label class="text-xs uppercase font-semibold text-gray-500 mb-1 block">Their name (optional)</label>
+            <input class="w-full border border-gray-300 rounded-xl px-3 py-3 text-sm" placeholder="e.g. Rohan Sharma">
+          </div>
+          <div class="bg-purple-50 border border-purple-200 rounded-xl p-3 text-xs text-purple-800">
+            💡 They'll need to do their own KYC (Aadhaar + selfie) once they accept. You can only assign them jobs after their KYC is approved.
+          </div>
+          <button class="w-full bg-purple-600 text-white rounded-xl py-3 font-semibold mt-6">Send invite</button>
+        </div>
+      </div>
+      <p class="caption">Minimal form. Clear expectation that the invited Pro needs KYC. Empty state on the team list has a big CTA that opens this form.</p>
+    </div>
+
+    <!-- 3C: Pro detail -->
+    <div>
+      <p class="frame-title">3C · Per-Pro detail (Rohan)</p>
+      <div class="phone">
+        <div class="phone-header flex items-center justify-between">
+          <button class="text-purple-600 text-sm">← Back</button>
+          <div class="font-semibold">Rohan</div>
+          <button class="text-red-600 text-sm">Remove</button>
+        </div>
+        <div class="phone-body p-4">
+          <div class="text-center pt-2 pb-4 border-b border-gray-100">
+            <div class="w-20 h-20 rounded-full bg-purple-100 mx-auto flex items-center justify-center font-bold text-2xl text-purple-700">R</div>
+            <div class="font-semibold text-lg mt-3">Rohan Sharma</div>
+            <div class="text-xs text-gray-500">+91 98765 43210 · Employee since Aug 2026</div>
+            <div class="flex justify-center gap-2 mt-2">
+              <span class="tag badge-success">KYC verified</span>
+              <span class="tag badge-warning">On job</span>
+            </div>
+          </div>
+          <div class="mt-4">
+            <div class="text-xs uppercase font-semibold text-gray-500 mb-2">This month</div>
+            <div class="grid grid-cols-3 gap-2">
+              <div class="bg-white border border-gray-200 rounded-xl p-3">
+                <div class="text-lg font-bold">32</div>
+                <div class="text-xs text-gray-500">Jobs</div>
+              </div>
+              <div class="bg-white border border-gray-200 rounded-xl p-3">
+                <div class="text-lg font-bold">₹18k</div>
+                <div class="text-xs text-gray-500">Earned</div>
+              </div>
+              <div class="bg-white border border-gray-200 rounded-xl p-3">
+                <div class="text-lg font-bold">4.7★</div>
+                <div class="text-xs text-gray-500">Avg</div>
+              </div>
+            </div>
+          </div>
+          <div class="mt-6">
+            <div class="text-xs uppercase font-semibold text-gray-500 mb-2">Current job</div>
+            <div class="bg-white border border-gray-200 rounded-xl p-4">
+              <div class="font-medium">Bathroom deep cleaning</div>
+              <div class="text-xs text-gray-500 mt-1">Started 40 min ago · Kothrud</div>
+              <button class="text-xs text-purple-600 font-medium mt-2">Track live →</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="caption">Read-only view. Deactivate ("Remove") is a soft action — sets `provider_professionals.is_active=false`, doesn't delete history. Rohan can still work for other Providers if he's linked to them.</p>
+    </div>
+  </div>
+
+  <!-- =========================================================== -->
+  <h2>4. Consumer — What changes on the booking detail</h2>
+  <h3>Consumer sees the Pro's name + face, not just the Provider brand.</h3>
+  <div class="flex gap-8 items-start flex-wrap">
+
+    <!-- 4A: Consumer — Pro from a Provider -->
+    <div>
+      <p class="frame-title">4A · Team Pro assigned (shows employer)</p>
+      <div class="phone">
+        <div class="phone-header flex items-center justify-between">
+          <button class="text-purple-600 text-sm">← Back</button>
+          <div class="font-semibold">Booking #A2B3</div>
+          <div class="w-8"></div>
+        </div>
+        <div class="phone-body p-4">
+          <div class="bg-white border border-gray-200 rounded-2xl p-4">
+            <div class="flex items-center gap-3">
+              <div class="w-14 h-14 rounded-full bg-purple-100 flex items-center justify-center font-bold text-purple-700 text-xl">R</div>
+              <div class="flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-semibold">Rohan</span>
+                  <span class="text-yellow-600 text-sm">★ 4.7</span>
+                </div>
+                <div class="text-xs text-gray-500">from Sparkle Cleaners</div>
+              </div>
+              <button class="w-9 h-9 rounded-full bg-green-500 flex items-center justify-center text-white">📞</button>
+            </div>
+            <div class="mt-4 pt-4 border-t border-gray-100">
+              <div class="text-xs text-gray-500 mb-1">Status</div>
+              <div class="flex items-center gap-2">
+                <div class="w-2 h-2 bg-purple-600 rounded-full animate-pulse"></div>
+                <span class="font-medium">En route · ETA 12 min</span>
+              </div>
+            </div>
+          </div>
+          <div class="mt-4 bg-white border border-gray-200 rounded-2xl p-4">
+            <div class="font-medium">Bathroom deep cleaning</div>
+            <div class="text-sm text-gray-500 mt-1">Basic · 45 min · ₹499</div>
+          </div>
+          <div class="mt-4 h-40 bg-gray-100 rounded-2xl flex items-center justify-center text-gray-400">Map with Pro location</div>
+        </div>
+        <div class="phone-nav flex">
+          <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Home</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Bookings</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Cart</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+        </div>
+      </div>
+      <p class="caption">Team Pro: Pro's face + name front and center, employer as subtitle. Trust: consumer sees a real person, plus knows which brand backs them. Direct call button reaches Rohan.</p>
+    </div>
+
+    <!-- 4B: Solo Pro -->
+    <div>
+      <p class="frame-title">4B · Solo Pro assigned (no employer shown)</p>
+      <div class="phone">
+        <div class="phone-header flex items-center justify-between">
+          <button class="text-purple-600 text-sm">← Back</button>
+          <div class="font-semibold">Booking #A2B3</div>
+          <div class="w-8"></div>
+        </div>
+        <div class="phone-body p-4">
+          <div class="bg-white border border-gray-200 rounded-2xl p-4">
+            <div class="flex items-center gap-3">
+              <div class="w-14 h-14 rounded-full bg-purple-100 flex items-center justify-center font-bold text-purple-700 text-xl">S</div>
+              <div class="flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-semibold">Sunita</span>
+                  <span class="text-yellow-600 text-sm">★ 4.8</span>
+                </div>
+                <div class="text-xs text-gray-500">Independent professional</div>
+              </div>
+              <button class="w-9 h-9 rounded-full bg-green-500 flex items-center justify-center text-white">📞</button>
+            </div>
+            <div class="mt-4 pt-4 border-t border-gray-100">
+              <div class="text-xs text-gray-500 mb-1">Status</div>
+              <div class="flex items-center gap-2">
+                <div class="w-2 h-2 bg-purple-600 rounded-full animate-pulse"></div>
+                <span class="font-medium">En route · ETA 8 min</span>
+              </div>
+            </div>
+          </div>
+          <div class="mt-4 bg-white border border-gray-200 rounded-2xl p-4">
+            <div class="font-medium">Basic manicure</div>
+            <div class="text-sm text-gray-500 mt-1">45 min · ₹499</div>
+          </div>
+          <div class="mt-4 h-40 bg-gray-100 rounded-2xl flex items-center justify-center text-gray-400">Map with Pro location</div>
+        </div>
+        <div class="phone-nav flex">
+          <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Home</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Bookings</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Cart</div>
+          <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+        </div>
+      </div>
+      <p class="caption">Solo Pro: hidden sole-prop Provider is not shown to the consumer. Subtitle reads "Independent professional" — informative but not marketing the concept. Same layout as 4A otherwise.</p>
+    </div>
+  </div>
+
+  <!-- =========================================================== -->
+  <h2>5. Bottom-nav variations by role combination</h2>
+  <div class="flex gap-8 items-start flex-wrap mt-4">
+
+    <div>
+      <p class="frame-title">Consumer only</p>
+      <div class="bg-white border border-gray-200 rounded-2xl px-3 py-4 shadow-sm flex" style="width: 320px;">
+        <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Home</div>
+        <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Bookings</div>
+        <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Cart</div>
+        <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+      </div>
+      <p class="caption">Existing pattern. Nothing changes for consumers-only.</p>
+    </div>
+
+    <div>
+      <p class="frame-title">Consumer + Solo Pro (kaam wali bai)</p>
+      <div class="bg-white border border-gray-200 rounded-2xl px-3 py-4 shadow-sm flex" style="width: 320px;">
+        <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Home</div>
+        <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Work</div>
+        <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Jobs</div>
+        <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+      </div>
+      <p class="caption">Sole prop hidden. "Work" replaces "Cart" for the primary usage flow. Cart accessible from consumer Home when needed.</p>
+    </div>
+
+    <div>
+      <p class="frame-title">Consumer + Provider-with-team + Pro</p>
+      <div class="bg-white border border-gray-200 rounded-2xl px-3 py-4 shadow-sm flex" style="width: 320px;">
+        <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Home</div>
+        <div class="nav-item active"><div class="nav-dot rounded-full bg-purple-600"></div>Work</div>
+        <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Business</div>
+        <div class="nav-item"><div class="nav-dot rounded-full bg-gray-200"></div>Profile</div>
+      </div>
+      <p class="caption">Rare combo: someone who does jobs themselves AND manages a team AND uses the app as a consumer. All three tabs. Bookings/Cart move into Home page rails as before.</p>
+    </div>
+
+  </div>
+
+  <p class="caption" style="margin-top: 60px; padding-top: 20px; border-top: 1px solid #e4e4e7;">
+    <strong>Not covered here</strong>: onboarding flows (Pro signup deep-link, invite-accept, KYC capture — reuse existing patterns from provider onboarding), payout receipt screens, Provider earnings breakdown per-Pro. Called out for the next design pass once the HLD/LLD get sign-off.
+  </p>
+</div>
+
+</body>
+</html>
