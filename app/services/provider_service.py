@@ -217,13 +217,14 @@ class ProviderService:
     ) -> ProviderProfile:
         """Store/replace the provider's business image (logo) in S3 (SVC-336).
 
-        Same shape as ``update_photo``, under its own prefix so the bucket policy
-        can scope it separately. ``business-images/*`` must be added to the public-
-        read policy on eazyserv-uploads for these URLs to load (SVC-338).
+        Same shape as ``update_photo``, and deliberately the same public-read
+        prefix: a logo is shown to consumers exactly like a profile photo, so it
+        needs no bucket-policy change (SVC-338). The ``business-`` file-name prefix
+        keeps logos distinguishable from profile photos in the bucket.
         """
         profile, _ = await self.get_or_create_profile(user_id)
 
-        key = f"business-images/{user_id}/{uuid.uuid4().hex}.{ext}"
+        key = f"provider-photos/{user_id}/business-{uuid.uuid4().hex}.{ext}"
 
         # boto3 is sync — offload to a thread so the event loop stays responsive.
         try:

@@ -4,7 +4,7 @@ Provider business name + business image (SVC-336).
 Covers:
 - PATCH /providers/me business_name: round trip, trim, blank / too long rejected,
   omitted leaves it unchanged
-- POST /providers/me/business-image: happy path under the business-images/ prefix,
+- POST /providers/me/business-image: happy path under provider-photos/<user_id>/business-*,
   validation (unsupported MIME, oversized, empty), provider-role gating
 - GET /providers/me returns both fields as null for a provider who set neither
 """
@@ -154,9 +154,9 @@ async def test_new_provider_has_neither_business_field(client, auth_headers, db_
 
 @pytest.mark.asyncio
 async def test_upload_business_image_happy_path(client, auth_headers, db_session):
-    """Valid PNG → 200, stored under business-images/<user_id>/, URL persisted."""
+    """Valid PNG → 200, stored under provider-photos/<user_id>/business-*, URL persisted."""
     user, profile = await _seed_provider(db_session)
-    url = "https://bucket.s3.amazonaws.com/business-images/x.png"
+    url = "https://bucket.s3.amazonaws.com/provider-photos/business-x.png"
 
     with patch("app.services.provider_service.storage.upload_file") as mock_upload:
         mock_upload.return_value = url
@@ -170,7 +170,7 @@ async def test_upload_business_image_happy_path(client, auth_headers, db_session
     assert response.json()["business_image_url"] == url
     assert mock_upload.call_count == 1
     key = mock_upload.call_args.args[1]
-    assert key.startswith(f"business-images/{user.id}/")
+    assert key.startswith(f"provider-photos/{user.id}/business-")
     assert key.endswith(".png")
 
     await db_session.refresh(profile)
