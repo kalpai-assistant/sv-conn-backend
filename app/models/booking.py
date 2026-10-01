@@ -80,14 +80,29 @@ class Booking(Base):
             "status",
             postgresql_where="status NOT IN ('COMPLETED', 'CANCELLED', 'EXPIRED')",
         ),
+        # SVC-339: partial, since the column is NULL until a Pro is assigned.
+        Index(
+            "ix_bookings_professional_id",
+            "professional_id",
+            postgresql_where="professional_id IS NOT NULL",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     consumer_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), index=True
     )
+    # The Service Provider who accepted the job. Under the two-entity model
+    # (SVC-339) it still means that, and equals ``professional.service_provider_id``.
     provider_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True
+    )
+    # SVC-339: the Pro who does the job. The migration backfilled it for every
+    # booking that had a provider; nothing writes it for new bookings until the
+    # Phase B assign step, so it is NULL on anything accepted since. Payouts route
+    # through ``professional.service_provider_id`` once code reads it.
+    professional_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("professionals.id"), nullable=True
     )
     # The catalogue used to live directly on this row via `service_id`. It's
     # in `booking_items` now (one row per service in the cart) — a single
@@ -210,6 +225,8 @@ class Booking(Base):
         order_by="BookingStatusLog.created_at",
     )
     review: Mapped["Review"] = relationship("Review", back_populates="booking", uselist=False)
+    # SVC-339. Lazy by default; no response path reads it yet.
+    professional: Mapped["Professional | None"] = relationship("Professional")
     # SVC-186 (G29): plural, not scalar. `44a9651a7ef8_drop_payment_unique_constraint`
     # deliberately allowed multiple payment rows per booking (failed attempts +
     # the captured one), and SVC-175 (G6) further pinned that shape at the DB

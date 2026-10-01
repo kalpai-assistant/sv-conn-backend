@@ -40,6 +40,13 @@ class Review(Base):
     reviewee_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
     )
+    # SVC-339: the Pro being rated, so an SP's rating can later be derived from
+    # its Pros'. The design docs call this table ``booking_ratings``. Nothing
+    # writes it yet and the migration does not backfill it; ``reviewee_id``
+    # still names the provider.
+    professional_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("professionals.id"), nullable=True
+    )
     rating: Mapped[int] = mapped_column(Integer, nullable=False)
     comment: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
