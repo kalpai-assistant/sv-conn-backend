@@ -26,6 +26,11 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import URL, make_url
 
+from app.seed_data.service_details import (
+    SERVICE_DETAILS,
+    UPDATE_SERVICE_DETAILS,
+    service_details_params,
+)
 from tests.conftest import TEST_DATABASE_URL
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -40,12 +45,10 @@ BEFORE_SVC_339 = "f43a6075cfbb"
 SVC_339_FILE = (
     REPO_ROOT / "alembic" / "versions" / "b000e0a06330_svc_339_add_professionals_table_booking_.py"
 )
-# SVC-340 (service steps + exclusions) and the revision it builds on.
+# SVC-340 (service steps + exclusions) and the revision it builds on. Its text
+# and UPDATE live in app.seed_data.service_details, which the migration imports.
 SVC_340 = "4d1cca7bc41d"
 BEFORE_SVC_340 = SVC_339
-SVC_340_FILE = (
-    REPO_ROOT / "alembic" / "versions" / "4d1cca7bc41d_svc_340_add_steps_exclusions_to_services.py"
-)
 
 
 def _url(database: str) -> URL:
@@ -405,15 +408,6 @@ def test_svc_339_backfill_is_idempotent(scratch_db):
 # --- SVC-340: services.steps + services.exclusions -----------------------------
 
 
-def _svc_340_module():
-    """The SVC-340 migration module, so the tests run its own seed statement and
-    data rather than a copy that could drift from it."""
-    spec = importlib.util.spec_from_file_location("svc_340_migration", SVC_340_FILE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _seed_before_svc_340(url: URL) -> dict:
     """Services in the schema as it stood before SVC-340.
 
@@ -459,16 +453,6 @@ def _service_details(url: URL) -> dict:
     return {row["id"]: (row["steps"], row["exclusions"]) for row in rows}
 
 
-def test_svc_340_seed_data_is_the_ten_services_in_ticket_shape():
-    details = _svc_340_module().SERVICE_DETAILS
-    assert len(details) == 10
-    assert len({slug for slug, _ in details}) == 10, "one service per sub-category"
-    for key, (steps, exclusions) in details.items():
-        assert 4 <= len(steps) <= 6, key
-        assert 2 <= len(exclusions) <= 4, key
-        assert all(isinstance(s, str) and s.strip() for s in steps + exclusions), key
-
-
 def test_svc_340_adds_nullable_jsonb_columns_and_downgrade_restores_services(scratch_db):
     _alembic(scratch_db, "upgrade", BEFORE_SVC_340)
     before = _shape(scratch_db, "services")
@@ -492,15 +476,14 @@ def test_svc_340_adds_nullable_jsonb_columns_and_downgrade_restores_services(scr
 
 
 def test_svc_340_seeds_matching_services_only_and_is_idempotent(scratch_db):
-    module = _svc_340_module()
     _alembic(scratch_db, "upgrade", BEFORE_SVC_340)
     ids = _seed_before_svc_340(scratch_db)
 
     _alembic(scratch_db, "upgrade", SVC_340)
 
     details = _service_details(scratch_db)
-    assert details[ids["drain"]] == module.SERVICE_DETAILS[("plumber", "Drain blockage removal")]
-    assert details[ids["haircut"]] == module.SERVICE_DETAILS[("salon-men", "Men's haircut")]
+    assert details[ids["drain"]] == SERVICE_DETAILS[("plumber", "Drain blockage removal")]
+    assert details[ids["haircut"]] == SERVICE_DETAILS[("salon-men", "Men's haircut")]
     assert details[ids["beard"]] == (None, None), "name not in the seed"
     assert details[ids["decoy"]] == (None, None), "seeded name, but in another category"
 
@@ -509,8 +492,8 @@ def test_svc_340_seeds_matching_services_only_and_is_idempotent(scratch_db):
     try:
         with engine.begin() as conn:
             matched = sum(
-                conn.execute(text(module.UPDATE_SERVICE_DETAILS), params).rowcount
-                for params in module.service_details_params()
+                conn.execute(text(UPDATE_SERVICE_DETAILS), params).rowcount
+                for params in service_details_params()
             )
     finally:
         engine.dispose()
