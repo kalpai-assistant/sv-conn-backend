@@ -41,6 +41,8 @@ uv run python scripts/seed_pricing_from_xlsx.py         # pricing + variants onl
 
 `seed_pricing_from_xlsx.py` **refuses to run** unless the SVC-286 hierarchy (17 L2 slugs + `miscellaneous`) is already present — this is the guardrail added in SVC-312 so a re-run can never wipe the L1 tiles the way it did on 2026-09-23. The single source of truth for the tile list + L2→L1 mapping is `app/seed_data/l1_hierarchy.py`; both the migration and `seed_categories.py` import from there.
 
+Service steps/exclusions text (SVC-340) lives in `app/seed_data/service_details.py`; the migration and both service seed scripts apply it. For new wording, edit that file and add a small migration that re-runs `UPDATE_SERVICE_DETAILS`.
+
 **Lint & format** — Ruff does both. CI enforces both blocking:
 ```bash
 uv run ruff check .          # lint (E, W, F, I, B, UP rulesets)
