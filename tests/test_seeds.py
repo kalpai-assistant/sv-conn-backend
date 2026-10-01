@@ -37,6 +37,7 @@ from app.seed_data.l1_hierarchy import (
     L2_TO_L1,
     MISCELLANEOUS_L1_SLUG,
 )
+from app.seed_data.service_details import SERVICE_DETAILS
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 WORKBOOK = BACKEND_DIR / "EazyServ_Pune_Pricing_List.xlsx"
@@ -240,3 +241,19 @@ def test_no_duplicate_categories(seeded_db) -> None:
         cur.execute("SELECT slug, COUNT(*) FROM categories GROUP BY slug HAVING COUNT(*) > 1")
         dupes = cur.fetchall()
     assert not dupes, f"Duplicate category slugs after re-seed: {dupes}"
+
+
+def test_service_details_survive_the_seed_ritual(seeded_db) -> None:
+    """SVC-340: the migration runs before any service exists, and the second
+    pricing pass deletes and recreates every service — so the steps +
+    exclusions only exist here if the seed script re-applies them."""
+    with _seed_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.slug, s.name, s.steps, s.exclusions
+            FROM services s JOIN categories c ON c.id = s.category_id
+            WHERE s.steps IS NOT NULL OR s.exclusions IS NOT NULL
+            """
+        )
+        actual = {(slug, name): (steps, exclusions) for slug, name, steps, exclusions in cur}
+    assert actual == SERVICE_DETAILS

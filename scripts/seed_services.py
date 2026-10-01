@@ -17,6 +17,7 @@ from sqlalchemy import select
 from app.database import AsyncSessionLocal
 from app.models.category import Category
 from app.models.service import Service
+from app.seed_data.service_details import apply_service_details
 
 # Catalog data lives in JSON (keyed by category slug, must match
 # seed_categories.py) so it can be edited without touching the seeding logic.
@@ -49,6 +50,10 @@ async def seed():
                     continue
                 db.add(Service(category_id=cat.id, is_active=True, **svc))
                 print(f"  + Created service: {svc['name']} ({slug})")
+        # SVC-340: steps + exclusions. The migration ran before these rows
+        # existed, so a fresh DB only gets the text from here.
+        for cat_slug, name in await apply_service_details(db):
+            print(f"  ! service details: no service {cat_slug} / {name}")
         await db.commit()
     print("Done.")
 

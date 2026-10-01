@@ -157,6 +157,8 @@ class CatalogService:
             related=related,
             banner_image_url=service.banner_image_url,
             banner_video_url=service.banner_video_url,
+            steps=service.steps,
+            exclusions=service.exclusions,
         )
 
     async def _load_related(self, service_id: uuid.UUID) -> RelatedServicesBucket:

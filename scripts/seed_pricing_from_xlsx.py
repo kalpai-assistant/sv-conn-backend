@@ -65,6 +65,7 @@ from app.models.provider_service import ProviderService  # noqa: E402
 from app.models.service import Service  # noqa: E402
 from app.models.service_variant import ServiceVariant  # noqa: E402
 from app.seed_data.l1_hierarchy import L2_SLUGS, MISCELLANEOUS_L1_SLUG  # noqa: E402
+from app.seed_data.service_details import apply_service_details  # noqa: E402
 
 DEFAULT_XLSX = Path(__file__).resolve().parent.parent / "EazyServ_Pune_Pricing_List.xlsx"
 
@@ -418,6 +419,12 @@ async def seed(rows: list[VariantRow], force: bool = False) -> None:
                 variant_count += 1
             # services.base_price = min of its variants' base_price ("starting at").
             svc.base_price = min(r.base_price for r in group)
+
+        # SVC-340: the wipe above deleted every service, steps + exclusions
+        # with it, so put them back on the recreated rows. Flushes first so
+        # the UPDATE sees them.
+        for cat_slug, name in await apply_service_details(db):
+            print(f"! service details: no service {cat_slug} / {name}")
 
         await db.commit()
 

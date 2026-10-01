@@ -112,6 +112,11 @@ class ServiceDetailResponse(ServiceResponse):
     joins to surface the rails."""
 
     related: RelatedServicesBucket = RelatedServicesBucket()
+    # SVC-340: what the Pro does (ordered) and what the service doesn't cover.
+    # Detail-only — the list stays lean. None means no data; the frontend
+    # hides the section, as it does for an empty list.
+    steps: list[str] | None = None
+    exclusions: list[str] | None = None
 
 
 class CategoryResponse(BaseModel):
