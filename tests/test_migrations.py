@@ -1,5 +1,5 @@
 """
-Migration round trips on a scratch database (SVC-319, SVC-339).
+Migration round trips on a scratch database (SVC-319, SVC-339, SVC-340).
 
 The rest of the suite builds its schema with ``Base.metadata.create_all``, and CI
 only ever runs ``alembic upgrade head`` — so a migration's ``downgrade()`` is not
@@ -39,6 +39,12 @@ SVC_339 = "b000e0a06330"
 BEFORE_SVC_339 = "f43a6075cfbb"
 SVC_339_FILE = (
     REPO_ROOT / "alembic" / "versions" / "b000e0a06330_svc_339_add_professionals_table_booking_.py"
+)
+# SVC-340 (service steps + exclusions) and the revision it builds on.
+SVC_340 = "4d1cca7bc41d"
+BEFORE_SVC_340 = SVC_339
+SVC_340_FILE = (
+    REPO_ROOT / "alembic" / "versions" / "4d1cca7bc41d_svc_340_add_steps_exclusions_to_services.py"
 )
 
 
@@ -394,3 +400,119 @@ def test_svc_339_backfill_is_idempotent(scratch_db):
     again = meaning(_professionals(scratch_db), _booking_professionals(scratch_db))
     assert again == meaning(pros, bookings)
     assert again[1][ids["booked"]] == ids["sunita"]
+
+
+# --- SVC-340: services.steps + services.exclusions -----------------------------
+
+
+def _svc_340_module():
+    """The SVC-340 migration module, so the tests run its own seed statement and
+    data rather than a copy that could drift from it."""
+    spec = importlib.util.spec_from_file_location("svc_340_migration", SVC_340_FILE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _seed_before_svc_340(url: URL) -> dict:
+    """Services in the schema as it stood before SVC-340.
+
+    Two match seed keys, one of them with the apostrophe in "Men's haircut". Two
+    don't: a different name in a seeded category, and a seeded name in a
+    category the seed doesn't name — the key is (category slug, name), not name.
+    """
+    cats = {slug: uuid.uuid4() for slug in ("plumber", "salon-men", "svc-340-other")}
+    ids = {key: uuid.uuid4() for key in ("drain", "haircut", "beard", "decoy")}
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            for slug, cat_id in cats.items():
+                conn.execute(
+                    text(
+                        "INSERT INTO categories (id, name, slug, is_active, sort_order) "
+                        "VALUES (:id, :name, :slug, true, 1)"
+                    ),
+                    {"id": cat_id, "name": f"SVC-340 {slug}", "slug": slug},
+                )
+            for key, slug, name in (
+                ("drain", "plumber", "Drain blockage removal"),
+                ("haircut", "salon-men", "Men's haircut"),
+                ("beard", "salon-men", "Beard styling"),
+                ("decoy", "svc-340-other", "Drain blockage removal"),
+            ):
+                conn.execute(
+                    text(
+                        "INSERT INTO services (id, category_id, name, base_price, "
+                        "duration_minutes, is_active) "
+                        "VALUES (:id, :category_id, :name, 99, 60, true)"
+                    ),
+                    {"id": ids[key], "category_id": cats[slug], "name": name},
+                )
+    finally:
+        engine.dispose()
+    return ids
+
+
+def _service_details(url: URL) -> dict:
+    """``{service_id: (steps, exclusions)}``."""
+    rows = _query(url, "SELECT id, steps, exclusions FROM services")
+    return {row["id"]: (row["steps"], row["exclusions"]) for row in rows}
+
+
+def test_svc_340_seed_data_is_the_ten_services_in_ticket_shape():
+    details = _svc_340_module().SERVICE_DETAILS
+    assert len(details) == 10
+    assert len({slug for slug, _ in details}) == 10, "one service per sub-category"
+    for key, (steps, exclusions) in details.items():
+        assert 4 <= len(steps) <= 6, key
+        assert 2 <= len(exclusions) <= 4, key
+        assert all(isinstance(s, str) and s.strip() for s in steps + exclusions), key
+
+
+def test_svc_340_adds_nullable_jsonb_columns_and_downgrade_restores_services(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_340)
+    before = _shape(scratch_db, "services")
+
+    _alembic(scratch_db, "upgrade", SVC_340)
+    upgraded = _shape(scratch_db, "services")
+    columns = {name: (type_, nullable) for name, type_, nullable in upgraded["columns"]}
+    assert columns["steps"] == ("JSONB", True)
+    assert columns["exclusions"] == ("JSONB", True)
+    # Only the two columns changed: no index, constraint or key.
+    assert {k: v for k, v in upgraded.items() if k != "columns"} == {
+        k: v for k, v in before.items() if k != "columns"
+    }
+    assert set(upgraded["columns"]) - set(before["columns"]) == {
+        ("steps", "JSONB", True),
+        ("exclusions", "JSONB", True),
+    }
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_340)
+    assert _shape(scratch_db, "services") == before
+
+
+def test_svc_340_seeds_matching_services_only_and_is_idempotent(scratch_db):
+    module = _svc_340_module()
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_340)
+    ids = _seed_before_svc_340(scratch_db)
+
+    _alembic(scratch_db, "upgrade", SVC_340)
+
+    details = _service_details(scratch_db)
+    assert details[ids["drain"]] == module.SERVICE_DETAILS[("plumber", "Drain blockage removal")]
+    assert details[ids["haircut"]] == module.SERVICE_DETAILS[("salon-men", "Men's haircut")]
+    assert details[ids["beard"]] == (None, None), "name not in the seed"
+    assert details[ids["decoy"]] == (None, None), "seeded name, but in another category"
+
+    # The migration's own statement, run a second time: same rows, same values.
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            matched = sum(
+                conn.execute(text(module.UPDATE_SERVICE_DETAILS), params).rowcount
+                for params in module.service_details_params()
+            )
+    finally:
+        engine.dispose()
+    assert matched == 2
+    assert _service_details(scratch_db) == details

@@ -13,7 +13,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -46,6 +46,11 @@ class Service(Base):
     # they are, so a service without curated media renders intentionally.
     banner_image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     banner_video_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # SVC-340: what the Pro does (ordered) and what the service doesn't cover,
+    # shown on the service detail page. NULL means "no data" and the frontend
+    # hides the section. Edited by SQL only — there is no admin UI.
+    steps: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    exclusions: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

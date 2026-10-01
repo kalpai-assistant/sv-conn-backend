@@ -137,6 +137,7 @@ Rate limiting: 5 OTP attempts per phone per hour, tracked in Redis.
 - **RBAC**: `require_role("admin")` / `require_role("provider")` is a dependency factory — returns a FastAPI dependency
 - **SMS abstraction**: `AbstractSMSClient` → `MSG91Client` / `TwilioClient`; swap via config without touching callers
 - **Commission split**: 80/20 (provider/platform) calculated at booking creation in `booking_service.py`
+- **Service steps / exclusions (SVC-340)**: nullable JSONB lists on `services`, returned only by `GET /services/{id}` (`ServiceDetailResponse`), never the list. NULL = hide the section. Edited by SQL only (no admin UI); seed rows are keyed by (category slug, service name) since `services` has no slug.
 - **Geo queries**: PostGIS-backed; `app/utils/geo.py` builds WKT geometries; nearby provider search uses `ST_Distance`
 - **PII encryption**: AES-256 via `app/utils/encryption.py` for sensitive fields at rest
 - **WebSocket auth**: JWT passed as `?token=<jwt>` query param, validated per connection in `app/routers/tracking.py`
