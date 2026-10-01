@@ -167,6 +167,16 @@ class ProviderProfile(Base):
         remote_side=[user_id],
         foreign_keys=[parent_provider_id],
     )
+    # SVC-339: the people who do this SP's jobs — one row (the Pro-for-self) for
+    # every provider today. Lazy by default; under AsyncSession load it with
+    # ``selectinload``. ``passive_deletes`` leaves removing them to the FK's
+    # ON DELETE CASCADE instead of having the ORM null out a NOT NULL column.
+    professionals: Mapped[list["Professional"]] = relationship(
+        "Professional",
+        back_populates="service_provider",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     @property
     def service_area_lat(self) -> float | None:
@@ -228,6 +238,10 @@ class ProviderProfile(Base):
             stored.append(PayoutMethod.BANK)
         return stored
 
+    # Deprecated — use booking.professional.service_provider_id going forward
+    # (SVC-339). Built for SVC-319's single-entity design, which the two-entity
+    # model superseded; kept until a cleanup ticket drops it with
+    # ``parent_provider_id``.
     @property
     def payout_target_id(self) -> uuid.UUID:
         """The provider whose payout account receives this provider's earnings.

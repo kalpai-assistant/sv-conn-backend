@@ -143,9 +143,17 @@ Rate limiting: 5 OTP attempts per phone per hour, tracked in Redis.
 - **Celery + async DB**: Workers use `SyncSessionLocal` (derived from async URL) since Celery is sync
 - **CORS**: `CORS_ALLOWED_ORIGINS` env var, comma-separated. Dev default in `config.py` covers localhost + Capacitor + prod web. Wildcard deliberately not accepted (spec violation with `allow_credentials=True`).
 
-### Provider team model (SVC-318, Phase A: SVC-319)
+### Provider team model (SVC-318)
 
-`provider_profiles.parent_provider_id` is a nullable self-reference to the team owner's `provider_profiles.user_id` (`ON DELETE SET NULL`). `NULL` means a solo provider *or* a team owner; the two look the same until a member points at the owner. Set means a team member. Everyone keeps the single `"provider"` role, and dispatch is unchanged. The payout rule lives in one place, `ProviderProfile.payout_target_id`: `parent_provider_id or user_id`, so a member's earnings belong to their owner. `booking.provider_id` keeps meaning "who accepted the job". No payout code reads `payout_target_id` yet (payouts wait on RazorpayX); route payee lookups through it when they do. Chain depth is 1, enforced in service code at invite-accept time (Phase B), not by a DB constraint.
+Design: `docs/pro-entity/HLD.md` + `LLD.md`; ticket order in `DELIVERY.md`.
+
+#### Two-entity model (SP + Pro) — SVC-339
+
+A **Service Provider (SP)** is the business: it receives dispatch and is paid. It is still the `provider_profiles` table and `ProviderProfile` model; the rename to `service_providers` is deliberately a separate ticket. A **Professional (Pro)** is the person at the door: `professionals` / `Professional`, belonging to exactly one SP via `service_provider_id` → `provider_profiles.user_id` (`ON DELETE CASCADE`, `UNIQUE (user_id, service_provider_id)`). Every SP has a **Pro-for-self** sharing its `user_id` — the solo case is one person, two rows; the SVC-339 migration created one for every provider and pointed every existing booking's `bookings.professional_id` at it. `reviews.professional_id` (the docs call that table `booking_ratings`) is the Pro being rated. **Payout resolution**: the payee is `booking.professional.service_provider_id`, never the Pro; for a solo booking that equals `booking.provider_id`, which today's payout code still reads. Phase A is schema only — nothing creates a Pro for a provider who signs up after the migration, and nothing writes `bookings.professional_id` for new bookings, until Phase B's onboarding and `/assign` work. Until then a NULL `professional_id` is normal.
+
+#### Legacy: single-entity design — SVC-319 (superseded)
+
+Dormant; a cleanup ticket drops it. `provider_profiles.parent_provider_id` is a nullable self-reference to the team owner's `provider_profiles.user_id` (`ON DELETE SET NULL`). `NULL` means a solo provider *or* a team owner; the two look the same until a member points at the owner. Set means a team member. Everyone keeps the single `"provider"` role, and dispatch is unchanged. The payout rule lives in one place, `ProviderProfile.payout_target_id`: `parent_provider_id or user_id`, so a member's earnings belong to their owner. `booking.provider_id` keeps meaning "who accepted the job". No code reads `payout_target_id`, and it is deprecated: route payee lookups through `booking.professional.service_provider_id` instead. Every row's `parent_provider_id` is NULL. Chain depth is 1, enforced in service code at invite-accept time (Phase B), not by a DB constraint.
 
 ### Infrastructure (docker-compose)
 
