@@ -200,6 +200,8 @@ async def mark_en_route(
         new_status=BookingStatus.EN_ROUTE,
         changed_by=current_user.id,
     )
+    # SVC-334: the consumer is waiting on exactly this, and it used to be silent.
+    send_booking_notification.delay(booking_id=str(booking.id), event="en_route")
     # The window SVC-169 is about: ACCEPTED and EN_ROUTE are the two states
     # where the PIN is still live, and both of these routes are provider-driven.
     return BookingResponse.for_viewer(booking, current_user.id)

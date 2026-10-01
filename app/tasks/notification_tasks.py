@@ -75,6 +75,10 @@ NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
         "title": "Booking Confirmed",
         "body": "Your provider has accepted the booking and will arrive soon.",
     },
+    "en_route": {
+        "title": "Provider on the way",
+        "body": "Your provider is on the way to you.",
+    },
     "in_progress": {
         "title": "Service Started",
         "body": "Your service is now in progress.",
@@ -353,7 +357,12 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                     else [booking.provider]
                 )
             else:
-                recipients = [booking.provider if event == "accepted" else booking.consumer]
+                # Every other lifecycle event is news for the consumer: the
+                # provider caused it, so they already know. `accepted` used to
+                # go to the provider (SVC-334), which meant the consumer's first
+                # push was "Service Started", with the provider already at the
+                # door.
+                recipients = [booking.consumer]
 
             for recipient in recipients:
                 if not (recipient and getattr(recipient, "fcm_token", None)):
