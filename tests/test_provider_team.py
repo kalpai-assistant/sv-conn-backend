@@ -489,3 +489,15 @@ async def test_real_send_truncates_var1_to_the_dlt_limit(monkeypatch):
         await sms_client.send_team_invite("+919876543210", "A" * 100, "tok")
     [recipient] = post.await_args.kwargs["json"]["recipients"]
     assert recipient["var1"] == "A" * 30
+
+
+@pytest.mark.asyncio
+async def test_kyc_gate_does_not_create_an_sp_for_a_provider_without_a_profile(
+    client, db_session, auth_headers
+):
+    user = await UserFactory.create(db_session, role="provider")
+    resp = await _invite(client, auth_headers, user, "+919876543210")
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "INVITER_PAYOUT_KYC_INCOMPLETE"
+    assert await ProviderService(db_session).get_profile(user.id) is None
+    assert await _pros_of(db_session, user.id) == []

@@ -67,8 +67,10 @@ class TeamService:
         simply retry. The reverse, SMS sent but commit failing, texts a token
         that doesn't exist; the invitee gets a 404 on accept. Rare and harmless.
         """
-        profile, _ = await ProviderService(self.db).get_or_create_profile(sp_user.id)
-        if profile.kyc_status != KYCStatus.VERIFIED:
+        # A plain read: a provider with no profile yet is simply unverified, and
+        # a rejected invite shouldn't create an SP as a side effect.
+        profile = await ProviderService(self.db).get_profile(sp_user.id)
+        if profile is None or profile.kyc_status != KYCStatus.VERIFIED:
             raise AppException(
                 "Complete your KYC before inviting team members. "
                 "Your team's earnings are paid to you, so payouts must be set up first.",
@@ -276,7 +278,7 @@ class TeamService:
                 existing_here = row
             elif row.is_active:
                 raise AppException(
-                    "You're already part of another team. Leave it before joining a new one.",
+                    "You're already on another team, and you can only be on one at a time.",
                     status_code=status.HTTP_400_BAD_REQUEST,
                     code=ALREADY_PRO_ELSEWHERE,
                 )
