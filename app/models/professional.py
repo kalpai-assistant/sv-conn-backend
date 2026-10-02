@@ -30,9 +30,10 @@ class Professional(Base):
     ``user_id`` (the solo case: one person, two rows), so the migration that adds
     this table creates one for every existing provider.
 
-    Nothing reads or writes this table yet beyond that backfill. Dispatch, the
-    ``/pros/*`` endpoints and the pick-a-Pro step are Phase B; see
-    ``docs/pro-entity/LLD.md``.
+    SVC-320 (Phase B, PR 1) writes it in two places: provider signup creates the
+    Pro-for-self alongside the SP row, and accepting a team invite creates (or
+    reactivates) a team member's row. Dispatch, the ``/pros/*`` endpoints and the
+    pick-a-Pro step come later; see ``docs/pro-entity/LLD.md``.
     """
 
     __tablename__ = "professionals"
@@ -101,12 +102,24 @@ class Professional(Base):
     )
     last_location_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # SVC-320: removing a Pro from a team is a soft delete. The row stays,
+    # because bookings and reviews point at it. Only active rows count as team
+    # members, and for the one-SP-at-a-time rule at accept-invite.
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+    @property
+    def is_self(self) -> bool:
+        """True for an SP's Pro-for-self: the same person on both rows."""
+        return self.user_id == self.service_provider_id
 
     # Relationships
     # Lazy by default, like ``ProviderProfile.parent``: under AsyncSession,

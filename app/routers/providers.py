@@ -22,9 +22,17 @@ from app.schemas.provider import (
     ProviderServiceSubscriptionResponse,
     ProviderStatusUpdate,
 )
+from app.schemas.team import (
+    AcceptInviteRequest,
+    ProfessionalResponse,
+    TeamInviteCreate,
+    TeamInviteResponse,
+)
 from app.services.booking_service import BookingService
 from app.services.payout_service import PayoutService
 from app.services.provider_service import ProviderService
+from app.services.team_service import TeamService
+from app.utils.rate_limiter import rate_limit
 
 router = APIRouter(prefix="/providers", tags=["Providers"])
 
@@ -357,3 +365,78 @@ async def submit_kyc(
         selfie_ext=selfie_ext,
     )
     return profile
+
+
+# ---------------------------------------------------------------------------
+# SP team management (SVC-320, Phase B PR 1)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/me/team/invites",
+    status_code=status.HTTP_201_CREATED,
+    response_model=TeamInviteResponse,
+    dependencies=[Depends(rate_limit("team_invite_create", max_requests=5))],
+)
+async def create_team_invite(
+    request: TeamInviteCreate,
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Invite a phone number to join my team as a Pro, by SMS.
+
+    403 ``INVITER_PAYOUT_KYC_INCOMPLETE`` until my KYC is verified (SVC-327):
+    team earnings are paid to me. 5 per hour. The link is single-use and lasts 7
+    days. Until the DLT template is approved (SVC-328) the SMS is only logged as
+    ``[MOCK INVITE]``; the response carries the link either way.
+    """
+    return await TeamService(db).create_invite(current_user, request.invitee_phone)
+
+
+@router.post("/me/team/invites/{invite_id}/revoke", response_model=TeamInviteResponse)
+async def revoke_team_invite(
+    invite_id: UUID,
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel a pending invite. 409 once it's accepted, revoked or expired."""
+    return await TeamService(db).revoke_invite(current_user.id, invite_id)
+
+
+@router.get("/me/team", response_model=list[ProfessionalResponse])
+async def list_my_team(
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Active Pros under my SP, my own Pro-for-self (``is_self``) first."""
+    return await TeamService(db).list_team(current_user.id)
+
+
+@router.delete("/me/team/{pro_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_team_member(
+    pro_id: UUID,
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a Pro from my team (soft: the row is kept for past bookings).
+
+    400 ``CANNOT_REMOVE_SELF`` for my own Pro-for-self; going off-tools is SVC-326.
+    """
+    await TeamService(db).remove_pro(current_user.id, pro_id)
+
+
+@router.post("/me/accept-invite", response_model=ProfessionalResponse)
+async def accept_team_invite(
+    request: AcceptInviteRequest,
+    # Not provider-only: the app signs everyone up as a consumer, so most
+    # invitees are consumers. The invite is bound to their phone instead.
+    current_user: User = Depends(require_role("consumer", "provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Join the inviting SP's team. Returns my new (or reactivated) Pro row.
+
+    403 if the invite was sent to another phone; 404 unknown token; 410 used,
+    revoked or expired; 400 ``ALREADY_PRO_ELSEWHERE`` while I'm an active Pro
+    under another SP (an SP's own Pro-for-self counts); 409 already on this team.
+    """
+    return await TeamService(db).accept_invite(current_user, request.token)
