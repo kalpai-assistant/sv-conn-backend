@@ -16,11 +16,12 @@ from app.database import Base
 # template, or telcos drop the SMS.
 INVITE_URL_BASE = "https://app.eazyserv.com/invite?t="
 
-# ``secrets.token_urlsafe(n)`` yields ~1.33n characters: 48 → 64 chars, per the
-# ticket. NB: DLT caps each template variable at 30 characters, so a token
-# texted on its own (template holds the URL prefix) needs n ≤ 22, and a full URL
-# in one variable can't fit at all. Pending SVC-328's final template shape.
-INVITE_TOKEN_BYTES = 48
+# ``secrets.token_urlsafe(22)`` is 30 characters: 176 bits of entropy, sized to
+# Indian DLT's 30-character cap on a template variable so the token alone fits
+# var2 when the template carries the URL prefix. The ticket said 48 (64 chars),
+# which no DLT variable can hold. 176 bits is ample for a 7-day single-use token,
+# and accept-invite also requires the caller's phone to match.
+INVITE_TOKEN_BYTES = 22
 
 
 class InviteStatus(str, enum.Enum):
@@ -78,7 +79,8 @@ class ProviderTeamInvite(Base):
     # Canonical ``+91XXXXXXXXXX``, the same form ``users.phone`` holds, so
     # accept-invite can compare the two directly.
     invitee_phone: Mapped[str] = mapped_column(String(20), nullable=False)
-    # ``secrets.token_urlsafe(48)`` is 64 characters; 96 leaves headroom.
+    # 30 characters today (INVITE_TOKEN_BYTES); 96 leaves headroom to change it
+    # without a migration.
     token: Mapped[str] = mapped_column(String(96), nullable=False, unique=True)
     status: Mapped[str] = mapped_column(
         String(16),

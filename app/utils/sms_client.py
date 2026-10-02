@@ -171,7 +171,8 @@ async def send_team_invite(phone: str, business_name: str, token: str) -> None:
     var1 = business_name[:_DLT_VAR_MAX_CHARS]
     # The full URL, for a template body ending "Tap to accept: {#var#}". If the
     # approved template carries the URL prefix itself, this becomes ``token``.
-    # Either way the value must fit _DLT_VAR_MAX_CHARS; see INVITE_TOKEN_BYTES.
+    # The token alone (30 chars) fits _DLT_VAR_MAX_CHARS; the full URL does not,
+    # so a real send needs the token-only shape. See INVITE_TOKEN_BYTES.
     var2 = invite_url
 
     body = {

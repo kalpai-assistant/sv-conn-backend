@@ -74,7 +74,7 @@ CREATE TABLE provider_team_invites (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     invited_by            UUID NOT NULL REFERENCES service_providers(user_id) ON DELETE CASCADE,
     invitee_phone         VARCHAR(20) NOT NULL,          -- canonical +91XXXXXXXXXX, same as users.phone
-    token                 VARCHAR(96) NOT NULL UNIQUE,   -- secrets.token_urlsafe(48); single-use
+    token                 VARCHAR(96) NOT NULL UNIQUE,   -- secrets.token_urlsafe(22), 30 chars (DLT var cap); single-use
     status                VARCHAR(16) NOT NULL DEFAULT 'PENDING',  -- PENDING | ACCEPTED | REVOKED | EXPIRED
     expires_at            TIMESTAMPTZ NOT NULL,          -- created_at + 7 days
     accepted_at           TIMESTAMPTZ,

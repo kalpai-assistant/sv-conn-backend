@@ -113,7 +113,8 @@ async def test_create_invite_normalises_the_phone_and_logs_a_mock_sms(
     body = resp.json()
     assert body["invitee_phone"] == "+919876543210"
     assert body["status"] == "PENDING"
-    assert len(body["token"]) == 64  # token_urlsafe(48)
+    # token_urlsafe(22): fits a 30-char DLT template variable on its own.
+    assert len(body["token"]) == 30
     assert body["invite_url"] == f"https://app.eazyserv.com/invite?t={body['token']}"
     expires = datetime.fromisoformat(body["expires_at"])
     assert timedelta(days=6, hours=23) < expires - datetime.now(UTC) <= timedelta(days=7)
