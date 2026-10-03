@@ -39,7 +39,9 @@ def expire_stale_bookings():
         result = db.execute(
             update(Booking)
             .where(Booking.status == BookingStatus.REQUESTED)
-            .where(Booking.created_at < cutoff)
+            # The current offer window, not creation: a booking reopened after
+            # being accepted (SVC-320) gets a fresh two minutes.
+            .where(Booking.offer_window_start < cutoff)
             .where(Booking.payment_status == PaymentStatus.PENDING)
             .where(or_(Booking.scheduled_at.is_(None), Booking.scheduled_at <= now))
             .values(status=BookingStatus.EXPIRED)

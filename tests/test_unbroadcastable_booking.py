@@ -236,3 +236,103 @@ async def test_a_normal_booking_is_left_alone(db_session, committed):
 async def test_a_missing_booking_does_not_raise(db_session):
     """The task retries three times; a deleted booking must not loop on errors."""
     _run_broadcast(uuid.uuid4())
+
+
+# ---------------------------------------------------------------------------
+# Paid bookings are never expired here (SVC-320 PR 2)
+# ---------------------------------------------------------------------------
+#
+# Expiry doesn't refund, and force_cancel refuses an EXPIRED booking, so a paid
+# booking expired by the broadcast would strand the money. It stays REQUESTED
+# instead; the consumer's cancel refunds it. Unpaid ones still expire at once
+# (test_no_eligible_provider_expires_immediately above is the regression guard).
+
+
+@pytest.mark.asyncio
+async def test_a_paid_booking_with_no_eligible_provider_is_kept(db_session, committed, caplog):
+    import logging
+
+    from app.models.booking import PaymentStatus
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    addr = await _address(db_session, consumer.id)
+    booking = await BookingFactory.create(
+        db_session,
+        consumer_id=consumer.id,
+        provider_id=None,
+        address_id=addr.id,
+        status=BookingStatus.REQUESTED,
+        payment_status=PaymentStatus.PAID,
+    )
+    committed.extend([booking, addr, consumer])
+    await db_session.commit()
+
+    with caplog.at_level(logging.INFO, logger="app.tasks.notification_tasks"):
+        _run_broadcast(booking.id)
+
+    assert await _status_of(db_session, booking) == BookingStatus.REQUESTED
+    assert any(
+        "booking.unbroadcastable_paid_kept" in r.getMessage()
+        and "reason=no-eligible-provider" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_reopened_paid_booking_with_no_takers_is_kept(db_session, committed):
+    """The case reopen creates: the only eligible SP is the one that gave it back,
+    so the re-broadcast has no recipients. Paid, so it must not expire."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.models.booking import PaymentStatus
+    from app.models.booking_item import BookingItem
+    from app.models.booking_offer import BookingOffer, OfferResponse
+    from app.models.provider_profile import KYCStatus, ProviderProfile
+    from app.models.provider_service import ProviderService
+    from app.utils.geo import build_point_wkt
+
+    consumer = await UserFactory.create(db_session, role="consumer")
+    releaser = await UserFactory.create(db_session, role="provider")
+    addr = await _address(db_session, consumer.id)
+    booking = await BookingFactory.create(
+        db_session,
+        consumer_id=consumer.id,
+        provider_id=None,
+        address_id=addr.id,
+        status=BookingStatus.REQUESTED,
+        payment_status=PaymentStatus.PAID,
+    )
+    booking.reopened_at = datetime.now(UTC)
+    db_session.add(
+        ProviderProfile(
+            user_id=releaser.id,
+            is_online=True,
+            kyc_status=KYCStatus.VERIFIED,
+            service_area_center=build_point_wkt(*PUNE),
+            service_area_radius_km=25,
+        )
+    )
+    await db_session.flush()
+    items = (
+        await db_session.scalars(select(BookingItem).where(BookingItem.booking_id == booking.id))
+    ).all()
+    for item in items:
+        db_session.add(ProviderService(provider_id=releaser.id, service_id=item.service_id))
+    # What reopen leaves behind: the releasing SP's answered offer row.
+    db_session.add(
+        BookingOffer(
+            booking_id=booking.id,
+            provider_id=releaser.id,
+            response=OfferResponse.ACCEPTED,
+            responded_at=datetime.now(UTC),
+        )
+    )
+    await db_session.flush()
+    committed.extend([booking, addr, releaser, consumer])
+    await db_session.commit()
+
+    _run_broadcast(booking.id)
+
+    assert await _status_of(db_session, booking) == BookingStatus.REQUESTED

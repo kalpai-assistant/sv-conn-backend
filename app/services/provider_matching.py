@@ -17,8 +17,9 @@ intersect" that would run N queries and merge in Python).
 
 from collections.abc import Sequence
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, exists, func, select
 
+from app.models.booking_offer import BookingOffer
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.user import User
@@ -150,6 +151,28 @@ def eligible_providers_multi_stmt(service_ids: Sequence, address_location) -> Se
         # enforces uniqueness) would otherwise inflate the count and
         # falsely qualify a provider.
         .having(func.count(func.distinct(ProviderServiceModel.service_id)) == len(service_ids))
+    )
+
+
+def broadcast_recipients_stmt(service_ids: Sequence, address_location, booking_id) -> Select:
+    """Who the ``new_request`` push for this booking goes to: everyone eligible,
+    minus SPs who already answered this booking's offer (SVC-320).
+
+    The exclusion is for a reopened booking, broadcast a second time. It leaves
+    out the SP that gave it back (its row is ACCEPTED or DECLINED) and any that
+    declined it; the offer poll already skips answered rows the same way. A
+    first broadcast has no rows yet, and a Celery retry's rows are still
+    unanswered, so for those this is exactly ``eligible_providers_multi_stmt``.
+
+    Eligibility itself, and so who may *accept*, is unchanged: this narrows who
+    is pushed, not who is allowed.
+    """
+    return eligible_providers_multi_stmt(service_ids, address_location).where(
+        ~exists().where(
+            BookingOffer.booking_id == booking_id,
+            BookingOffer.provider_id == User.id,
+            BookingOffer.response.is_not(None),
+        )
     )
 
 

@@ -393,6 +393,17 @@ async def create_team_invite(
     return await TeamService(db).create_invite(current_user, request.invitee_phone)
 
 
+@router.get("/me/team/invites", response_model=list[TeamInviteResponse])
+async def list_team_invites(
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Every invite I've sent, newest first, with its status (PENDING, ACCEPTED,
+    REVOKED or EXPIRED). Pending ones carry the code, so the app can re-show or
+    revoke them after a reload."""
+    return await TeamService(db).list_invites(current_user.id)
+
+
 @router.post("/me/team/invites/{invite_id}/revoke", response_model=TeamInviteResponse)
 async def revoke_team_invite(
     invite_id: UUID,
