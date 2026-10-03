@@ -216,6 +216,34 @@ class TeamService:
         await self.db.refresh(invite)
         return invite
 
+    async def list_invites(self, sp_id: uuid.UUID) -> list[ProviderTeamInvite]:
+        """Every invite this SP has sent, newest first, any status (SVC-320 PR 2).
+
+        Lets the SP UI find a pending invite to revoke after a reload, and shows
+        what became of the rest. Stale PENDING rows are expired on the way out,
+        and the flip is saved, so the list never shows a dead invite as live.
+        """
+        invites = list(
+            (
+                await self.db.execute(
+                    select(ProviderTeamInvite)
+                    .where(ProviderTeamInvite.invited_by == sp_id)
+                    .order_by(ProviderTeamInvite.created_at.desc(), ProviderTeamInvite.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        now = datetime.now(UTC)
+        stale = [
+            i for i in invites if i.status == InviteStatus.PENDING.value and not i.is_live(now)
+        ]
+        for invite in stale:
+            invite.status = InviteStatus.EXPIRED.value
+        if stale:
+            await self.db.flush()
+        return invites
+
     async def list_team(self, sp_id: uuid.UUID) -> list[Professional]:
         """Active Pros under this SP, Pro-for-self first, then by join date."""
         # Creates the SP (and so its Pro-for-self) if this is a provider's first

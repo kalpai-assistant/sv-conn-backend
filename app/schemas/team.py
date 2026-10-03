@@ -2,6 +2,7 @@
 
 import re
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -80,3 +81,36 @@ class ProfessionalResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# --- Two-level dispatch (SVC-320 PR 2) -----------------------------------------
+
+
+class AssignRequest(BaseModel):
+    professional_id: UUID
+
+
+class TeamPickPro(BaseModel):
+    """One row of the pick-a-Pro modal."""
+
+    id: UUID
+    display_name: str
+    profile_photo_url: str | None
+    is_self: bool
+    # Already on another unfinished job; /assign would answer 409 PRO_BUSY.
+    busy: bool
+
+
+class TeamPickResponse(BaseModel):
+    """202 from ``PATCH /bookings/{id}/accept`` with ``X-Team-Pick: 1``, for a
+    team SP. Nothing has been claimed: the claim is ``POST /bookings/{id}/assign``."""
+
+    booking_id: UUID
+    pros: list[TeamPickPro]
+
+
+class DeclineJobResponse(BaseModel):
+    booking_id: UUID
+    # awaiting_repick: the SP has another Pro and has been asked to pick one.
+    # reopened: nobody else on the team, so the job went back to the broadcast.
+    outcome: Literal["awaiting_repick", "reopened"]

@@ -577,12 +577,16 @@ def test_broadcast_push_leaks_neither_address_nor_amount():
         [_stub(fcm_token="tok_1")],
     )
 
-    assert set(sent[0]["data"]) == {"booking_id", "event"}
-    blob = f"{sent[0]['title']}{sent[0]['body']}{sent[0]['data']}"
-    assert FULL_ADDRESS not in blob
-    assert "Indiranagar" not in blob
-    assert "₹" not in blob
-    assert "1499" not in blob
+    # The data payload is exactly a pointer: these two keys, these two values.
+    # Pinned by value rather than by substring, because the booking id is a
+    # random UUID and a substring check on it fails whenever the hex happens to
+    # contain the needle (it did, "1499" in ~1 run in 2,000).
+    assert sent[0]["data"] == {"booking_id": str(booking.id), "event": "new_request"}
+    text = f"{sent[0]['title']} {sent[0]['body']}"
+    assert FULL_ADDRESS not in text
+    assert "Indiranagar" not in text
+    assert "₹" not in text
+    assert "1499" not in text
 
 
 def test_broadcast_bails_when_the_cart_is_empty():
@@ -672,9 +676,17 @@ def test_offer_and_broadcast_use_one_eligibility_definition():
     # broadcast now imports; either name would prove the invariant, but
     # naming both keeps the assertion resilient to a follow-up that folds
     # the two entry points back into one.
+    # SVC-320 wrapped it as ``broadcast_recipients_stmt`` (the same predicate,
+    # minus SPs who already answered a reopened booking), which lives in
+    # provider_matching too and is checked to delegate below.
     assert (
-        "eligible_providers_multi_stmt" in source or "eligible_providers_stmt" in source
+        "broadcast_recipients_stmt" in source
+        or "eligible_providers_multi_stmt" in source
+        or "eligible_providers_stmt" in source
     ), "the broadcast no longer calls the shared predicate"
+    assert "eligible_providers_multi_stmt(" in inspect.getsource(
+        provider_matching.broadcast_recipients_stmt
+    ), "broadcast_recipients_stmt must narrow the shared predicate, not replace it"
     for reimplemented in ("ST_DWithin", "kyc_status ==", "is_online"):
         assert (
             reimplemented not in source

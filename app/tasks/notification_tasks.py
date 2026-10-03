@@ -95,6 +95,23 @@ NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
         "title": "Booking Cancelled",
         "body": "This booking has been cancelled. No further action is needed.",
     },
+    # SVC-320 two-level dispatch. "assigned" goes to the picked Pro (never to
+    # an SP picking themselves); "pro_declined" to the SP, to re-pick;
+    # "reopened" to the consumer, who already had "Booking Confirmed" and is
+    # now waiting on a new search.
+    "assigned": {
+        "title": "Job assigned",
+        "body": "You've been assigned a new job.",
+    },
+    "pro_declined": {
+        "title": "Pick another professional",
+        # {pro} is the declining Pro's display name.
+        "body": "{pro} can't take this job. Assign someone else.",
+    },
+    "reopened": {
+        "title": "Finding another professional",
+        "body": "Your professional can't make it. We're finding you someone else.",
+    },
 }
 
 
@@ -204,6 +221,14 @@ def _expire_unbroadcastable(db, booking, reason: str) -> None:
     db.commit()
 
 
+def notify_reopened(booking_id) -> None:
+    """After a booking reopens (SVC-320): tell the consumer, then broadcast it
+    again. Enqueued by the router after the request's work is done, like every
+    other booking push."""
+    send_booking_notification.delay(booking_id=str(booking_id), event="reopened")
+    send_booking_notification.delay(booking_id=str(booking_id), event="new_request")
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -239,7 +264,7 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                 from app.models.address import Address
                 from app.models.booking_item import BookingItem
                 from app.services.booking_service import _summarise_service_names
-                from app.services.provider_matching import eligible_providers_multi_stmt
+                from app.services.provider_matching import broadcast_recipients_stmt
 
                 # Get the booking address location directly
                 address = db.get(Address, booking.consumer_address_id)
@@ -272,7 +297,7 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                 if not service_ids:
                     _expire_unbroadcastable(db, booking, "empty-cart")
                     return
-                stmt = eligible_providers_multi_stmt(service_ids, address.location)
+                stmt = broadcast_recipients_stmt(service_ids, address.location, booking.id)
                 recipients = db.execute(stmt).scalars().all()
                 # SVC-302: the observability half of SVC-276 / SVC-301. Without
                 # this line, "how many providers did we broadcast to" is not in
@@ -356,6 +381,32 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                     if actor_id and str(booking.provider_id) == actor_id
                     else [booking.provider]
                 )
+            elif event == "assigned":
+                from app.models.professional import Professional
+
+                pro = (
+                    db.get(Professional, booking.professional_id)
+                    if booking.professional_id
+                    else None
+                )
+                recipients = [pro.user] if pro is not None else []
+            elif event == "pro_declined":
+                from sqlalchemy import select as sync_select
+
+                from app.models.professional import Professional
+
+                # actor_id is the declining Pro's user; their row under this SP
+                # names them. The SP is still booking.provider.
+                pro = None
+                if actor_id and booking.provider_id:
+                    pro = db.execute(
+                        sync_select(Professional).where(
+                            Professional.user_id == actor_id,
+                            Professional.service_provider_id == booking.provider_id,
+                        )
+                    ).scalar_one_or_none()
+                body = template["body"].format(pro=pro.display_name if pro else "Your professional")
+                recipients = [booking.provider]
             else:
                 # Every other lifecycle event is news for the consumer: the
                 # provider caused it, so they already know. `accepted` used to

@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String, func
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -54,7 +55,15 @@ VALID_TRANSITIONS: dict[BookingStatus, list[BookingStatus]] = {
         BookingStatus.EXPIRED,
         BookingStatus.CANCELLED,
     ],
-    BookingStatus.ACCEPTED: [BookingStatus.EN_ROUTE, BookingStatus.CANCELLED],
+    # ACCEPTED → REQUESTED (SVC-320): the SP gives the job back, either because
+    # its last available Pro declined or by releasing it, and it is broadcast
+    # again. Driven only by ``BookingService.reopen``; no route passes it to
+    # ``transition_status``.
+    BookingStatus.ACCEPTED: [
+        BookingStatus.EN_ROUTE,
+        BookingStatus.CANCELLED,
+        BookingStatus.REQUESTED,
+    ],
     BookingStatus.EN_ROUTE: [BookingStatus.IN_PROGRESS, BookingStatus.CANCELLED],
     BookingStatus.IN_PROGRESS: [BookingStatus.COMPLETED],
     BookingStatus.COMPLETED: [],
@@ -181,6 +190,26 @@ class Booking(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    # SVC-320: when the booking last went back to REQUESTED after being
+    # accepted. NULL for a booking never reopened. The 2-minute offer window
+    # runs from ``offer_window_start``, so a reopened booking gets a fresh window
+    # instead of being swept the moment it reopens. ``created_at`` stays the
+    # booking's real creation time.
+    reopened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @hybrid_property
+    def offer_window_start(self) -> datetime:
+        """Start of the current offer window: the last reopen, else creation.
+
+        The single definition read by the expiry sweep, the offer poll and the
+        card's countdown, so the three can't disagree about when an offer dies.
+        """
+        return self.reopened_at or self.created_at
+
+    @offer_window_start.inplace.expression
+    @classmethod
+    def _offer_window_start_expression(cls):
+        return func.coalesce(cls.reopened_at, cls.created_at)
 
     # Relationships
     consumer: Mapped["User"] = relationship(

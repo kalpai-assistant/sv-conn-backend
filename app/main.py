@@ -24,6 +24,7 @@ from app.routers import (
     downloads,
     health,
     payments,
+    pros,
     providers,
     reviews,
     services,
@@ -142,6 +143,7 @@ def create_app() -> FastAPI:
     app.include_router(providers.router, prefix=prefix)
     app.include_router(services.router, prefix=prefix)
     app.include_router(bookings.router, prefix=prefix)
+    app.include_router(pros.router, prefix=prefix)
     app.include_router(payments.router, prefix=prefix)
     app.include_router(reviews.router, prefix=prefix)
     app.include_router(coupons.router, prefix=prefix)

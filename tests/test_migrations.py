@@ -654,3 +654,24 @@ def test_svc_320_backfill_is_idempotent(scratch_db):
     _alembic(scratch_db, "upgrade", SVC_320)
     assert _professionals(scratch_db) == pros
     assert _booking_professionals(scratch_db) == bookings
+
+
+# --- SVC-320 PR 2: bookings.reopened_at ------------------------------------------
+
+
+SVC_320_PR2 = "e937ca1c5a84"
+BEFORE_SVC_320_PR2 = SVC_320
+
+
+def test_svc_320_pr2_adds_a_nullable_reopened_at_and_downgrade_restores_bookings(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_320_PR2)
+    before = _shape(scratch_db, "bookings")
+
+    _alembic(scratch_db, "upgrade", SVC_320_PR2)
+    columns = {
+        name: (kind, nullable) for name, kind, nullable in _shape(scratch_db, "bookings")["columns"]
+    }
+    assert columns["reopened_at"] == ("TIMESTAMP", True)
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_320_PR2)
+    assert _shape(scratch_db, "bookings") == before

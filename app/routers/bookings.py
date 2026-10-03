@@ -19,8 +19,9 @@ from app.schemas.booking import (
     StartBookingRequest,
     TipBookingRequest,
 )
+from app.schemas.team import AssignRequest, TeamPickPro, TeamPickResponse
 from app.services.booking_service import BookingService
-from app.tasks.notification_tasks import send_booking_notification
+from app.tasks.notification_tasks import notify_reopened, send_booking_notification
 from app.tasks.payment_tasks import process_cash_payment
 from app.utils.idempotency import IdempotencyStore, hash_body
 from app.utils.rate_limiter import rate_limit
@@ -135,12 +136,24 @@ async def create_booking(
             "description": "The offer is over — claimed by another provider, "
             "cancelled, or expired. Dismiss the card."
         },
+        202: {
+            "model": TeamPickResponse,
+            "description": "Only with `X-Team-Pick: 1`, for an SP with a team: "
+            "nothing is claimed yet. Show the pick-a-Pro modal, then claim with "
+            "POST /bookings/{id}/assign.",
+        },
     },
 )
 async def accept_booking(
     booking_id: UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    # SVC-320: opt-in, so a client that doesn't know about the pick step (every
+    # app build before SVC-321) can never read "pick a Pro" as "you got it" —
+    # it treats any 2xx as a win. Without the header a team SP's accept claims
+    # with their own Pro-for-self, exactly like a solo SP's, and they can hand
+    # it on with /assign.
+    x_team_pick: str | None = Header(default=None, alias="X-Team-Pick"),
 ):
     """Claim a broadcast booking. First provider to accept wins.
 
@@ -150,11 +163,94 @@ async def accept_booking(
     tell the consumer twice, and returning an error would tell the *winning*
     provider they lost (SVC-154).
     """
-    booking, newly_accepted = await BookingService(db).accept_booking(
+    service = BookingService(db)
+    if x_team_pick == "1":
+        options = await service.team_pick_options(booking_id, current_user.id)
+        if options is not None:
+            body = TeamPickResponse(
+                booking_id=booking_id,
+                pros=[
+                    TeamPickPro(
+                        id=pro.id,
+                        display_name=pro.display_name,
+                        profile_photo_url=pro.profile_photo_url,
+                        is_self=pro.is_self,
+                        busy=busy,
+                    )
+                    for pro, busy in options
+                ],
+            )
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED, content=body.model_dump(mode="json")
+            )
+
+    booking, newly_accepted = await service.accept_booking(
         booking_id=booking_id, provider_id=current_user.id
     )
     if newly_accepted:
         send_booking_notification.delay(booking_id=str(booking.id), event="accepted")
+    return BookingResponse.for_viewer(booking, current_user.id)
+
+
+@router.post(
+    "/{booking_id}/assign",
+    response_model=BookingResponse,
+    dependencies=[Depends(require_role("provider"))],
+    responses={
+        403: {"description": "You were not offered this booking"},
+        404: {"description": "No such booking, or that Pro isn't on your team"},
+        409: {
+            "description": "PRO_BUSY: the Pro is on another unfinished job; or the "
+            "booking is already en route or later"
+        },
+        410: {"description": "The offer is over — claimed by another SP, cancelled or expired"},
+    },
+)
+async def assign_booking(
+    booking_id: UUID,
+    request: AssignRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Give this booking to one of my Pros (SVC-320 two-level dispatch).
+
+    On an open booking this is the claim, first write wins, with the same
+    answers as accept: 403 not offered, 410 gone. On a booking I already hold
+    at ACCEPTED it sets or replaces the Pro, e.g. after a decline. Assigning the
+    Pro already on it is an idempotent 200 with no push.
+    """
+    booking, newly_claimed, pro = await BookingService(db).assign(
+        booking_id=booking_id, sp_id=current_user.id, professional_id=request.professional_id
+    )
+    if newly_claimed:
+        send_booking_notification.delay(booking_id=str(booking.id), event="accepted")
+    if pro is not None and not pro.is_self:
+        send_booking_notification.delay(booking_id=str(booking.id), event="assigned")
+    return BookingResponse.for_viewer(booking, current_user.id)
+
+
+@router.post(
+    "/{booking_id}/release",
+    response_model=BookingResponse,
+    dependencies=[Depends(require_role("provider"))],
+    responses={
+        403: {"description": "You do not hold this booking"},
+        409: {"description": "Someone is already en route, or the booking is finished"},
+    },
+)
+async def release_booking(
+    booking_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Give an accepted booking back so other SPs can take it (SVC-320).
+
+    For when nobody on my team can do it. It goes back to REQUESTED with a
+    fresh 2-minute window, the consumer is told we're finding someone else, and
+    it is broadcast again to everyone except me. Only before anyone sets off.
+    """
+    booking = await BookingService(db).release(booking_id=booking_id, sp_id=current_user.id)
+    notify_reopened(booking.id)
     return BookingResponse.for_viewer(booking, current_user.id)
 
 

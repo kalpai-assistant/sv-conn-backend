@@ -99,6 +99,8 @@ CREATE UNIQUE INDEX ux_provider_team_invites_pending_code
 
 ### bookings (modified)
 
+`reopened_at TIMESTAMPTZ NULL` (SVC-320 PR 2): when the booking last went back to `requested` after being accepted. NULL = never reopened.
+
 ```sql
 ALTER TABLE bookings
     ADD COLUMN professional_id UUID NULL REFERENCES professionals(id);
@@ -146,30 +148,52 @@ Idempotency (step 4): the `UNIQUE (user_id, service_provider_id)` constraint mea
 
 ## Endpoints
 
-### Dispatch flow
+### Dispatch flow — shipped in SVC-320 PR 2
 
 ```
-POST /bookings                          → Consumer creates booking (existing, unchanged)
-[Dispatch fan-out]                      → Celery task; FCM to eligible SPs (existing shape, targets SPs)
+POST  /bookings                         → Consumer creates booking (unchanged)
+[Dispatch fan-out]                      → Celery task; FCM to eligible SPs (unchanged, targets SPs)
 
-POST /bookings/{id}/accept              → SP taps "accept"
-    - Solo SP: server calls /assign internally with the SP's Pro-for-self
-    - Team SP: no DB write; response is 200 with team-Pros list for the pick modal
+PATCH /bookings/{id}/accept             → SP taps "accept"
+    - Default (every client today): claims the booking with the SP's Pro-for-self
+      as professional_id. Solo and team SPs alike; same 403/404/410/idempotent-200
+      contract and the same single "accepted" push as before.
+    - With header `X-Team-Pick: 1`, for an SP with at least one active Pro besides
+      itself: no DB write → 202 {booking_id, pros: [{id, display_name,
+      profile_photo_url, is_self, busy}]}, Pro-for-self first. The claim is /assign.
+      Opt-in because older app builds treat any 2xx from /accept as "you got it".
 
-POST /bookings/{id}/assign              → SP picks a Pro (atomic, first-write-wins)
-    Body: { professional_id }
-    Guardrails:
-    - Auth: acting user must be the SP (booking's dispatch target)
-    - Verify professional_id belongs to acting SP
-    - Verify booking.status = 'requested' (else 409 Conflict — already assigned)
-    - Verify Pro is is_online = true and has no other active job
-    Actions (single transaction, SELECT ... FOR UPDATE on booking):
-    - booking.professional_id = pro.id
-    - booking.provider_id = pro.service_provider_id
-    - booking.status = 'assigned'
-    - Emit FCM to consumer with Pro + SP details
-    - Emit FCM to assigned Pro
+POST  /bookings/{id}/assign             → SP picks a Pro. Body: { professional_id }
+    Claim (booking REQUESTED, unclaimed): SELECT … FOR UPDATE, then the same
+      eligibility predicate and 403/410 ordering as accept; first write wins.
+      Sets professional_id, provider_id = the SP, status ACCEPTED (status log),
+      stamps the SP's offer row. Pushes "accepted" to the consumer, "assigned" to
+      the Pro (not when the SP picks itself).
+    Re-pick (caller already holds it at ACCEPTED): sets or replaces the Pro, no
+      status change, "assigned" push only. Same Pro again → idempotent 200.
+    404 PRO_NOT_FOUND unless the Pro is one of the caller's *active* Pros.
+    409 PRO_BUSY if the Pro holds another accepted/en-route/in-progress job
+      (/assign only — the default accept path never had this check).
+    409 once en route or later.
+    is_online is not checked: nothing sets professionals.is_online until PR 3's
+      /pros/me/online; the SP's own online state is already part of eligibility.
+
+POST  /bookings/{id}/release            → SP gives an ACCEPTED booking back (reopen, below).
+    403 if the caller doesn't hold it; 409 once en route.
+
+POST  /pros/me/jobs/{id}/decline        → the assigned Pro turns it down, before setting off.
+    Authorized by "caller has an ACTIVE professionals row = booking.professional_id",
+    not by role (invitees are consumers). Anyone else: 404 JOB_NOT_FOUND. 409 once
+    en route. professional_id is cleared, then:
+    - SP has another active Pro → stays ACCEPTED, outcome "awaiting_repick",
+      "pro_declined" push to the SP ("Pick another professional").
+    - otherwise (e.g. a solo SP declining its own job) → reopen, outcome "reopened".
 ```
+
+**Reopen** (ACCEPTED → REQUESTED, `BookingService.reopen`): clears `provider_id` and `professional_id`, sets `bookings.reopened_at = now()`, marks the releasing SP's offer row answered, logs the transition with `metadata.reason` (`pro_declined` / `released`). The doorstep OTP is kept. Then a "reopened" push to the consumer ("Finding another professional") and a fresh `new_request` broadcast.
+
+- **Offer window.** The expiry sweep, the offer poll and the card countdown all run from `offer_window_start = COALESCE(reopened_at, created_at)`. Without it a booking reopened minutes after creation would be swept on the next 30s pass.
+- **Re-broadcast** (`broadcast_recipients_stmt`): eligible SPs minus those who already answered this booking (the releasing SP, anyone who declined). The poll skips answered rows the same way. Eligibility to *accept* is unchanged.
 
 ### Pro-side app (NEW)
 
@@ -226,7 +250,7 @@ completed                             │
 (cancelled reachable from requested / assigned / en_route)
 ```
 
-**New edge: `assigned → requested`.** Triggered by (a) all Pros in team declining, or (b) explicit SP escalation. Booking becomes broadcast-eligible again.
+**New edge: `assigned → requested`** (`ACCEPTED → REQUESTED` in `VALID_TRANSITIONS`). Triggered by (a) the declining Pro being the SP's last active Pro, or (b) the SP releasing the job. Only `BookingService.reopen` drives it; no route passes it to `transition_status`. The booking becomes broadcast-eligible again with a fresh offer window.
 
 ## Frontend structure
 

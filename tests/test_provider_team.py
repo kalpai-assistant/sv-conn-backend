@@ -629,3 +629,45 @@ async def test_history_rows_with_the_same_code_do_not_block_a_new_invite(
     assert resp.status_code == 200
     row = await db_session.get(ProviderTeamInvite, uuid.UUID(new.json()["id"]))
     assert row.status == "ACCEPTED"
+
+
+# --- Listing invites (SVC-320 PR 2) ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_invites_is_newest_first_with_every_status(client, db_session, auth_headers):
+    sp = await _sp(db_session)
+    headers = auth_headers(str(sp.id), "provider")
+    phones = ["+919876543210", "+919876543211", "+919876543212"]
+    made = [(await _invite(client, auth_headers, sp, phone)).json() for phone in phones]
+    await client.post(f"{INVITES}/{made[1]['id']}/revoke", headers=headers)
+    # One transaction means one now(): spread created_at so the order is real.
+    for age, invite in enumerate(reversed(made)):
+        row = await db_session.get(ProviderTeamInvite, uuid.UUID(invite["id"]))
+        row.created_at = datetime.now(UTC) - timedelta(minutes=age)
+    # And one PENDING invite that has quietly expired.
+    stale = await db_session.get(ProviderTeamInvite, uuid.UUID(made[0]["id"]))
+    stale.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.flush()
+
+    resp = await client.get(INVITES, headers=headers)
+
+    assert resp.status_code == 200, resp.text
+    assert [(i["invitee_phone"], i["status"]) for i in resp.json()] == [
+        ("+919876543212", "PENDING"),
+        ("+919876543211", "REVOKED"),
+        ("+919876543210", "EXPIRED"),
+    ]
+    await db_session.refresh(stale)
+    assert stale.status == "EXPIRED", "the lazy expiry is saved, not just shown"
+
+
+@pytest.mark.asyncio
+async def test_list_invites_shows_only_mine(client, db_session, auth_headers):
+    sp, other = await _sp(db_session), await _sp(db_session)
+    await _invite(client, auth_headers, other, "+919876543210")
+    resp = await client.get(INVITES, headers=auth_headers(str(sp.id), "provider"))
+    assert resp.json() == []
+    consumer = await UserFactory.create(db_session, role="consumer")
+    resp = await client.get(INVITES, headers=auth_headers(str(consumer.id), "consumer"))
+    assert resp.status_code == 403

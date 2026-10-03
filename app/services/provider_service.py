@@ -5,6 +5,7 @@ toggling, and geospatial discovery.
 
 import asyncio
 import io
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -45,6 +46,8 @@ if TYPE_CHECKING:
 # week", "this month") so they must respect the user's local calendar boundary,
 # not UTC. Single-region for now; revisit when we have providers outside India.
 _IST = timezone(timedelta(hours=5, minutes=30))
+
+logger = logging.getLogger(__name__)
 
 EarningsRange = Literal["today", "week", "month"]
 
@@ -105,6 +108,30 @@ class ProviderService:
             self.db.add(await self._new_self_professional(profile))
             await self.db.flush()
         return profile, is_new
+
+    async def ensure_self_professional(self, sp_id: uuid.UUID) -> Professional:
+        """The SP's Pro-for-self, created if missing (SVC-320 PR 2).
+
+        Every SP has one since PR 1 (signup creates it, the migration backfilled
+        the rest), so a miss means a row made some other way: a test fixture, a
+        manual insert. Accept must never fail on that, so it repairs it.
+        """
+        pro = await self.db.scalar(
+            select(Professional).where(
+                Professional.service_provider_id == sp_id,
+                Professional.user_id == sp_id,
+            )
+        )
+        if pro is not None:
+            return pro
+        profile = await self.get_profile(sp_id)
+        if profile is None:
+            raise UserNotFound(sp_id)
+        logger.warning("provider.self_pro_missing sp=%s; creating it", sp_id)
+        pro = await self._new_self_professional(profile)
+        self.db.add(pro)
+        await self.db.flush()
+        return pro
 
     async def _new_self_professional(self, profile: ProviderProfile) -> Professional:
         user = await self.db.get(User, profile.user_id)

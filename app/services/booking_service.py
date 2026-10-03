@@ -3,12 +3,14 @@ Booking service: state machine enforcement, commission calculation,
 OTP-gated service start, and paginated listing.
 """
 
+import logging
 import secrets
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from fastapi import status
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +19,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from app.config import get_settings
 from app.exceptions import (
+    AppException,
     BookingNotFound,
     BookingOfferClosed,
     InvalidOTP,
@@ -34,6 +37,7 @@ from app.models.booking import (
 from app.models.booking_item import BookingItem
 from app.models.booking_offer import BookingOffer, OfferResponse
 from app.models.booking_status_log import BookingStatusLog
+from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.service import Service
 from app.models.service_variant import ServiceVariant
@@ -47,10 +51,24 @@ from app.schemas.booking import (
 from app.services.provider_matching import (
     is_eligible_provider_multi_stmt,
 )
+from app.services.provider_service import ProviderService
 from app.utils.geo import distance_km_to_point
 from app.utils.money import to_decimal
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+# A Pro holding a booking in one of these is on a job (SVC-320 ``assign``).
+_ACTIVE_JOB_STATUSES = (
+    BookingStatus.ACCEPTED,
+    BookingStatus.EN_ROUTE,
+    BookingStatus.IN_PROGRESS,
+)
+
+# Stable codes for two-level dispatch (SVC-320 PR 2).
+PRO_NOT_FOUND = "PRO_NOT_FOUND"
+PRO_BUSY = "PRO_BUSY"
+JOB_NOT_FOUND = "JOB_NOT_FOUND"
 
 
 class BookingService:
@@ -613,15 +631,16 @@ class BookingService:
         cutoff = datetime.now(UTC) - timeout
 
         # Genuinely open: REQUESTED, unclaimed, and inside the offer window.
-        # `created_at > cutoff` matters because `expire_stale_bookings` sweeps
-        # only every 30s, so a booking can sit past its deadline still REQUESTED.
+        # The window check matters because `expire_stale_bookings` sweeps only
+        # every 30s, so a booking can sit past its deadline still REQUESTED. It
+        # runs from `offer_window_start`, which a reopen (SVC-320) resets.
         open_bookings = (
             (
                 await self.db.execute(
                     select(Booking).where(
                         Booking.status == BookingStatus.REQUESTED,
                         Booking.provider_id.is_(None),
-                        Booking.created_at > cutoff,
+                        Booking.offer_window_start > cutoff,
                     )
                 )
             )
@@ -735,8 +754,8 @@ class BookingService:
     def _offer_expiry(booking: Booking) -> tuple[datetime, int]:
         """When this offer dies, and how long the card has left (SVC-166).
 
-        Derived from ``created_at`` + the configured timeout — the same pair
-        ``expire_stale_bookings`` sweeps on — so changing the timeout moves both
+        Derived from ``offer_window_start`` (creation, or the last reopen) +
+        the configured timeout — the same pair ``expire_stale_bookings`` sweeps on — so changing the timeout moves both
         the real expiry and what we advertise. Nothing is stored; there is no
         column and no migration behind this.
 
@@ -752,7 +771,7 @@ class BookingService:
           the card to dismiss.
         """
         timeout = timedelta(seconds=get_settings().BOOKING_REQUEST_TIMEOUT_SECONDS)
-        expires_at = booking.created_at + timeout
+        expires_at = booking.offer_window_start + timeout
         remaining = (expires_at - datetime.now(UTC)).total_seconds()
         return expires_at, max(0, int(remaining))
 
@@ -776,25 +795,57 @@ class BookingService:
         response send "Booking Confirmed" again on every retry — worse than the
         error it replaces.
 
-        Order matters, and each branch is a case the card has to tell apart:
+        The precondition ladder lives in ``_check_claim``; see it for why the
+        order is what it is.
 
-        * cancelled/expired first, so a provider re-accepting a booking they had
-          claimed and which was later cancelled gets 410, not a stale 200;
-        * then their own accepted booking → idempotent, no state change, no push;
-        * then anyone else's → 403, the lost race. Checked before the transition
-          guard, which would otherwise always fire first and report the useless
-          "cannot move from accepted to accepted".
-
-        A provider whose booking has moved past ACCEPTED (en route, in progress)
-        falls through to the transition guard and still gets 409 — re-accepting
-        there is a genuinely illegal move, not a retry.
+        SVC-320 (two-level dispatch): accept is "assign the SP's own Pro". The
+        claim also sets ``professional_id`` to the SP's Pro-for-self, so every
+        accepted booking names the person doing it. That holds for a team SP
+        too: only a client that opts in to the pick step (``team_pick_options``)
+        gets the team list instead, and a team SP who accepted this way can hand
+        the job to someone else with ``assign``. An old client therefore never
+        mistakes "pick a Pro" for "you got it".
         """
         booking = await self.db.get(Booking, booking_id, with_for_update=True)
         if not booking:
             raise BookingNotFound(booking_id)
 
-        # SVC-168: eligibility check before we reveal anything about the booking.
-        # `get_offer` uses the same shared predicate
+        if await self._check_claim(booking, provider_id):
+            # Idempotent retry: returns without reaching `transition_status`,
+            # so this is the one accept path that has to hydrate for itself.
+            await self.attach_addresses([booking])
+            await self.attach_items([booking])
+            await self.attach_status_logs([booking])
+            return booking, False
+
+        self_pro = await ProviderService(self.db).ensure_self_professional(provider_id)
+        booking = await self._claim(booking, provider_id, self_pro)
+        return booking, True
+
+    async def _check_claim(self, booking: Booking, provider_id: uuid.UUID) -> bool:
+        """The accept precondition ladder, shared by ``accept_booking``,
+        ``assign`` and ``team_pick_options`` so the three can't drift.
+
+        Returns ``True`` when the caller already holds the booking at ACCEPTED
+        (an idempotent retry, or a re-pick), ``False`` when it is theirs to
+        claim. Raises for everything else.
+
+        Order matters, and each branch is a case the card has to tell apart:
+
+        * eligibility first (SVC-168), before revealing anything about the
+          booking: 403 for a provider who was never offered it;
+        * cancelled/expired next, so a provider re-accepting a booking they had
+          claimed and which was later cancelled gets 410, not a stale 200;
+        * then their own accepted booking → ``True``;
+        * then anyone else's → 410, the lost race (SVC-167). Checked before the
+          transition guard, which would otherwise always fire first and report
+          the useless "cannot move from accepted to accepted".
+
+        A provider whose booking has moved past ACCEPTED (en route, in progress)
+        gets ``False`` and so reaches the transition guard, which answers 409:
+        re-accepting there is a genuinely illegal move, not a retry.
+        """
+        # SVC-168: `get_offer` uses the same shared predicate
         # (``is_eligible_provider_multi_stmt``), so the set of providers who
         # may accept can never drift from the set who were offered — the
         # invariant SVC-153 established. For a multi-service cart the
@@ -827,21 +878,19 @@ class BookingService:
             raise BookingOfferClosed()
 
         if booking.provider_id == provider_id:
-            if booking.status is BookingStatus.ACCEPTED:
-                # Idempotent retry: returns without reaching `transition_status`,
-                # so this is the one accept path that has to hydrate for itself.
-                await self.attach_addresses([booking])
-                await self.attach_items([booking])
-                await self.attach_status_logs([booking])
-                return booking, False
-        elif booking.provider_id is not None:
+            return booking.status is BookingStatus.ACCEPTED
+        if booking.provider_id is not None:
             # SVC-167: another provider won the race. From the card's point of
             # view this is the same outcome as cancelled/expired — the offer is
             # gone, dismiss it quietly. Was 403; the code drift with the
             # cancelled/expired path forced the frontend into
             # `if (403 || 410) dismiss()`. 410 unifies the vocabulary.
             raise BookingOfferClosed()
+        return False
 
+    async def _claim(self, booking: Booking, sp_id: uuid.UUID, pro: Professional) -> Booking:
+        """REQUESTED → ACCEPTED for ``sp_id``, done by ``pro``. Caller holds the
+        row lock and has run ``_check_claim``."""
         # SVC-254: stamp the winner's offer row. Queued *before* the transition
         # so ``transition_status``'s own commit carries both — the claim and the
         # record of who claimed it land atomically, and this path adds no second
@@ -856,19 +905,276 @@ class BookingService:
         await self.db.execute(
             update(BookingOffer)
             .where(
-                BookingOffer.booking_id == booking_id,
-                BookingOffer.provider_id == provider_id,
+                BookingOffer.booking_id == booking.id,
+                BookingOffer.provider_id == sp_id,
                 BookingOffer.response.is_(None),
             )
             .values(response=OfferResponse.ACCEPTED, responded_at=datetime.now(UTC))
         )
-
-        booking = await self.transition_status(
-            booking_id=booking_id,
+        # Same row ``transition_status`` re-reads under its lock (identity map),
+        # so this rides the transition's flush. ``provider_id`` is set there, to
+        # ``changed_by`` — the SP, which is ``pro.service_provider_id``.
+        booking.professional_id = pro.id
+        return await self.transition_status(
+            booking_id=booking.id,
             new_status=BookingStatus.ACCEPTED,
-            changed_by=provider_id,
+            changed_by=sp_id,
         )
-        return booking, True
+
+    # ------------------------------------------------------------------
+    # Two-level dispatch (SVC-320 PR 2)
+    # ------------------------------------------------------------------
+
+    async def _active_pros(self, sp_id: uuid.UUID) -> list[Professional]:
+        """The SP's active Pros, Pro-for-self first, then by join date."""
+        result = await self.db.execute(
+            select(Professional)
+            .where(
+                Professional.service_provider_id == sp_id,
+                Professional.is_active.is_(True),
+            )
+            .order_by((Professional.user_id != sp_id), Professional.created_at, Professional.id)
+        )
+        return list(result.scalars().all())
+
+    async def _busy_pro_ids(
+        self, pro_ids: list[uuid.UUID], except_booking: uuid.UUID | None = None
+    ) -> set[uuid.UUID]:
+        """Which of these Pros already hold a job that isn't finished."""
+        if not pro_ids:
+            return set()
+        stmt = select(Booking.professional_id).where(
+            Booking.professional_id.in_(pro_ids),
+            Booking.status.in_(_ACTIVE_JOB_STATUSES),
+        )
+        if except_booking is not None:
+            stmt = stmt.where(Booking.id != except_booking)
+        return set((await self.db.execute(stmt)).scalars().all())
+
+    async def team_pick_options(
+        self, booking_id: uuid.UUID, sp_id: uuid.UUID
+    ) -> list[tuple[Professional, bool]] | None:
+        """For a client that opted in to the pick step: the Pros a team SP can
+        assign this booking to, each with whether they're busy. No write.
+
+        ``None`` means "not a pick": a solo SP, a booking they already hold, or
+        one past REQUESTED. The router then runs the plain accept, so every
+        outcome other than "here is your team" keeps accept's own answer.
+        Eligibility and the closed/lost-race checks run first either way.
+        """
+        booking = await self.db.get(Booking, booking_id)
+        if not booking:
+            raise BookingNotFound(booking_id)
+        if await self._check_claim(booking, sp_id):
+            return None
+        if booking.status is not BookingStatus.REQUESTED:
+            return None
+        pros = await self._active_pros(sp_id)
+        if not any(not pro.is_self for pro in pros):
+            return None
+        busy = await self._busy_pro_ids([pro.id for pro in pros])
+        return [(pro, pro.id in busy) for pro in pros]
+
+    async def assign(
+        self, booking_id: uuid.UUID, sp_id: uuid.UUID, professional_id: uuid.UUID
+    ) -> tuple[Booking, bool, Professional | None]:
+        """The SP picks the Pro who does this job: the atomic claim of two-level
+        dispatch, first write wins. Returns ``(booking, newly_claimed,
+        newly_assigned_pro)``; the last is ``None`` when nothing changed.
+
+        Two cases:
+
+        * **Claim.** The booking is REQUESTED and unclaimed: same preconditions,
+          same row lock, same offer stamp and the same ACCEPTED transition as
+          ``accept_booking``, with the picked Pro instead of the Pro-for-self.
+          Two SPs racing get one 200 and one 410.
+        * **Re-pick.** The caller already holds it at ACCEPTED: set or replace
+          its Pro (after a decline, or an accept that defaulted to the
+          Pro-for-self). No status change. Assigning the Pro already on it is
+          an idempotent 200 with no push.
+
+        The Pro must be one of the caller's active Pros (404 otherwise, the
+        same for "not yours" and "doesn't exist"), and not busy on another
+        unfinished job (409 ``PRO_BUSY``). That check is ``assign``'s alone:
+        the solo accept path never had it, and adding it there would change
+        live behaviour. ``is_online`` isn't checked: nothing sets it for a Pro
+        until PR 3's ``/pros/me/online``, and the SP's own online state is
+        already part of eligibility.
+        """
+        booking = await self.db.get(Booking, booking_id, with_for_update=True)
+        if not booking:
+            raise BookingNotFound(booking_id)
+
+        holds_it = await self._check_claim(booking, sp_id)
+
+        pro = await self.db.get(Professional, professional_id)
+        if pro is None or pro.service_provider_id != sp_id or not pro.is_active:
+            raise AppException(
+                "That professional isn't on your team.",
+                status_code=status.HTTP_404_NOT_FOUND,
+                code=PRO_NOT_FOUND,
+            )
+
+        if holds_it and booking.professional_id == pro.id:
+            await self.attach_addresses([booking])
+            await self.attach_items([booking])
+            await self.attach_status_logs([booking])
+            return booking, False, None
+
+        if not holds_it and booking.status is not BookingStatus.REQUESTED:
+            # Theirs, but past ACCEPTED: en route or later.
+            raise InvalidStateTransition(
+                f"A booking that is {booking.status.value} can't be reassigned"
+            )
+
+        if await self._busy_pro_ids([pro.id], except_booking=booking.id):
+            raise AppException(
+                f"{pro.display_name} is already on another job.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=PRO_BUSY,
+            )
+
+        if holds_it:
+            booking.professional_id = pro.id
+            await self.db.flush()
+            await self.attach_addresses([booking])
+            await self.attach_items([booking])
+            await self.attach_status_logs([booking])
+            logger.info("booking.repicked booking_id=%s pro_id=%s", booking.id, pro.id)
+            return booking, False, pro
+
+        booking = await self._claim(booking, sp_id, pro)
+        return booking, True, pro
+
+    async def decline_job(self, booking_id: uuid.UUID, user_id: uuid.UUID) -> tuple[Booking, str]:
+        """The assigned Pro turns the job down. Returns ``(booking, outcome)``.
+
+        Authorized by the Pro row, not a role: the caller must have an *active*
+        ``professionals`` row that is this booking's Pro. Invitees sign up as
+        consumers, so a role check would lock them out. Anyone else gets the
+        same 404 as for a booking that doesn't exist.
+
+        Only while ACCEPTED (assigned, not yet set off); later is a 409.
+
+        * ``"awaiting_repick"`` — the SP has another active Pro. The booking
+          stays theirs at ACCEPTED with no Pro, and the router pushes the SP to
+          re-pick.
+        * ``"reopened"`` — nobody else on the team (a solo SP declining their
+          own job included): back to REQUESTED and re-broadcast.
+        """
+        booking = await self.db.get(Booking, booking_id, with_for_update=True)
+        pro = (
+            await self.db.get(Professional, booking.professional_id)
+            if booking is not None and booking.professional_id is not None
+            else None
+        )
+        if pro is None or pro.user_id != user_id or not pro.is_active:
+            raise AppException(
+                "Job not found.", status_code=status.HTTP_404_NOT_FOUND, code=JOB_NOT_FOUND
+            )
+        if booking.status is not BookingStatus.ACCEPTED:
+            raise InvalidStateTransition(f"A job that is {booking.status.value} can't be declined")
+
+        others = [p for p in await self._active_pros(booking.provider_id) if p.id != pro.id]
+        booking.professional_id = None
+        if others:
+            await self.db.flush()
+            await self.attach_addresses([booking])
+            await self.attach_items([booking])
+            await self.attach_status_logs([booking])
+            logger.info("booking.pro_declined booking_id=%s pro_id=%s", booking.id, pro.id)
+            return booking, "awaiting_repick"
+
+        booking = await self.reopen(booking, changed_by=user_id, reason="pro_declined")
+        return booking, "reopened"
+
+    async def release(self, booking_id: uuid.UUID, sp_id: uuid.UUID) -> Booking:
+        """The SP gives an accepted booking back to the broadcast (SVC-320).
+
+        The SP's way out when nobody on the team can take the job. Allowed
+        while ACCEPTED, whether or not a Pro is assigned; once someone has set
+        off it's a 409. A booking the caller doesn't hold is a 403, as on
+        every other per-booking provider action.
+        """
+        booking = await self.db.get(Booking, booking_id, with_for_update=True)
+        if not booking:
+            raise BookingNotFound(booking_id)
+        if booking.provider_id != sp_id:
+            raise UnauthorizedAction("You do not hold this booking")
+        if booking.status is not BookingStatus.ACCEPTED:
+            raise InvalidStateTransition(
+                f"A booking that is {booking.status.value} can't be released"
+            )
+        return await self.reopen(booking, changed_by=sp_id, reason="released")
+
+    async def reopen(self, booking: Booking, changed_by: uuid.UUID, reason: str) -> Booking:
+        """ACCEPTED → REQUESTED: unclaim the booking so it can be broadcast again.
+
+        Its own method rather than a ``transition_status`` call, because the
+        actor may be a team Pro, who is neither the booking's provider nor its
+        consumer and would trip that method's ownership guard. Callers hold the
+        row lock and have checked who may do this.
+
+        * ``provider_id`` and ``professional_id`` are cleared, so the booking is
+          open to every eligible SP again.
+        * ``reopened_at`` restarts the 2-minute offer window; without it the
+          next expiry sweep would kill a booking that reopened minutes after it
+          was created.
+        * The releasing SP's offer row is marked answered (it normally already
+          is, ACCEPTED, from the claim), so the re-broadcast and the offer poll
+          leave them out. They gave it back; they shouldn't be offered it again.
+        * The doorstep OTP is kept: the consumer may already have it on screen,
+          and it's still a secret only they hold.
+
+        The router enqueues the consumer push and the re-broadcast after commit.
+        """
+        allowed = VALID_TRANSITIONS.get(booking.status, [])
+        if BookingStatus.REQUESTED not in allowed:
+            raise InvalidStateTransition(
+                f"Cannot move from {booking.status.value} to {BookingStatus.REQUESTED.value}."
+            )
+        old_status = booking.status
+        releasing_sp = booking.provider_id
+        now = datetime.now(UTC)
+
+        if releasing_sp is not None:
+            await self.db.execute(
+                pg_insert(BookingOffer)
+                .values(
+                    id=uuid.uuid4(),
+                    booking_id=booking.id,
+                    provider_id=releasing_sp,
+                    response=OfferResponse.DECLINED,
+                    responded_at=now,
+                )
+                .on_conflict_do_nothing(constraint="uix_booking_offer")
+            )
+
+        booking.status = BookingStatus.REQUESTED
+        booking.provider_id = None
+        booking.professional_id = None
+        booking.reopened_at = now
+        await self._log_transition(
+            booking_id=booking.id,
+            from_status=old_status.value,
+            to_status=BookingStatus.REQUESTED.value,
+            changed_by=changed_by,
+            metadata={
+                "reason": reason,
+                "released_by_provider": str(releasing_sp) if releasing_sp else None,
+            },
+        )
+        await self.db.flush()
+        await self.attach_addresses([booking])
+        await self.attach_items([booking])
+        await self.attach_status_logs([booking])
+        logger.info(
+            "booking.reopened booking_id=%s reason=%s released_by=%s",
+            booking.id,
+            reason,
+            releasing_sp,
+        )
+        return booking
 
     async def transition_status(
         self,
