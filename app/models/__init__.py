@@ -28,6 +28,7 @@ from app.models.provider_ledger_entry import (  # noqa: F401
 )
 from app.models.provider_profile import KYCStatus, ProviderProfile  # noqa: F401
 from app.models.provider_service import ProviderService  # noqa: F401
+from app.models.provider_team_invite import InviteStatus, ProviderTeamInvite  # noqa: F401
 from app.models.review import Review  # noqa: F401
 from app.models.service import Service  # noqa: F401
 from app.models.service_relationship import RelationshipType, ServiceRelationship  # noqa: F401

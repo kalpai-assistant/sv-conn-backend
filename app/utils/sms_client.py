@@ -16,6 +16,7 @@ import httpx
 
 from app.config import get_settings
 from app.exceptions import SMSDeliveryError
+from app.models.provider_team_invite import INVITE_URL
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -103,28 +104,95 @@ class MSG91Client(AbstractSMSClient):
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(self._BASE_URL, json=body, headers=headers)
 
-        # HTTP-level failures (5xx from MSG91's edge, timeouts, DNS) —
-        # rare in practice but worth surfacing as-is instead of falling
-        # through to the JSON-body branch which would crash on non-JSON.
-        if response.status_code >= 500:
-            raise SMSDeliveryError(f"MSG91 responded {response.status_code}: {response.text[:200]}")
+        _raise_for_msg91_failure(response)
 
-        # MSG91's real success signal lives in the body regardless of the
-        # HTTP status. If the JSON is malformed we treat that as a
-        # provider failure too — we can't verify delivery either way.
-        try:
-            payload = response.json()
-        except ValueError as e:
-            raise SMSDeliveryError(
-                f"MSG91 returned non-JSON body (HTTP {response.status_code}): "
-                f"{response.text[:200]}"
-            ) from e
 
-        if payload.get("type") != "success":
-            # Log the full response so the "why" is in CloudWatch, not
-            # just "MSG91 said no". Common values for `message`:
-            # invalid authkey / template not approved / DND blocked.
-            raise SMSDeliveryError(f"MSG91 rejected send: {payload.get('message', payload)}")
+def _raise_for_msg91_failure(response: httpx.Response) -> None:
+    """Raise ``SMSDeliveryError`` unless MSG91's body says ``type == "success"``.
+
+    Shared by the OTP and flow endpoints, which report failure the same way
+    (quirk 1 above).
+    """
+    # HTTP-level failures (5xx from MSG91's edge, timeouts, DNS) —
+    # rare in practice but worth surfacing as-is instead of falling
+    # through to the JSON-body branch which would crash on non-JSON.
+    if response.status_code >= 500:
+        raise SMSDeliveryError(f"MSG91 responded {response.status_code}: {response.text[:200]}")
+
+    # MSG91's real success signal lives in the body regardless of the
+    # HTTP status. If the JSON is malformed we treat that as a
+    # provider failure too — we can't verify delivery either way.
+    try:
+        payload = response.json()
+    except ValueError as e:
+        raise SMSDeliveryError(
+            f"MSG91 returned non-JSON body (HTTP {response.status_code}): " f"{response.text[:200]}"
+        ) from e
+
+    if payload.get("type") != "success":
+        # Log the full response so the "why" is in CloudWatch, not
+        # just "MSG91 said no". Common values for `message`:
+        # invalid authkey / template not approved / DND blocked.
+        raise SMSDeliveryError(f"MSG91 rejected send: {payload.get('message', payload)}")
+
+
+# ---------------------------------------------------------------------------
+# Team invite (SVC-320) — MSG91 flow API, not the OTP API
+# ---------------------------------------------------------------------------
+#
+# An invite is a transactional SMS with two variables, so it goes through
+# /api/v5/flow and a flow template whose body uses ##var1## / ##var2##.
+# /api/v5/otp would be wrong: it only fills ##OTP## and invents its own OTP
+# (see the send_otp comment). It is a module function rather than another
+# AbstractSMSClient method because the DLT flow template is MSG91-only; there is
+# no Twilio equivalent to keep in step.
+
+_MSG91_FLOW_URL = "https://control.msg91.com/api/v5/flow"
+# Indian DLT caps every template variable at 30 characters.
+_DLT_VAR_MAX_CHARS = 30
+
+
+async def send_team_invite(phone: str, business_name: str, code: str) -> None:
+    """Text ``phone`` an invite to join ``business_name``'s team, with its code.
+
+    Template (SVC-328, attempt 3): "{var1} invited you to join their team on
+    EazyServ. Open https://app.eazyserv.com/invite and enter {var2}. Expires in
+    7 days." The URL is literal in the template; nothing variable goes in it.
+
+    With ``MSG91_INVITE_TEMPLATE_ID`` empty (no DLT-approved template yet,
+    SVC-328), this logs the invite as ``[MOCK INVITE]`` and returns without any
+    HTTP call, the way ``LOG_MOCK_OTP`` does for OTPs. That keeps the invite flow
+    testable end to end on beta from CloudWatch. Setting the SSM parameter turns
+    real sends on; no code change.
+
+    Raises ``SMSDeliveryError`` when MSG91 rejects the send.
+    """
+    if not settings.MSG91_INVITE_TEMPLATE_ID:
+        logger.info(
+            "[MOCK INVITE] SP=%s phone=%s code=%s url=%s", business_name, phone, code, INVITE_URL
+        )
+        return
+
+    var1 = business_name[:_DLT_VAR_MAX_CHARS]
+    var2 = code
+
+    body = {
+        "template_id": settings.MSG91_INVITE_TEMPLATE_ID,
+        # The URL is in the template body; keep MSG91 from rewriting it to its
+        # own short domain, which would no longer match the DLT registration.
+        "short_url": "0",
+        "recipients": [
+            {"mobiles": phone.lstrip("+"), "var1": var1, "var2": var2},
+        ],
+    }
+    headers = {
+        "authkey": settings.MSG91_AUTH_KEY,
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(_MSG91_FLOW_URL, json=body, headers=headers)
+
+    _raise_for_msg91_failure(response)
 
 
 # ---------------------------------------------------------------------------

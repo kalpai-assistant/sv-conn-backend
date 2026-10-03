@@ -60,7 +60,12 @@ class Settings(BaseSettings):
     # SMS Provider
     SMS_PROVIDER: str = "msg91"  # msg91 | twilio
     MSG91_AUTH_KEY: str = ""
-    MSG91_TEMPLATE_ID: str = ""
+    MSG91_TEMPLATE_ID: str = ""  # OTP template only (/api/v5/otp)
+    # SVC-320: team-invite SMS, a flow template (/api/v5/flow, ##var1##/##var2##).
+    # Separate from the OTP template above. Empty (until SVC-328's DLT approval)
+    # means mock mode: the invite URL is logged as "[MOCK INVITE]" and MSG91 is
+    # never called. Beta reads it from SSM /eazyserv/beta/MSG91_INVITE_TEMPLATE_ID.
+    MSG91_INVITE_TEMPLATE_ID: str = ""
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_PHONE_NUMBER: str = ""

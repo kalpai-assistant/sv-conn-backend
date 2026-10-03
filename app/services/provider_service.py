@@ -29,6 +29,7 @@ from app.exceptions import (
 )
 from app.models.booking import Booking, BookingStatus, PaymentStatus
 from app.models.booking_status_log import BookingStatusLog
+from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, PayoutMethod, ProviderProfile
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.service import Service
@@ -46,6 +47,18 @@ if TYPE_CHECKING:
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 EarningsRange = Literal["today", "week", "month"]
+
+
+def professional_display_name(user_name: str | None, business_name: str | None = None) -> str:
+    """A Pro's ``display_name``: the person's name, else the business name, else
+    a fixed label. Never the phone number, which consumers would later see.
+
+    The same fallback as SVC-339's backfill SQL.
+    """
+    for candidate in (user_name, business_name):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    return "Professional"
 
 
 def _earnings_window_start_utc(range_: EarningsRange) -> datetime:
@@ -86,7 +99,22 @@ class ProviderService:
             profile = ProviderProfile(user_id=user_id)
             self.db.add(profile)
             await self.db.flush()
+            # SVC-320: every SP gets its Pro-for-self at birth, in the same
+            # transaction. SVC-339's migration only covered providers that
+            # existed when it ran.
+            self.db.add(await self._new_self_professional(profile))
+            await self.db.flush()
         return profile, is_new
+
+    async def _new_self_professional(self, profile: ProviderProfile) -> Professional:
+        user = await self.db.get(User, profile.user_id)
+        return Professional(
+            service_provider_id=profile.user_id,
+            user_id=profile.user_id,
+            display_name=professional_display_name(
+                user.name if user else None, profile.business_name
+            ),
+        )
 
     async def update_profile(
         self,

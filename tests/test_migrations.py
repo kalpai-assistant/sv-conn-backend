@@ -1,5 +1,5 @@
 """
-Migration round trips on a scratch database (SVC-319, SVC-339, SVC-340).
+Migration round trips on a scratch database (SVC-319, SVC-339, SVC-340, SVC-320).
 
 The rest of the suite builds its schema with ``Base.metadata.create_all``, and CI
 only ever runs ``alembic upgrade head`` — so a migration's ``downgrade()`` is not
@@ -49,6 +49,12 @@ SVC_339_FILE = (
 # and UPDATE live in app.seed_data.service_details, which the migration imports.
 SVC_340 = "4d1cca7bc41d"
 BEFORE_SVC_340 = SVC_339
+# SVC-320 PR 1 (team invites + professionals.is_active + catch-up backfill).
+SVC_320 = "17702cbd14a4"
+BEFORE_SVC_320 = SVC_340
+SVC_320_FILE = (
+    REPO_ROOT / "alembic" / "versions" / "17702cbd14a4_svc_320_team_invites_professionals_is_.py"
+)
 
 
 def _url(database: str) -> URL:
@@ -162,13 +168,17 @@ def test_svc_319_upgrade_then_downgrade_leaves_provider_profiles_unchanged(scrat
 # --- SVC-339: professionals table + Pro-for-self backfill -----------------------
 
 
-def _svc_339_sql(name: str) -> str:
-    """A SQL constant from the SVC-339 migration, so the re-run test executes the
+def _migration_sql(path: Path, name: str) -> str:
+    """A SQL constant from a migration file, so a re-run test executes the
     statement the migration did rather than a copy that could drift from it."""
-    spec = importlib.util.spec_from_file_location("svc_339_migration", SVC_339_FILE)
+    spec = importlib.util.spec_from_file_location(path.stem, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return getattr(module, name)
+
+
+def _svc_339_sql(name: str) -> str:
+    return _migration_sql(SVC_339_FILE, name)
 
 
 def _seed_before_svc_339(url: URL) -> dict:
@@ -499,3 +509,148 @@ def test_svc_340_seeds_matching_services_only_and_is_idempotent(scratch_db):
         engine.dispose()
     assert matched == 2
     assert _service_details(scratch_db) == details
+
+
+# --- SVC-320: team invites, professionals.is_active, catch-up backfill ---------
+
+
+def _seed_after_svc_339(url: URL) -> dict:
+    """What beta looks like between the SVC-339 and SVC-320 deploys.
+
+    The SVC-339-era rows from ``_seed_before_svc_339`` (Sunita has a Pro-for-self
+    and a linked booking) plus ``late``: a provider who signed up afterwards,
+    when nothing created a Pro, with an accepted booking whose
+    ``professional_id`` is NULL. ``open`` is an unassigned booking that must
+    stay NULL.
+    """
+    ids = _seed_before_svc_339(url)
+    _alembic(url, "upgrade", BEFORE_SVC_320)
+    for key in ("late", "late_booking", "open"):
+        ids[key] = uuid.uuid4()
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (id, phone, name, role, is_active) "
+                    "VALUES (:id, '+919000000001', 'Late Signup', 'PROVIDER', true)"
+                ),
+                {"id": ids["late"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO provider_profiles (id, user_id, service_area_radius_km, "
+                    "avg_rating, total_completed_jobs, kyc_status, is_online) "
+                    "VALUES (:id, :user_id, 10, 0, 0, 'PENDING', false)"
+                ),
+                {"id": uuid.uuid4(), "user_id": ids["late"]},
+            )
+            for key, provider, status in (
+                ("late_booking", ids["late"], "ACCEPTED"),
+                ("open", None, "REQUESTED"),
+            ):
+                conn.execute(
+                    text(
+                        "INSERT INTO bookings (id, consumer_id, provider_id, consumer_address_id, "
+                        "status, service_amount, platform_commission, provider_payout, "
+                        "payment_status, discount_amount, tip_amount) "
+                        "VALUES (:id, :consumer, :provider, :address, :status, 100, 20, 80, "
+                        "'PENDING', 0, 0)"
+                    ),
+                    {
+                        "id": ids[key],
+                        "consumer": ids["consumer"],
+                        "provider": provider,
+                        "address": ids["address"],
+                        "status": status,
+                    },
+                )
+    finally:
+        engine.dispose()
+    return ids
+
+
+def test_svc_320_schema_and_downgrade_restores_professionals(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_320)
+    before = _shape(scratch_db, "professionals")
+
+    _alembic(scratch_db, "upgrade", SVC_320)
+    pro_columns = {
+        name: nullable for name, _, nullable in _shape(scratch_db, "professionals")["columns"]
+    }
+    assert pro_columns["is_active"] is False, "is_active must be NOT NULL"
+
+    invites = _shape(scratch_db, "provider_team_invites")
+    foreign_keys = {fk[1]: fk[2:] for fk in invites["foreign_keys"]}
+    assert foreign_keys[("invited_by",)] == ("provider_profiles", ("user_id",), "CASCADE")
+    assert foreign_keys[("accepted_by_user_id",)] == ("users", ("id",), None)
+    # A 6-digit code repeats over time, so it must not be globally unique.
+    assert invites["unique_constraints"] == []
+    nullable = {name: is_nullable for name, _, is_nullable in invites["columns"]}
+    for column in ("invited_by", "invitee_phone", "token", "status", "expires_at", "created_at"):
+        assert nullable[column] is False, column
+    indexes = {i[0]: i[1:] for i in invites["indexes"]}
+    assert {name: (cols, unique) for name, (cols, unique, _) in indexes.items()} == {
+        "ux_provider_team_invites_pending": (("invited_by", "invitee_phone"), True),
+        "ux_provider_team_invites_pending_code": (("invitee_phone", "token"), True),
+    }
+    for name, (_, _, where) in indexes.items():
+        assert "PENDING" in where, f"{name} must be partial on status = 'PENDING'"
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_320)
+    assert _shape(scratch_db, "professionals") == before
+    engine = create_engine(scratch_db)
+    try:
+        assert "provider_team_invites" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_svc_320_backfills_providers_and_bookings_since_svc_339(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_339)
+    ids = _seed_after_svc_339(scratch_db)
+    before_pros = _professionals(scratch_db)
+    assert ids["late"] not in before_pros, "the gap this migration closes"
+
+    _alembic(scratch_db, "upgrade", SVC_320)
+
+    pros = _professionals(scratch_db)
+    providers = _query(scratch_db, "SELECT user_id FROM provider_profiles")
+    assert set(pros) == {row["user_id"] for row in providers}
+    late = pros[ids["late"]]
+    assert late["user_id"] == ids["late"]
+    assert late["display_name"] == "Late Signup"
+    assert all(p["is_active"] is True for p in pros.values())
+    # Pros SVC-339 made are untouched.
+    for sp_id, pro in before_pros.items():
+        assert pros[sp_id]["id"] == pro["id"]
+
+    bookings = _booking_professionals(scratch_db)
+    assert bookings[ids["late_booking"]] == late["id"]
+    assert bookings[ids["booked"]] == pros[ids["sunita"]]["id"]
+    assert bookings[ids["open"]] is None
+    assert bookings[ids["orphaned"]] is None
+
+
+def test_svc_320_backfill_is_idempotent(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_339)
+    _seed_after_svc_339(scratch_db)
+    _alembic(scratch_db, "upgrade", SVC_320)
+    pros, bookings = _professionals(scratch_db), _booking_professionals(scratch_db)
+
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(_migration_sql(SVC_320_FILE, "BACKFILL_PROFESSIONALS")))
+            conn.execute(text(_migration_sql(SVC_320_FILE, "BACKFILL_BOOKINGS")))
+    finally:
+        engine.dispose()
+    assert _professionals(scratch_db) == pros
+    assert _booking_professionals(scratch_db) == bookings
+
+    # Down and up again. The backfilled rows belong to SVC-339's schema and
+    # survive the downgrade, so the re-upgrade leaves them exactly as they were.
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_320)
+    _alembic(scratch_db, "upgrade", SVC_320)
+    assert _professionals(scratch_db) == pros
+    assert _booking_professionals(scratch_db) == bookings
