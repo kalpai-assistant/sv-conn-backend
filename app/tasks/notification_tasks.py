@@ -7,7 +7,7 @@ import logging
 
 from firebase_admin import messaging as _fcm_messaging
 
-from app.models.booking import BookingStatus
+from app.models.booking import BookingStatus, PaymentStatus
 from app.tasks.celery_app import celery_app
 from app.utils.fcm_client import send_multicast, send_push_notification
 
@@ -211,7 +211,24 @@ def _expire_unbroadcastable(db, booking, reason: str) -> None:
     `reason` is logged rather than shown: the three causes need different
     engineering responses (a broken address, a bad cart, genuinely no supply)
     but read identically to a consumer, who can only try again.
+
+    A PAID booking is never expired here (SVC-320 PR 2), the rule SVC-251
+    already applies in `expire_stale_bookings`. Expiry doesn't refund and
+    `force_cancel` refuses an EXPIRED booking, so expiring one would strand the
+    consumer's money. At creation that's rare (payment comes later), but a
+    reopened booking can be paid already and find nobody left to take it. It
+    stays REQUESTED: the consumer keeps seeing "searching", and cancelling
+    refunds through `_apply_cancellation_policy`. This is only the safe floor;
+    auto-refunding and notifying for paid-but-untakeable bookings is a separate
+    ticket.
     """
+    if booking.payment_status is PaymentStatus.PAID:
+        logger.info(
+            "booking.unbroadcastable_paid_kept booking_id=%s reason=%s",
+            booking.id,
+            reason,
+        )
+        return
     logger.info(
         "booking.unbroadcastable booking_id=%s reason=%s",
         booking.id,
