@@ -109,12 +109,16 @@ class ProviderService:
             await self.db.flush()
         return profile, is_new
 
-    async def ensure_self_professional(self, sp_id: uuid.UUID) -> Professional:
+    async def ensure_self_professional(self, sp_id: uuid.UUID) -> Professional | None:
         """The SP's Pro-for-self, created if missing (SVC-320 PR 2).
 
         Every SP has one since PR 1 (signup creates it, the migration backfilled
         the rest), so a miss means a row made some other way: a test fixture, a
         manual insert. Accept must never fail on that, so it repairs it.
+
+        ``None`` only when there is no SP row to hang a Pro on at all, which
+        eligibility rules out for a real accept. The caller then claims with no
+        Pro rather than refusing the job.
         """
         pro = await self.db.scalar(
             select(Professional).where(
@@ -126,7 +130,8 @@ class ProviderService:
             return pro
         profile = await self.get_profile(sp_id)
         if profile is None:
-            raise UserNotFound(sp_id)
+            logger.warning("provider.self_pro_unavailable sp=%s; no provider profile", sp_id)
+            return None
         logger.warning("provider.self_pro_missing sp=%s; creating it", sp_id)
         pro = await self._new_self_professional(profile)
         self.db.add(pro)

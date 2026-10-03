@@ -888,7 +888,7 @@ class BookingService:
             raise BookingOfferClosed()
         return False
 
-    async def _claim(self, booking: Booking, sp_id: uuid.UUID, pro: Professional) -> Booking:
+    async def _claim(self, booking: Booking, sp_id: uuid.UUID, pro: Professional | None) -> Booking:
         """REQUESTED → ACCEPTED for ``sp_id``, done by ``pro``. Caller holds the
         row lock and has run ``_check_claim``."""
         # SVC-254: stamp the winner's offer row. Queued *before* the transition
@@ -914,7 +914,7 @@ class BookingService:
         # Same row ``transition_status`` re-reads under its lock (identity map),
         # so this rides the transition's flush. ``provider_id`` is set there, to
         # ``changed_by`` — the SP, which is ``pro.service_provider_id``.
-        booking.professional_id = pro.id
+        booking.professional_id = pro.id if pro is not None else None
         return await self.transition_status(
             booking_id=booking.id,
             new_status=BookingStatus.ACCEPTED,
