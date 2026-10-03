@@ -675,3 +675,45 @@ def test_svc_320_pr2_adds_a_nullable_reopened_at_and_downgrade_restores_bookings
 
     _alembic(scratch_db, "downgrade", BEFORE_SVC_320_PR2)
     assert _shape(scratch_db, "bookings") == before
+
+
+# --- SVC-344: bookings.last_chance_at + nullable status-log actor ------------------
+
+
+SVC_344 = "dc120cbb3548"
+BEFORE_SVC_344 = SVC_320_PR2
+
+
+def test_svc_344_schema_and_downgrade(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_344)
+    before = {t: _shape(scratch_db, t) for t in ("bookings", "booking_status_logs")}
+
+    _alembic(scratch_db, "upgrade", SVC_344)
+    bookings = {n: (k, nl) for n, k, nl in _shape(scratch_db, "bookings")["columns"]}
+    assert bookings["last_chance_at"] == ("TIMESTAMP", True)
+    logs = {n: nl for n, _, nl in _shape(scratch_db, "booking_status_logs")["columns"]}
+    assert logs["changed_by"] is True, "NULL = the system"
+
+    # A system row (changed_by NULL) must not block the downgrade: it is
+    # attributed to the booking's consumer, then NOT NULL comes back.
+    ids = _seed_before_svc_339(scratch_db)
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO booking_status_logs (id, booking_id, from_status, to_status, "
+                    "changed_by) VALUES (:id, :b, 'requested', 'cancelled', NULL)"
+                ),
+                {"id": uuid.uuid4(), "b": ids["unassigned"]},
+            )
+    finally:
+        engine.dispose()
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_344)
+    assert {t: _shape(scratch_db, t) for t in ("bookings", "booking_status_logs")} == before
+    [row] = _query(
+        scratch_db,
+        f"SELECT changed_by FROM booking_status_logs WHERE booking_id = '{ids['unassigned']}'",
+    )
+    assert row["changed_by"] == ids["consumer"]

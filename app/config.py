@@ -153,6 +153,9 @@ class Settings(BaseSettings):
 
     # Booking
     BOOKING_REQUEST_TIMEOUT_SECONDS: int = 120  # 2 minutes
+    # SVC-344: a PAID booking nobody took in its offer window gets one more
+    # broadcast and this much longer before it is auto-cancelled and refunded.
+    BOOKING_LAST_CHANCE_SECONDS: int = 90
     CANCELLATION_FEE: float = 50.0
 
     # SVC-178 (§11 Q3 resolved: flat ₹49, 100% to provider). Cancellation fee

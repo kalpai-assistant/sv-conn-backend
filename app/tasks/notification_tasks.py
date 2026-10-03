@@ -112,6 +112,27 @@ NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
         "title": "Finding another professional",
         "body": "Your professional can't make it. We're finding you someone else.",
     },
+    # SVC-344: the system cancelled a PAID booking nobody took, refunding it in
+    # full. Two cases; NO_TAKER_AFTER_ACCEPT_TEMPLATE below is the other one.
+    # {amount} is pre-formatted with the ₹ sign (_format_rupees).
+    "no_taker_refunded": {
+        "title": "No professional available",
+        "body": (
+            "We couldn't find a professional for your booking. "
+            "Your full refund of {amount} has been started."
+        ),
+    },
+}
+
+# The "no_taker_refunded" wording when the booking had been accepted and then
+# given back (it has ``reopened_at``): the consumer waited on someone who
+# backed out, so say that rather than "we couldn't find anyone".
+NO_TAKER_AFTER_ACCEPT_TEMPLATE: dict[str, str] = {
+    "title": "Sorry, your professional couldn't make it",
+    "body": (
+        "Your professional had to cancel and we couldn't find a replacement. "
+        "Your full refund of {amount} has been started."
+    ),
 }
 
 
@@ -424,6 +445,16 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                     ).scalar_one_or_none()
                 body = template["body"].format(pro=pro.display_name if pro else "Your professional")
                 recipients = [booking.provider]
+            elif event == "no_taker_refunded":
+                # Consumer only: no provider is attached by now. The amount is
+                # what was captured and is now refunded (service − discount).
+                from app.utils.money import to_paise
+
+                if booking.reopened_at is not None:
+                    template = NO_TAKER_AFTER_ACCEPT_TEMPLATE
+                amount = _format_rupees(to_paise(booking.service_amount - booking.discount_amount))
+                body = template["body"].format(amount=amount)
+                recipients = [booking.consumer]
             else:
                 # Every other lifecycle event is news for the consumer: the
                 # provider caused it, so they already know. `accepted` used to

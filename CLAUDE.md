@@ -116,6 +116,8 @@ requested → accepted → en_route → in_progress → completed
 
 `accepted → requested` (SVC-320) is driven only by `BookingService.reopen` (a Pro decline with nobody left on the team, or an SP release), never through `transition_status`. The offer window runs from `Booking.offer_window_start` = `COALESCE(reopened_at, created_at)`, so a reopened booking gets a fresh two minutes.
 
+**Paid bookings nobody takes (SVC-344).** The 30 s `expire_stale_bookings` sweep expires *unpaid* bookings as before. A PAID one gets two steps instead, each in its own transaction via `BookingService.advance_paid_unclaimed`: first a second offer (`last_chance_at` is set and it's re-broadcast, giving `BOOKING_LAST_CHANCE_SECONDS`=90 more), then a system cancel with a full refund through `_apply_cancellation_policy`. That logs `changed_by` NULL (= system) and sends a consumer-only `no_taker_refunded` push, worded differently if the booking had been reopened. A refund failure rolls back and the next sweep retries. Every expiry reader uses `Booking.offer_expires_at`. A reopen sets a new doorstep OTP and clears `last_chance_at`. A provider's `PATCH /cancel` while ACCEPTED reopens the booking instead of cancelling it (no fee); while EN_ROUTE it's a 409 `PROVIDER_EN_ROUTE`. Consumer cancel is unchanged.
+
 Doorstep OTP (4-digit, stored in Redis) is required to transition from `en_route` → `in_progress`.
 
 ### Auth Flow

@@ -1,6 +1,6 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String, func
@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.config import get_settings
 from app.database import Base
 
 
@@ -210,6 +211,36 @@ class Booking(Base):
     @classmethod
     def _offer_window_start_expression(cls):
         return func.coalesce(cls.reopened_at, cls.created_at)
+
+    # SVC-344: when a PAID booking that nobody took entered its second offer
+    # (one more broadcast, BOOKING_LAST_CHANCE_SECONDS more to accept). NULL
+    # otherwise. Set at most once per cycle by the sweep; a reopen clears it,
+    # which restarts the cycle. It is what stops the sweep re-offering forever.
+    last_chance_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @hybrid_property
+    def offer_expires_at(self) -> datetime:
+        """When the current offer dies: the end of the second offer if there is
+        one, else the end of the normal window.
+
+        The one definition the expiry sweep, the offer poll and the card's
+        countdown all read (SVC-320 unified them on ``offer_window_start``;
+        SVC-344 adds the second offer on top).
+        """
+        settings = get_settings()
+        if self.last_chance_at is not None:
+            return self.last_chance_at + timedelta(seconds=settings.BOOKING_LAST_CHANCE_SECONDS)
+        return self.offer_window_start + timedelta(seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS)
+
+    @offer_expires_at.inplace.expression
+    @classmethod
+    def _offer_expires_at_expression(cls):
+        settings = get_settings()
+        return func.coalesce(
+            cls.last_chance_at + timedelta(seconds=settings.BOOKING_LAST_CHANCE_SECONDS),
+            func.coalesce(cls.reopened_at, cls.created_at)
+            + timedelta(seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS),
+        )
 
     # Relationships
     consumer: Mapped["User"] = relationship(

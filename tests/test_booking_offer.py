@@ -786,8 +786,12 @@ async def test_expiry_tracks_the_configured_timeout(client, db_session, auth_hea
     provider = await _provider(db_session, service)
     _, _, booking = await _open_booking(db_session, service)
 
-    with patch("app.services.booking_service.get_settings") as mock_settings:
-        mock_settings.return_value = SimpleNamespace(BOOKING_REQUEST_TIMEOUT_SECONDS=600)
+    # The expiry is Booking.offer_expires_at (SVC-344), which reads the
+    # settings in the model module.
+    with patch("app.models.booking.get_settings") as mock_settings:
+        mock_settings.return_value = SimpleNamespace(
+            BOOKING_REQUEST_TIMEOUT_SECONDS=600, BOOKING_LAST_CHANCE_SECONDS=90
+        )
         resp = await _get(client, booking.id, provider, auth_headers)
 
     assert resp.status_code == 200, resp.text
