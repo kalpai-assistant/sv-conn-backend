@@ -10,8 +10,11 @@ Schema:
   (the LLD's "set is_active=false"; its DDL never had the column). Every
   existing row is a Pro-for-self and starts active.
 - ``provider_team_invites`` — an SP's SMS invite for a phone to join its team.
-  A partial unique index allows one live (``PENDING``) invite per (SP, phone)
-  and leaves accepted / revoked / expired rows as history.
+  ``token`` holds a 6-digit code, so it is deliberately *not* unique: with 10^6
+  codes and history rows keeping theirs, a global UNIQUE would turn into random
+  insert failures. Two partial unique indexes over ``PENDING`` rows instead: one
+  live invite per (SP, phone), and live codes unique per phone (accept-invite
+  looks up by phone + code). Accepted / revoked / expired rows stay as history.
 
 Data, same revision. SVC-339 backfilled every provider that existed when it ran,
 but nothing created a Pro-for-self for providers who signed up afterwards, and
@@ -104,10 +107,10 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['accepted_by_user_id'], ['users.id'], ),
     # CASCADE: an SP's invites go with it, like its Pros.
     sa.ForeignKeyConstraint(['invited_by'], ['provider_profiles.user_id'], ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('token')
+    sa.PrimaryKeyConstraint('id')
     )
     op.create_index('ux_provider_team_invites_pending', 'provider_team_invites', ['invited_by', 'invitee_phone'], unique=True, postgresql_where=sa.text("status = 'PENDING'"))
+    op.create_index('ux_provider_team_invites_pending_code', 'provider_team_invites', ['invitee_phone', 'token'], unique=True, postgresql_where=sa.text("status = 'PENDING'"))
     op.add_column('professionals', sa.Column('is_active', sa.Boolean(), server_default=sa.text('true'), nullable=False))
 
     op.execute(sa.text(BACKFILL_PROFESSIONALS))
@@ -120,5 +123,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_column('professionals', 'is_active')
+    op.drop_index('ux_provider_team_invites_pending_code', table_name='provider_team_invites', postgresql_where=sa.text("status = 'PENDING'"))
     op.drop_index('ux_provider_team_invites_pending', table_name='provider_team_invites', postgresql_where=sa.text("status = 'PENDING'"))
     op.drop_table('provider_team_invites')

@@ -1,9 +1,10 @@
 """
 SVC-320 (Phase B, PR 1): SP team management, with SVC-327's invite KYC gate.
 
-Invites (create, revoke, expiry, single use, rate limit), the mock-SMS knob,
-accept-invite (one SP at a time, reactivation), the team list and soft removal,
-and the Pro-for-self every new provider now gets at signup.
+Invites (create, revoke, expiry, single use, rate limits), the 6-digit code
+and its per-phone uniqueness, the mock-SMS knob, accept-invite by phone + code
+(one SP at a time, reactivation), the team list and soft removal, and the
+Pro-for-self every new provider now gets at signup.
 """
 
 import logging
@@ -22,6 +23,7 @@ from app.services.provider_service import ProviderService
 from app.utils import sms_client
 from tests.factories.user_factory import UserFactory
 
+RANDBELOW = "app.services.team_service.secrets.randbelow"
 INVITES = "/api/v1/providers/me/team/invites"
 TEAM = "/api/v1/providers/me/team"
 ACCEPT = "/api/v1/providers/me/accept-invite"
@@ -113,9 +115,9 @@ async def test_create_invite_normalises_the_phone_and_logs_a_mock_sms(
     body = resp.json()
     assert body["invitee_phone"] == "+919876543210"
     assert body["status"] == "PENDING"
-    # token_urlsafe(22): fits a 30-char DLT template variable on its own.
-    assert len(body["token"]) == 30
-    assert body["invite_url"] == f"https://app.eazyserv.com/invite?t={body['token']}"
+    assert body["token"].isdigit() and len(body["token"]) == 6
+    # Fully static: STPL rejects any variable in the URL (SVC-328).
+    assert body["invite_url"] == "https://app.eazyserv.com/invite"
     expires = datetime.fromisoformat(body["expires_at"])
     assert timedelta(days=6, hours=23) < expires - datetime.now(UTC) <= timedelta(days=7)
 
@@ -123,7 +125,8 @@ async def test_create_invite_normalises_the_phone_and_logs_a_mock_sms(
     [line] = [r.getMessage() for r in caplog.records if "[MOCK INVITE]" in r.getMessage()]
     assert "SP=Sparkle Cleaners" in line
     assert "phone=+919876543210" in line
-    assert body["invite_url"] in line
+    assert f"code={body['token']}" in line
+    assert "url=https://app.eazyserv.com/invite" in line
 
 
 @pytest.mark.parametrize("phone", ["12345", "+15551234567", "+915876543210"])
@@ -223,7 +226,7 @@ async def test_real_send_uses_the_msg91_flow_api(client, db_session, auth_header
     assert url.endswith("/api/v5/flow")
     assert payload["template_id"] == "tpl_invite"
     assert payload["recipients"] == [
-        {"mobiles": "919876543210", "var1": "Sparkle Cleaners", "var2": resp.json()["invite_url"]}
+        {"mobiles": "919876543210", "var1": "Sparkle Cleaners", "var2": resp.json()["token"]}
     ]
 
 
@@ -249,7 +252,7 @@ async def test_an_msg91_rejection_fails_the_request_with_502(
 
 
 @pytest.mark.asyncio
-async def test_revoke_then_accept_is_410(client, db_session, auth_headers):
+async def test_revoked_code_is_410_for_its_own_invitee(client, db_session, auth_headers):
     sp = await _sp(db_session)
     invitee = await UserFactory.create(db_session, role="consumer")
     invite = (await _invite(client, auth_headers, sp, invitee.phone)).json()
@@ -304,29 +307,79 @@ async def test_a_consumer_accepts_and_joins_the_team(client, db_session, auth_he
     assert row.accepted_by_user_id == invitee.id
     assert row.accepted_at is not None
 
-    # Single use.
+    # Single use. The code was the caller's own, so 410 rather than 404.
     resp = await _accept(client, auth_headers, invitee, invite["token"])
     assert resp.status_code == 410
+    assert resp.json()["code"] == "INVITE_NO_LONGER_VALID"
 
 
 @pytest.mark.asyncio
-async def test_accept_needs_the_invited_phone(client, db_session, auth_headers):
+async def test_another_users_valid_code_is_the_same_404_as_a_wrong_one(
+    client, db_session, auth_headers
+):
+    """No existence leak: a code texted to someone else looks exactly like a
+    code that was never issued."""
     sp = await _sp(db_session)
-    await UserFactory.create(db_session, role="consumer")
+    invitee = await UserFactory.create(db_session, role="consumer")
     stranger = await UserFactory.create(db_session, role="consumer")
-    invite = (await _invite(client, auth_headers, sp, "+919876543210")).json()
+    with patch(RANDBELOW, return_value=123456):
+        invite = (await _invite(client, auth_headers, sp, invitee.phone)).json()
 
-    resp = await _accept(client, auth_headers, stranger, invite["token"])
-    assert resp.status_code == 403
-    assert resp.json()["code"] == "INVITE_PHONE_MISMATCH"
+    theirs = await _accept(client, auth_headers, stranger, invite["token"])
+    never_issued = await _accept(client, auth_headers, stranger, "654321")
+    assert theirs.status_code == never_issued.status_code == 404
+    assert theirs.json() == never_issued.json()
+    assert theirs.json()["code"] == "INVITE_NOT_FOUND"
     assert await _pros_of(db_session, stranger.id) == []
 
+    # The invite is untouched and still works for the person it was sent to.
+    assert (await _accept(client, auth_headers, invitee, invite["token"])).status_code == 200
+
 
 @pytest.mark.asyncio
-async def test_accept_an_unknown_token_is_404(client, db_session, auth_headers):
+async def test_accept_an_unknown_code_is_404(client, db_session, auth_headers):
     user = await UserFactory.create(db_session, role="consumer")
-    resp = await _accept(client, auth_headers, user, "no-such-token")
+    resp = await _accept(client, auth_headers, user, "000000")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_code_is_404(client, db_session, auth_headers):
+    sp = await _sp(db_session)
+    invitee = await UserFactory.create(db_session, role="consumer")
+    with patch(RANDBELOW, return_value=111111):
+        await _invite(client, auth_headers, sp, invitee.phone)
+    resp = await _accept(client, auth_headers, invitee, "111112")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "INVITE_NOT_FOUND"
+
+
+@pytest.mark.parametrize("code", ["12345", "1234567", "12a456", "", "no-such-token"])
+@pytest.mark.asyncio
+async def test_a_malformed_code_is_422(client, db_session, auth_headers, code):
+    user = await UserFactory.create(db_session, role="consumer")
+    resp = await _accept(client, auth_headers, user, code)
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_accept_is_rate_limited_to_10_an_hour_and_wrong_codes_count(
+    client, db_session, auth_headers
+):
+    """Wrong and malformed codes both count: the limit is what makes a 6-digit
+    code safe to guess against."""
+    sp = await _sp(db_session)
+    invitee = await UserFactory.create(db_session, role="consumer")
+    with patch(RANDBELOW, return_value=999999):
+        invite = (await _invite(client, auth_headers, sp, invitee.phone)).json()
+
+    assert (await _accept(client, auth_headers, invitee, "abc")).status_code == 422
+    for i in range(9):
+        resp = await _accept(client, auth_headers, invitee, f"{i:06d}")
+        assert resp.status_code == 404, resp.text
+    # The 11th call is refused even with the right code.
+    resp = await _accept(client, auth_headers, invitee, invite["token"])
+    assert resp.status_code == 429
 
 
 @pytest.mark.asyncio
@@ -487,7 +540,7 @@ async def test_real_send_truncates_var1_to_the_dlt_limit(monkeypatch):
     with patch("app.utils.sms_client.httpx.AsyncClient") as http:
         post = AsyncMock(return_value=httpx.Response(200, json={"type": "success"}))
         http.return_value.__aenter__.return_value.post = post
-        await sms_client.send_team_invite("+919876543210", "A" * 100, "tok")
+        await sms_client.send_team_invite("+919876543210", "A" * 100, "004217")
     [recipient] = post.await_args.kwargs["json"]["recipients"]
     assert recipient["var1"] == "A" * 30
 
@@ -502,3 +555,77 @@ async def test_kyc_gate_does_not_create_an_sp_for_a_provider_without_a_profile(
     assert resp.json()["code"] == "INVITER_PAYOUT_KYC_INCOMPLETE"
     assert await ProviderService(db_session).get_profile(user.id) is None
     assert await _pros_of(db_session, user.id) == []
+
+
+# --- The 6-digit code ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_code_is_zero_padded_to_6_digits(client, db_session, auth_headers):
+    sp = await _sp(db_session)
+    with patch(RANDBELOW, return_value=42) as randbelow:
+        resp = await _invite(client, auth_headers, sp, "+919876543210")
+    assert resp.json()["token"] == "000042"
+    randbelow.assert_called_with(1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_a_code_collision_for_the_same_phone_draws_a_new_code(
+    client, db_session, auth_headers
+):
+    """Live codes are unique per phone. A second SP inviting the same phone gets
+    a fresh code when the first draw matches the live one."""
+    sp_a, sp_b = await _sp(db_session), await _sp(db_session)
+    invitee = await UserFactory.create(db_session, role="consumer")
+    with patch(RANDBELOW, return_value=111111):
+        first = (await _invite(client, auth_headers, sp_a, invitee.phone)).json()
+    with patch(RANDBELOW, side_effect=[111111, 222222]):
+        resp = await _invite(client, auth_headers, sp_b, invitee.phone)
+
+    assert resp.status_code == 201, resp.text
+    assert (first["token"], resp.json()["token"]) == ("111111", "222222")
+    # Each code reaches its own SP's team.
+    pro = (await _accept(client, auth_headers, invitee, "222222")).json()
+    assert pro["service_provider_id"] == str(sp_b.id)
+
+
+@pytest.mark.asyncio
+async def test_the_same_code_for_another_phone_is_no_collision(client, db_session, auth_headers):
+    sp = await _sp(db_session)
+    with patch(RANDBELOW, return_value=333333):
+        a = await _invite(client, auth_headers, sp, "+919876543210")
+        b = await _invite(client, auth_headers, sp, "+919876543211")
+    assert a.json()["token"] == b.json()["token"] == "333333"
+
+
+@pytest.mark.asyncio
+async def test_endless_collisions_give_up_with_503(client, db_session, auth_headers):
+    sp_a, sp_b = await _sp(db_session), await _sp(db_session)
+    invitee = await UserFactory.create(db_session, role="consumer")
+    with patch(RANDBELOW, return_value=444444):
+        await _invite(client, auth_headers, sp_a, invitee.phone)
+        resp = await _invite(client, auth_headers, sp_b, invitee.phone)
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "INVITE_CODE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_history_rows_with_the_same_code_do_not_block_a_new_invite(
+    client, db_session, auth_headers
+):
+    """Accepted / revoked / expired rows keep their codes; only live codes are
+    unique. A reused code reaches the live invite, not the old one."""
+    sp = await _sp(db_session)
+    invitee = await UserFactory.create(db_session, role="consumer")
+    headers = auth_headers(str(sp.id), "provider")
+    with patch(RANDBELOW, return_value=555555):
+        old = (await _invite(client, auth_headers, sp, invitee.phone)).json()
+        await client.post(f"{INVITES}/{old['id']}/revoke", headers=headers)
+        new = await _invite(client, auth_headers, sp, invitee.phone)
+
+    assert new.status_code == 201, new.text
+    assert new.json()["token"] == "555555"
+    resp = await _accept(client, auth_headers, invitee, "555555")
+    assert resp.status_code == 200
+    row = await db_session.get(ProviderTeamInvite, uuid.UUID(new.json()["id"]))
+    assert row.status == "ACCEPTED"

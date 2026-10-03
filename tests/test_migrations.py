@@ -584,15 +584,18 @@ def test_svc_320_schema_and_downgrade_restores_professionals(scratch_db):
     foreign_keys = {fk[1]: fk[2:] for fk in invites["foreign_keys"]}
     assert foreign_keys[("invited_by",)] == ("provider_profiles", ("user_id",), "CASCADE")
     assert foreign_keys[("accepted_by_user_id",)] == ("users", ("id",), None)
-    assert ("token",) in {u[1] for u in invites["unique_constraints"]}
+    # A 6-digit code repeats over time, so it must not be globally unique.
+    assert invites["unique_constraints"] == []
     nullable = {name: is_nullable for name, _, is_nullable in invites["columns"]}
     for column in ("invited_by", "invitee_phone", "token", "status", "expires_at", "created_at"):
         assert nullable[column] is False, column
     indexes = {i[0]: i[1:] for i in invites["indexes"]}
-    cols, unique, where = indexes["ux_provider_team_invites_pending"]
-    assert cols == ("invited_by", "invitee_phone")
-    assert unique is True
-    assert "PENDING" in where, "must be partial on status = 'PENDING'"
+    assert {name: (cols, unique) for name, (cols, unique, _) in indexes.items()} == {
+        "ux_provider_team_invites_pending": (("invited_by", "invitee_phone"), True),
+        "ux_provider_team_invites_pending_code": (("invitee_phone", "token"), True),
+    }
+    for name, (_, _, where) in indexes.items():
+        assert "PENDING" in where, f"{name} must be partial on status = 'PENDING'"
 
     _alembic(scratch_db, "downgrade", BEFORE_SVC_320)
     assert _shape(scratch_db, "professionals") == before

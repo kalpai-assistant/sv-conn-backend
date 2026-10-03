@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
 from app.models.provider_profile import KYCStatus
+from app.models.provider_team_invite import INVITE_CODE_DIGITS
 
 # The form auth stores in ``users.phone`` (``SendOTPRequest``'s pattern).
 _CANONICAL_PHONE_RE = re.compile(r"^\+91[6-9]\d{9}$")
@@ -43,8 +44,9 @@ class TeamInviteCreate(BaseModel):
 class TeamInviteResponse(BaseModel):
     """The SP's view of one invite.
 
-    Carries the token and URL: the SP is the one sending it, and having the link
-    lets them share it by another channel if the SMS doesn't arrive.
+    Carries the code (``token``) and the static ``/invite`` URL. The SP is the
+    one sending it, so they can pass the code on another way if the SMS doesn't
+    arrive; it only works from the invited phone.
     """
 
     id: UUID
@@ -59,7 +61,8 @@ class TeamInviteResponse(BaseModel):
 
 
 class AcceptInviteRequest(BaseModel):
-    token: str = Field(..., min_length=1, max_length=96)
+    # The invite code. Named ``token`` to keep the agreed body shape.
+    token: str = Field(..., pattern=rf"^\d{{{INVITE_CODE_DIGITS}}}$", examples=["004217"])
 
 
 class ProfessionalResponse(BaseModel):

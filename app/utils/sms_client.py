@@ -16,7 +16,7 @@ import httpx
 
 from app.config import get_settings
 from app.exceptions import SMSDeliveryError
-from app.models.provider_team_invite import INVITE_URL_BASE
+from app.models.provider_team_invite import INVITE_URL
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -152,8 +152,12 @@ _MSG91_FLOW_URL = "https://control.msg91.com/api/v5/flow"
 _DLT_VAR_MAX_CHARS = 30
 
 
-async def send_team_invite(phone: str, business_name: str, token: str) -> None:
-    """Text ``phone`` an invite to join ``business_name``'s team.
+async def send_team_invite(phone: str, business_name: str, code: str) -> None:
+    """Text ``phone`` an invite to join ``business_name``'s team, with its code.
+
+    Template (SVC-328, attempt 3): "{var1} invited you to join their team on
+    EazyServ. Open https://app.eazyserv.com/invite and enter {var2}. Expires in
+    7 days." The URL is literal in the template; nothing variable goes in it.
 
     With ``MSG91_INVITE_TEMPLATE_ID`` empty (no DLT-approved template yet,
     SVC-328), this logs the invite as ``[MOCK INVITE]`` and returns without any
@@ -163,22 +167,19 @@ async def send_team_invite(phone: str, business_name: str, token: str) -> None:
 
     Raises ``SMSDeliveryError`` when MSG91 rejects the send.
     """
-    invite_url = INVITE_URL_BASE + token
     if not settings.MSG91_INVITE_TEMPLATE_ID:
-        logger.info("[MOCK INVITE] SP=%s phone=%s url=%s", business_name, phone, invite_url)
+        logger.info(
+            "[MOCK INVITE] SP=%s phone=%s code=%s url=%s", business_name, phone, code, INVITE_URL
+        )
         return
 
     var1 = business_name[:_DLT_VAR_MAX_CHARS]
-    # The full URL, for a template body ending "Tap to accept: {#var#}". If the
-    # approved template carries the URL prefix itself, this becomes ``token``.
-    # The token alone (30 chars) fits _DLT_VAR_MAX_CHARS; the full URL does not,
-    # so a real send needs the token-only shape. See INVITE_TOKEN_BYTES.
-    var2 = invite_url
+    var2 = code
 
     body = {
         "template_id": settings.MSG91_INVITE_TEMPLATE_ID,
-        # MSG91 would otherwise rewrite the URL to its own short domain, which
-        # no longer matches the URL pattern registered with the DLT template.
+        # The URL is in the template body; keep MSG91 from rewriting it to its
+        # own short domain, which would no longer match the DLT registration.
         "short_url": "0",
         "recipients": [
             {"mobiles": phone.lstrip("+"), "var1": var1, "var2": var2},

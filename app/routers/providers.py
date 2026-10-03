@@ -425,18 +425,27 @@ async def remove_team_member(
     await TeamService(db).remove_pro(current_user.id, pro_id)
 
 
-@router.post("/me/accept-invite", response_model=ProfessionalResponse)
+@router.post(
+    "/me/accept-invite",
+    response_model=ProfessionalResponse,
+    # Per user, so per phone. This is what makes a 6-digit code safe: 10 guesses
+    # an hour against a code that only works from the invited phone.
+    dependencies=[Depends(rate_limit("team_invite_accept", max_requests=10))],
+)
 async def accept_team_invite(
     request: AcceptInviteRequest,
     # Not provider-only: the app signs everyone up as a consumer, so most
-    # invitees are consumers. The invite is bound to their phone instead.
+    # invitees are consumers. The code only works from the invited phone.
     current_user: User = Depends(require_role("consumer", "provider")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Join the inviting SP's team. Returns my new (or reactivated) Pro row.
+    """Join the inviting SP's team with the 6-digit code from the SMS. Returns
+    my new (or reactivated) Pro row.
 
-    403 if the invite was sent to another phone; 404 unknown token; 410 used,
-    revoked or expired; 400 ``ALREADY_PRO_ELSEWHERE`` while I'm an active Pro
-    under another SP (an SP's own Pro-for-self counts); 409 already on this team.
+    The code is matched together with my phone. 404 if it isn't one of my
+    invites (including someone else's valid code); 410 if it was mine but is
+    used, revoked or expired; 400 ``ALREADY_PRO_ELSEWHERE`` while I'm an active
+    Pro under another SP (an SP's own Pro-for-self counts); 409 already on this
+    team. 10 attempts an hour.
     """
     return await TeamService(db).accept_invite(current_user, request.token)

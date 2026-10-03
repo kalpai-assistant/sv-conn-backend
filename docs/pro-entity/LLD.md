@@ -74,7 +74,7 @@ CREATE TABLE provider_team_invites (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     invited_by            UUID NOT NULL REFERENCES service_providers(user_id) ON DELETE CASCADE,
     invitee_phone         VARCHAR(20) NOT NULL,          -- canonical +91XXXXXXXXXX, same as users.phone
-    token                 VARCHAR(96) NOT NULL UNIQUE,   -- secrets.token_urlsafe(22), 30 chars (DLT var cap); single-use
+    token                 VARCHAR(96) NOT NULL,          -- 6-digit code, e.g. '004217'; single-use; NOT globally unique
     status                VARCHAR(16) NOT NULL DEFAULT 'PENDING',  -- PENDING | ACCEPTED | REVOKED | EXPIRED
     expires_at            TIMESTAMPTZ NOT NULL,          -- created_at + 7 days
     accepted_at           TIMESTAMPTZ,
@@ -86,7 +86,13 @@ CREATE TABLE provider_team_invites (
 -- One live invite per (SP, phone); accepted / revoked / expired rows stay as history.
 CREATE UNIQUE INDEX ux_provider_team_invites_pending
     ON provider_team_invites(invited_by, invitee_phone) WHERE status = 'PENDING';
+
+-- Live codes are unique per phone: accept-invite looks up by (phone, code).
+CREATE UNIQUE INDEX ux_provider_team_invites_pending_code
+    ON provider_team_invites(invitee_phone, token) WHERE status = 'PENDING';
 ```
+
+- `token` is a 6-digit numeric code (`f"{secrets.randbelow(1_000_000):06d}"`), not a URL token. STPL rejected every SMS template with a variable in the URL (SVC-328), so the SMS carries a static link plus the code. With only 10^6 codes, and history rows keeping theirs, a global `UNIQUE(token)` would turn into random insert failures. Live codes are unique *per phone* instead, and creation draws a fresh code on the rare collision.
 
 - Expiry is lazy: a row stays `PENDING` past `expires_at` until an accept attempt or a re-invite of the same phone touches it.
 - `status` is VARCHAR rather than a Postgres enum, so adding a state later needs no migration.
@@ -182,16 +188,16 @@ POST /pros/me/jobs/{id}/complete        → completed
 ### SP team management (Phase B) — shipped in SVC-320 PR 1
 
 ```
-POST   /providers/me/team/invites       → { invitee_phone } SMS invite; returns token + invite_url
+POST   /providers/me/team/invites       → { invitee_phone } SMS invite; returns token (the code) + invite_url (static)
 POST   /providers/me/team/invites/{id}/revoke
 GET    /providers/me/team               → active Pros under my SP, Pro-for-self (is_self) first
 DELETE /providers/me/team/{pro_id}      → remove Pro (soft delete: set is_active=false)
-POST   /providers/me/accept-invite      → { token } invitee accepts → new (or reactivated) Pro row
+POST   /providers/me/accept-invite      → { token: "<6-digit code>" } invitee accepts → new (or reactivated) Pro row
 ```
 
-- **Create** (role `provider`): rate-limited to 5/hour per SP. The KYC gate runs first (403 `INVITER_PAYOUT_KYC_INCOMPLETE` unless the SP's `kyc_status = VERIFIED`), before any token or SMS. Self-invite is a 400; a phone already active on the team, or with a live invite, is a 409.
-- **SMS**: MSG91 `/api/v5/flow`, `var1` = SP business name, `var2` = invite URL (`https://app.eazyserv.com/invite?t=<token>`, one constant in `app/models/provider_team_invite.py`). While `MSG91_INVITE_TEMPLATE_ID` is empty (until the SVC-328 DLT approval), the invite is only logged as `[MOCK INVITE]` and MSG91 is never called.
-- **Accept**: open to role `consumer` *or* `provider` (the app signs everyone up as a consumer), but the caller's phone must equal `invitee_phone` (403 otherwise). 404 unknown token; 410 used, revoked or expired. 400 `ALREADY_PRO_ELSEWHERE` if the caller has an *active* Pro row under another SP, and an SP's own Pro-for-self counts, so an existing SP can't join a team. 409 if already active on this team.
+- **Create** (role `provider`): rate-limited to 5/hour per SP. The KYC gate runs first (403 `INVITER_PAYOUT_KYC_INCOMPLETE` unless the SP's `kyc_status = VERIFIED`), before any code or SMS. Self-invite is a 400; a phone already active on the team, or with a live invite, is a 409.
+- **SMS**: MSG91 `/api/v5/flow` with template "{var1} invited you to join their team on EazyServ. Open https://app.eazyserv.com/invite and enter {var2}. Expires in 7 days." `var1` = SP business name (truncated to DLT's 30-char cap), `var2` = the code. The URL is fully static (`INVITE_URL` in `app/models/provider_team_invite.py`). It opens the app rather than the browser only once Android App Links are set up for `app.eazyserv.com` (**SVC-343**). While `MSG91_INVITE_TEMPLATE_ID` is empty (until the SVC-328 DLT approval), the invite is only logged as `[MOCK INVITE] SP=… phone=… code=… url=…` and MSG91 is never called.
+- **Accept**: open to role `consumer` *or* `provider` (the app signs everyone up as a consumer). Rate-limited to 10/hour per user (so per phone), and every call counts, wrong and malformed codes included: that is what makes 10^6 codes safe. The invite is looked up by code **and** the caller's own phone, so a code only works for the person it was texted to. 404 if it isn't one of the caller's invites, including someone else's valid code: same body, so nothing leaks. 410 if it was the caller's but is used, revoked or expired. 422 for anything but 6 digits. 400 `ALREADY_PRO_ELSEWHERE` if the caller has an *active* Pro row under another SP, and an SP's own Pro-for-self counts, so an existing SP can't join a team. 409 if already active on this team.
 - **Remove**: an SP can't remove its own Pro-for-self (400 `CANNOT_REMOVE_SELF`). Going off-tools is SVC-326, which brings the dispatch filter it needs.
 - **Pro-for-self at signup**: `ProviderService.get_or_create_profile` creates it in the same transaction as the SP row.
 

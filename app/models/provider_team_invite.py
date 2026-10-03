@@ -8,20 +8,20 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 
-# The link texted to the invitee is INVITE_URL_BASE + token: the one line to
-# change when the shape firms up. STPL rejected the path-segment form
-# (/invite/<token>) for DLT; the query-param form is what SVC-328 resubmitted.
-# The domain is the web app (not the marketing site at eazyserv.com, which has no
-# /invite route) and must match the URL pattern registered with the DLT
-# template, or telcos drop the SMS.
-INVITE_URL_BASE = "https://app.eazyserv.com/invite?t="
+# The link in the invite SMS. Fully static: STPL rejected both templates that
+# carried the token in the URL (path segment, then query param) with "Please
+# mention fully static link" (SVC-328). The invitee opens this page and types the
+# code from the same SMS. It opens the app rather than the browser only once
+# Android App Links are set up for app.eazyserv.com (SVC-343). The domain is the
+# web app, not the marketing site eazyserv.com, which has no /invite route.
+INVITE_URL = "https://app.eazyserv.com/invite"
 
-# ``secrets.token_urlsafe(22)`` is 30 characters: 176 bits of entropy, sized to
-# Indian DLT's 30-character cap on a template variable so the token alone fits
-# var2 when the template carries the URL prefix. The ticket said 48 (64 chars),
-# which no DLT variable can hold. 176 bits is ample for a 7-day single-use token,
-# and accept-invite also requires the caller's phone to match.
-INVITE_TOKEN_BYTES = 22
+# The invite code: zero-padded digits (SVC-320, Vipul 2026-10-02). Numeric for a
+# single mobile keyboard and Android's "copy code" chip. 10^6 combinations is
+# safe because accept-invite is limited to 10 attempts/hour per user and a code
+# only works from the invited phone. Going to 8 digits is this one line; the
+# VARCHAR(96) column needs no migration.
+INVITE_CODE_DIGITS = 6
 
 
 class InviteStatus(str, enum.Enum):
@@ -45,7 +45,7 @@ class InviteStatus(str, enum.Enum):
 class ProviderTeamInvite(Base):
     """An SP's invitation for a phone number to join its team as a Pro (SVC-320).
 
-    The token travels by SMS and is single-use: accepting moves the row out of
+    The code travels by SMS and is single-use: accepting moves the row out of
     ``PENDING`` for good.
     """
 
@@ -58,6 +58,18 @@ class ProviderTeamInvite(Base):
             "ux_provider_team_invites_pending",
             "invited_by",
             "invitee_phone",
+            unique=True,
+            postgresql_where=text("status = 'PENDING'"),
+        ),
+        # A code identifies a live invite only together with the phone it was
+        # sent to. Codes repeat over time (10^6 of them, and accepted / revoked /
+        # expired rows keep theirs), so a global UNIQUE(token) would turn into
+        # random insert failures. Live codes are unique per phone instead, which
+        # is exactly what accept-invite looks up by.
+        Index(
+            "ux_provider_team_invites_pending_code",
+            "invitee_phone",
+            "token",
             unique=True,
             postgresql_where=text("status = 'PENDING'"),
         ),
@@ -79,9 +91,9 @@ class ProviderTeamInvite(Base):
     # Canonical ``+91XXXXXXXXXX``, the same form ``users.phone`` holds, so
     # accept-invite can compare the two directly.
     invitee_phone: Mapped[str] = mapped_column(String(20), nullable=False)
-    # 30 characters today (INVITE_TOKEN_BYTES); 96 leaves headroom to change it
-    # without a migration.
-    token: Mapped[str] = mapped_column(String(96), nullable=False, unique=True)
+    # The invite code (INVITE_CODE_DIGITS digits). Named ``token`` for the API's
+    # ``{"token": ...}`` body. Not unique on its own; see the index above.
+    token: Mapped[str] = mapped_column(String(96), nullable=False)
     status: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
@@ -100,7 +112,7 @@ class ProviderTeamInvite(Base):
 
     @property
     def invite_url(self) -> str:
-        return INVITE_URL_BASE + self.token
+        return INVITE_URL
 
     def is_live(self, now: datetime) -> bool:
         return self.status == InviteStatus.PENDING.value and self.expires_at > now
