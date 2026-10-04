@@ -1240,11 +1240,25 @@ class BookingService:
                 raise UnauthorizedAction(
                     "This booking has already been claimed by another provider"
                 )
-        elif changed_by not in (booking.provider_id, booking.consumer_id) and not (
-            # SVC-320 PR 3: the assigned Pro does the job, so they move it too.
-            await self.is_assigned_pro(booking, changed_by)
+        elif new_status in (
+            BookingStatus.EN_ROUTE,
+            BookingStatus.IN_PROGRESS,
+            BookingStatus.COMPLETED,
         ):
-            # For other transitions (start, complete), only the assigned parts can mutate
+            # The job's own steps: only whoever is doing it — the SP holding the
+            # booking, or the Pro it is assigned to (SVC-320 PR 3). Never the
+            # consumer: before PR 3 this branch admitted them too, so a consumer
+            # could mark their own booking complete, crediting the provider's
+            # payout and firing the cash-payment task. The app never let them,
+            # but the API did.
+            if changed_by != booking.provider_id and not (
+                await self.is_assigned_pro(booking, changed_by)
+            ):
+                raise UnauthorizedAction("Only the assigned provider can perform this action")
+        elif changed_by not in (booking.provider_id, booking.consumer_id):
+            # Cancel: either party, as always (who pays what is
+            # _apply_cancellation_policy's business, and cancel() handles a
+            # provider backing out of an ACCEPTED job before this).
             raise UnauthorizedAction(
                 "Only the assigned provider or consumer can perform this action"
             )
