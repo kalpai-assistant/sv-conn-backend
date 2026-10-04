@@ -7,7 +7,7 @@ import logging
 import secrets
 import uuid
 from collections.abc import Iterable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import status
@@ -69,6 +69,7 @@ _ACTIVE_JOB_STATUSES = (
 PRO_NOT_FOUND = "PRO_NOT_FOUND"
 PRO_BUSY = "PRO_BUSY"
 JOB_NOT_FOUND = "JOB_NOT_FOUND"
+PROVIDER_EN_ROUTE = "PROVIDER_EN_ROUTE"
 
 
 class BookingService:
@@ -627,20 +628,18 @@ class BookingService:
         ):
             return []
 
-        timeout = timedelta(seconds=get_settings().BOOKING_REQUEST_TIMEOUT_SECONDS)
-        cutoff = datetime.now(UTC) - timeout
-
-        # Genuinely open: REQUESTED, unclaimed, and inside the offer window.
-        # The window check matters because `expire_stale_bookings` sweeps only
-        # every 30s, so a booking can sit past its deadline still REQUESTED. It
-        # runs from `offer_window_start`, which a reopen (SVC-320) resets.
+        # Genuinely open: REQUESTED, unclaimed, and the offer not yet expired.
+        # The expiry check matters because `expire_stale_bookings` sweeps only
+        # every 30s, so a booking can sit past its deadline still REQUESTED.
+        # `offer_expires_at` covers the normal window (from creation or the
+        # last reopen, SVC-320) and a paid booking's second offer (SVC-344).
         open_bookings = (
             (
                 await self.db.execute(
                     select(Booking).where(
                         Booking.status == BookingStatus.REQUESTED,
                         Booking.provider_id.is_(None),
-                        Booking.offer_window_start > cutoff,
+                        Booking.offer_expires_at > datetime.now(UTC),
                     )
                 )
             )
@@ -754,10 +753,11 @@ class BookingService:
     def _offer_expiry(booking: Booking) -> tuple[datetime, int]:
         """When this offer dies, and how long the card has left (SVC-166).
 
-        Derived from ``offer_window_start`` (creation, or the last reopen) +
-        the configured timeout — the same pair ``expire_stale_bookings`` sweeps on — so changing the timeout moves both
-        the real expiry and what we advertise. Nothing is stored; there is no
-        column and no migration behind this.
+        Read from ``Booking.offer_expires_at`` — the end of the normal window
+        (creation or the last reopen, + the timeout), or of a paid booking's
+        second offer (SVC-344) — the same definition ``expire_stale_bookings``
+        sweeps on, so changing a timeout moves both the real expiry and what we
+        advertise.
 
         Two deliberate choices:
 
@@ -770,8 +770,7 @@ class BookingService:
           still serves it — a negative countdown would be nonsense, and 0 tells
           the card to dismiss.
         """
-        timeout = timedelta(seconds=get_settings().BOOKING_REQUEST_TIMEOUT_SECONDS)
-        expires_at = booking.offer_window_start + timeout
+        expires_at = booking.offer_expires_at
         remaining = (expires_at - datetime.now(UTC)).total_seconds()
         return expires_at, max(0, int(remaining))
 
@@ -1123,8 +1122,10 @@ class BookingService:
         * The releasing SP's offer row is marked answered (it normally already
           is, ACCEPTED, from the claim), so the re-broadcast and the offer poll
           leave them out. They gave it back; they shouldn't be offered it again.
-        * The doorstep OTP is kept: the consumer may already have it on screen,
-          and it's still a secret only they hold.
+        * A new doorstep OTP (SVC-344): the consumer has already read the old
+          one out, or could have, to someone who is no longer on the job.
+        * ``last_chance_at`` is cleared, so a paid booking starts its no-taker
+          cycle afresh: a full window, then the second offer (SVC-344).
 
         The router enqueues the consumer push and the re-broadcast after commit.
         """
@@ -1154,6 +1155,8 @@ class BookingService:
         booking.provider_id = None
         booking.professional_id = None
         booking.reopened_at = now
+        booking.last_chance_at = None
+        booking.doorstep_otp = self._generate_doorstep_otp()
         await self._log_transition(
             booking_id=booking.id,
             from_status=old_status.value,
@@ -1310,6 +1313,123 @@ class BookingService:
         await self.attach_status_logs([booking])
 
         return booking
+
+    # ------------------------------------------------------------------
+    # Cancel, and paid bookings nobody takes (SVC-344)
+    # ------------------------------------------------------------------
+
+    async def cancel(
+        self, booking_id: uuid.UUID, user_id: uuid.UUID, reason: str | None
+    ) -> tuple[Booking, str]:
+        """``PATCH /bookings/{id}/cancel``. Returns ``(booking, outcome)`` where
+        outcome is ``"cancelled"`` or ``"reopened"``.
+
+        The consumer cancels exactly as before, in every state, fee included.
+
+        The booking's provider backing out is different (SVC-344):
+
+        * while ACCEPTED the booking is **reopened**, not cancelled: back to
+          searching, other SPs get it, nobody pays a fee. Before this, a
+          provider cancel went through ``_apply_cancellation_policy``, whose fee
+          depends only on the old status — so the *customer* was charged the
+          ₹49 and it was credited to the provider who backed out;
+        * once EN_ROUTE it's refused: they're on their way, so it needs a
+          person (support), not an automatic reopen.
+
+        Anyone else falls through to ``transition_status``, which refuses them
+        as it always has.
+        """
+        booking = await self.db.get(Booking, booking_id, with_for_update=True)
+        if not booking:
+            raise BookingNotFound(booking_id)
+        if booking.provider_id == user_id and booking.consumer_id != user_id:
+            if booking.status is BookingStatus.ACCEPTED:
+                booking = await self.reopen(
+                    booking, changed_by=user_id, reason="provider_cancelled"
+                )
+                return booking, "reopened"
+            if booking.status is BookingStatus.EN_ROUTE:
+                raise AppException(
+                    "You're on the way — contact support to cancel this job.",
+                    status_code=status.HTTP_409_CONFLICT,
+                    code=PROVIDER_EN_ROUTE,
+                )
+        booking = await self.transition_status(
+            booking_id=booking_id,
+            new_status=BookingStatus.CANCELLED,
+            changed_by=user_id,
+            cancellation_reason=reason,
+        )
+        return booking, "cancelled"
+
+    async def advance_paid_unclaimed(self, booking_id: uuid.UUID) -> str | None:
+        """Move a PAID booking whose offer expired untaken one step (SVC-344).
+
+        Called by the sweep, once per due booking, in its own transaction:
+
+        * no second offer yet → start one: ``last_chance_at = now`` (the offer
+          now expires BOOKING_LAST_CHANCE_SECONDS later) → ``"second_offer"``;
+          the sweep then re-broadcasts, to the same recipients rule as a reopen
+          (eligible, minus SPs who already answered);
+        * second offer over too → the system cancels it with a full refund →
+          ``"refunded"``; the sweep then pushes the consumer.
+
+        Everything is re-checked under the row lock, so a double sweep, a Celery
+        retry, or someone accepting in between makes this a no-op (``None``).
+        Scheduled bookings are left to their slot (SVC-243), as in the sweep.
+        """
+        booking = await self.db.get(Booking, booking_id, with_for_update=True)
+        now = datetime.now(UTC)
+        if (
+            booking is None
+            or booking.status is not BookingStatus.REQUESTED
+            or booking.provider_id is not None
+            or booking.payment_status is not PaymentStatus.PAID
+            or booking.payment_method is not PaymentMethod.ONLINE
+            or (booking.scheduled_at is not None and booking.scheduled_at > now)
+            or booking.offer_expires_at >= now
+        ):
+            return None
+
+        if booking.last_chance_at is None:
+            booking.last_chance_at = now
+            await self.db.flush()
+            logger.info("booking.second_offer booking_id=%s", booking.id)
+            return "second_offer"
+
+        await self._system_cancel_no_taker(booking)
+        return "refunded"
+
+    async def _system_cancel_no_taker(self, booking: Booking) -> None:
+        """REQUESTED → CANCELLED by the system, refunding everything the
+        customer paid.
+
+        Reuses ``_apply_cancellation_policy``: from REQUESTED it refunds the full
+        captured amount (service − discount) with no fee, and ``initiate_refund``
+        is idempotent on the payment row. If Razorpay refuses, that raises and
+        the caller's transaction rolls this whole cancel back: the booking stays
+        REQUESTED + PAID for the next sweep, never "cancelled" without a refund.
+        """
+        old_status = booking.status
+        booking.status = BookingStatus.CANCELLED
+        booking.cancellation_reason = "No professional available"
+        booking.doorstep_otp = None
+        await self._apply_cancellation_policy(booking, old_status)
+        await self._log_transition(
+            booking_id=booking.id,
+            from_status=old_status.value,
+            to_status=BookingStatus.CANCELLED.value,
+            # NULL: the system, not a person.
+            changed_by=None,
+            metadata={"actor": "system", "reason": "no_taker"},
+            note="system: no professional available",
+        )
+        await self.db.flush()
+        logger.info(
+            "booking.no_taker_refunded booking_id=%s reopened=%s",
+            booking.id,
+            booking.reopened_at is not None,
+        )
 
     # ------------------------------------------------------------------
     # Admin force-cancel (SVC-299)
@@ -1512,7 +1632,7 @@ class BookingService:
         booking_id: uuid.UUID,
         from_status: str,
         to_status: str,
-        changed_by: uuid.UUID,
+        changed_by: uuid.UUID | None,
         metadata: dict | None = None,
         note: str | None = None,
     ) -> None:

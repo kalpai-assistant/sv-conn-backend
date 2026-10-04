@@ -19,7 +19,11 @@ class BookingStatusLog(Base):
     )
     from_status: Mapped[str] = mapped_column(String(20))
     to_status: Mapped[str] = mapped_column(String(20))
-    changed_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    # NULL = the system did it, not a person (SVC-344: the auto-cancel of a
+    # paid booking nobody took). Never exposed by the API.
+    changed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
     # Column named "metadata" in DB; using metadata_ to avoid conflicts
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSONB)
     # Free-text reason for the transition. Populated for admin-driven state

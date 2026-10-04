@@ -339,19 +339,30 @@ async def complete_booking(
     return BookingResponse.for_viewer(booking, current_user.id)
 
 
-@router.patch("/{booking_id}/cancel", response_model=BookingResponse)
+@router.patch(
+    "/{booking_id}/cancel",
+    response_model=BookingResponse,
+    responses={409: {"description": "PROVIDER_EN_ROUTE: the provider is on the way"}},
+)
 async def cancel_booking(
     booking_id: UUID,
     request: CancelBookingRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    booking = await BookingService(db).transition_status(
-        booking_id=booking_id,
-        new_status=BookingStatus.CANCELLED,
-        changed_by=current_user.id,
-        cancellation_reason=request.reason,
+    """Cancel a booking — or, for its provider while ACCEPTED, give it back.
+
+    SVC-344: a provider backing out of an accepted job reopens it (back to
+    searching, no fee to anyone, the consumer told we're finding someone else)
+    instead of cancelling it on the consumer. Once en route it's a 409
+    ``PROVIDER_EN_ROUTE``: that needs support. The consumer cancels as before.
+    """
+    booking, outcome = await BookingService(db).cancel(
+        booking_id=booking_id, user_id=current_user.id, reason=request.reason
     )
+    if outcome == "reopened":
+        notify_reopened(booking.id)
+        return BookingResponse.for_viewer(booking, current_user.id)
     # SVC-278: cancel was the only lifecycle transition that told nobody, so
     # the other party found out by opening the app — a provider could travel to
     # a job the consumer had already called off. `actor_id` because either side

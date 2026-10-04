@@ -150,12 +150,14 @@ celery_app.conf.update(
     # Turning off cuts the result-backend slice entirely.
     task_ignore_result=True,
     beat_schedule={
-        # Ticket timeout is 120s — a 60s sweep still catches expiry within
-        # one grace window and halves the dispatch overhead vs. the old 30s
-        # cadence.
+        # Back to 30s for SVC-344. The sweep now also moves PAID bookings
+        # nobody took into their 90s second offer and then refunds them; each
+        # step waits for a sweep, so the cadence adds straight onto how long a
+        # paying customer waits (worst case ~4.5 min at 30s, ~5.5 at 60s). One
+        # bulk UPDATE plus a small SELECT per run.
         "expire-stale-bookings": {
             "task": "app.tasks.cleanup_tasks.expire_stale_bookings",
-            "schedule": 60.0,
+            "schedule": 30.0,
         },
         # SVC-190 (G14): the local mirror of Razorpay's order-expiry. The
         # window is 15 min + grace, so a 10-min sweep is still comfortably

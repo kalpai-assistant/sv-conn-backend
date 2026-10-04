@@ -2,52 +2,112 @@
 Cleanup Celery tasks — periodic jobs run by Celery Beat.
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, update
+from sqlalchemy import or_, select, update
 
 from app.config import get_settings
-from app.models.booking import Booking, BookingStatus, PaymentStatus
+from app.models.booking import Booking, BookingStatus, PaymentMethod, PaymentStatus
 from app.tasks.celery_app import celery_app
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @celery_app.task(name="app.tasks.cleanup_tasks.expire_stale_bookings")
 def expire_stale_bookings():
     """
-    Celery Beat task: runs every 30 seconds.
-    Bulk-expires REQUESTED bookings older than BOOKING_REQUEST_TIMEOUT_SECONDS.
+    Celery Beat task: runs every 30 seconds. Closes out REQUESTED bookings whose
+    offer has expired (``Booking.offer_expires_at``).
 
-    Guards:
+    * **Unpaid** (``payment_status == PENDING``, cash included): bulk-expired,
+      as always. Nothing to refund.
+    * **PAID** (SVC-344; skipped entirely before, SVC-251): never expired,
+      since expiry doesn't refund. Instead each one moves one step, in its own
+      transaction: first a second offer (one more broadcast, 90 s more), then,
+      if still untaken, a system cancel with a full refund and a consumer push.
+      See ``BookingService.advance_paid_unclaimed``.
 
-    * ``payment_status == PENDING`` (SVC-251) — a PAID booking sitting at
-      REQUESTED is waiting on a provider to accept an already-charged card.
-      Killing it silently would strand the customer's money and force a
-      dispute/refund; the accept-timeout policy is a separate concern.
-    * ``scheduled_at IS NULL OR scheduled_at <= now`` (SVC-243) — a booking
-      scheduled two hours from now legitimately has a REQUESTED lifetime
-      longer than the fulfilment window. The broadcast opens near the slot;
-      until then it must not be swept.
+    ``scheduled_at IS NULL OR scheduled_at <= now`` (SVC-243) guards both: a
+    booking scheduled two hours out legitimately sits REQUESTED until its slot.
     """
     from app.database import SyncSessionLocal
 
     now = datetime.now(UTC)
-    cutoff = now - timedelta(seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS)
+    due = [
+        Booking.status == BookingStatus.REQUESTED,
+        Booking.offer_expires_at < now,
+        or_(Booking.scheduled_at.is_(None), Booking.scheduled_at <= now),
+    ]
 
     with SyncSessionLocal() as db:
         result = db.execute(
             update(Booking)
-            .where(Booking.status == BookingStatus.REQUESTED)
-            # The current offer window, not creation: a booking reopened after
-            # being accepted (SVC-320) gets a fresh two minutes.
-            .where(Booking.offer_window_start < cutoff)
-            .where(Booking.payment_status == PaymentStatus.PENDING)
-            .where(or_(Booking.scheduled_at.is_(None), Booking.scheduled_at <= now))
+            .where(*due, Booking.payment_status == PaymentStatus.PENDING)
             .values(status=BookingStatus.EXPIRED)
         )
         db.commit()
-        return f"Expired {result.rowcount} stale bookings"
+        expired = result.rowcount
+
+        paid_ids = (
+            db.execute(
+                select(Booking.id).where(
+                    *due,
+                    Booking.payment_status == PaymentStatus.PAID,
+                    Booking.payment_method == PaymentMethod.ONLINE,
+                    Booking.provider_id.is_(None),
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    outcomes = [_advance_paid(booking_id) for booking_id in paid_ids]
+    return (
+        f"Expired {expired} stale bookings; paid: "
+        f"{outcomes.count('second_offer')} second offer, "
+        f"{outcomes.count('refunded')} refunded, "
+        f"{outcomes.count('failed')} failed"
+    )
+
+
+def _advance_paid(booking_id) -> str:
+    """One PAID, untaken booking one step along (SVC-344), in its own session and
+    transaction, so one booking's refund failure can't touch another's.
+
+    Pushes are enqueued only after the commit: a push for a step that then
+    rolled back would tell the consumer about a refund that never happened.
+    """
+    import asyncio
+
+    from app.database import AsyncSessionLocal
+    from app.services.booking_service import BookingService
+    from app.tasks.notification_tasks import send_booking_notification
+
+    async def _run() -> str | None:
+        async with AsyncSessionLocal() as session:
+            try:
+                outcome = await BookingService(session).advance_paid_unclaimed(booking_id)
+                await session.commit()
+                return outcome
+            except Exception:
+                await session.rollback()
+                raise
+
+    try:
+        outcome = asyncio.run(_run())
+    except Exception:
+        # Most likely the Razorpay refund call. Nothing was saved, so the
+        # booking is still REQUESTED + PAID and the next sweep tries again.
+        logger.exception("booking.no_taker_refund_failed booking_id=%s", booking_id)
+        return "failed"
+
+    if outcome == "second_offer":
+        send_booking_notification.delay(booking_id=str(booking_id), event="new_request")
+    elif outcome == "refunded":
+        send_booking_notification.delay(booking_id=str(booking_id), event="no_taker_refunded")
+    return outcome or "skipped"
 
 
 @celery_app.task(name="app.tasks.cleanup_tasks.expire_abandoned_payments")
