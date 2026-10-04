@@ -13,6 +13,7 @@ from app.models.booking import (  # noqa: F401
     PaymentMethod,
     PaymentStatus,
 )
+from app.models.booking_assignment_event import BookingAssignmentEvent  # noqa: F401
 from app.models.booking_item import BookingItem  # noqa: F401
 from app.models.booking_offer import BookingOffer, OfferResponse  # noqa: F401
 from app.models.booking_status_log import BookingStatusLog  # noqa: F401

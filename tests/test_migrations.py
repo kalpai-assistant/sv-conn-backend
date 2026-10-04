@@ -1,5 +1,6 @@
 """
-Migration round trips on a scratch database (SVC-319, SVC-339, SVC-340, SVC-320).
+Migration round trips on a scratch database (SVC-319, SVC-339, SVC-340, SVC-320,
+SVC-344, SVC-333).
 
 The rest of the suite builds its schema with ``Base.metadata.create_all``, and CI
 only ever runs ``alembic upgrade head`` — so a migration's ``downgrade()`` is not
@@ -717,3 +718,57 @@ def test_svc_344_schema_and_downgrade(scratch_db):
         f"SELECT changed_by FROM booking_status_logs WHERE booking_id = '{ids['unassigned']}'",
     )
     assert row["changed_by"] == ids["consumer"]
+
+
+# --- SVC-333: booking_assignment_events ---------------------------------------------
+
+
+SVC_333 = "e409e33c21bb"
+BEFORE_SVC_333 = SVC_344
+
+
+def test_svc_333_creates_the_event_table_and_downgrade_drops_it(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_333)
+    before = {t: _shape(scratch_db, t) for t in ("bookings", "booking_status_logs")}
+
+    _alembic(scratch_db, "upgrade", SVC_333)
+    shape = _shape(scratch_db, "booking_assignment_events")
+    assert {n: nl for n, _, nl in shape["columns"]} == {
+        "id": False,
+        "booking_id": False,
+        "kind": False,
+        "from_professional_id": True,
+        "to_professional_id": True,
+        "actor_user_id": True,
+        "note": True,
+        "created_at": False,
+    }
+    assert {(cols, table) for _, cols, table, _, _ in shape["foreign_keys"]} == {
+        (("booking_id",), "bookings"),
+        (("from_professional_id",), "professionals"),
+        (("to_professional_id",), "professionals"),
+        (("actor_user_id",), "users"),
+    }
+    assert (
+        "ix_booking_assignment_events_booking_id_created_at",
+        ("booking_id", "created_at"),
+        False,
+        "None",
+    ) in shape["indexes"]
+    [check] = _query(
+        scratch_db,
+        "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint "
+        "WHERE conname = 'ck_booking_assignment_events_kind'",
+    )
+    for kind in ("claimed", "repicked", "declined", "released", "provider_cancelled"):
+        assert f"'{kind}'" in check["def"]
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_333)
+    assert {t: _shape(scratch_db, t) for t in ("bookings", "booking_status_logs")} == before
+    assert (
+        _query(
+            scratch_db,
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'booking_assignment_events'",
+        )
+        == []
+    )

@@ -438,6 +438,11 @@ async def test_two_sps_assigning_at_once_produce_exactly_one_winner(db_session):
             async with sessions() as cleanup:
                 from sqlalchemy import delete, text
 
+                # SVC-333: the winner's claim wrote an assignment event too.
+                await cleanup.execute(
+                    text("DELETE FROM booking_assignment_events WHERE booking_id = :b"),
+                    {"b": str(ids["booking"])},
+                )
                 await cleanup.execute(
                     text("DELETE FROM booking_status_logs WHERE booking_id = :b"),
                     {"b": str(ids["booking"])},
