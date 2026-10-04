@@ -68,6 +68,7 @@ _ACTIVE_JOB_STATUSES = (
 # Stable codes for two-level dispatch (SVC-320 PR 2).
 PRO_NOT_FOUND = "PRO_NOT_FOUND"
 PRO_BUSY = "PRO_BUSY"
+PRO_OFFLINE = "PRO_OFFLINE"
 JOB_NOT_FOUND = "JOB_NOT_FOUND"
 PROVIDER_EN_ROUTE = "PROVIDER_EN_ROUTE"
 
@@ -490,12 +491,30 @@ class BookingService:
     # Fetch single booking
     # ------------------------------------------------------------------
 
+    async def is_assigned_pro(self, booking: Booking, user_id: uuid.UUID) -> bool:
+        """True when ``user_id`` is the person this booking is assigned to: the
+        user behind ``booking.professional_id``, while that Pro row is active
+        (SVC-320 PR 3).
+
+        A team Pro is a different user from the SP who holds the booking, and
+        usually a consumer-role account (the app signs everyone up as one), so
+        neither the provider check nor a role check covers them. Removing a Pro
+        from the team (``is_active = false``) ends their access.
+        """
+        if booking.professional_id is None:
+            return False
+        pro = await self.db.get(Professional, booking.professional_id)
+        return pro is not None and pro.is_active and pro.user_id == user_id
+
     async def get_booking(self, booking_id: uuid.UUID, user_id: uuid.UUID) -> Booking:
-        """Fetch a booking, enforcing that caller is the consumer or assigned provider."""
+        """Fetch a booking for its consumer, its provider (the SP), or the Pro it
+        is assigned to (SVC-320 PR 3)."""
         booking = await self.db.get(Booking, booking_id)
         if not booking:
             raise BookingNotFound(booking_id)
-        if user_id not in (booking.consumer_id, booking.provider_id):
+        if user_id not in (booking.consumer_id, booking.provider_id) and not (
+            await self.is_assigned_pro(booking, user_id)
+        ):
             raise UnauthorizedAction("You do not have access to this booking")
         # After the access check, not before: a caller who is refused never
         # causes a lookup of the address (or items) they were refused.
@@ -1026,6 +1045,15 @@ class BookingService:
                 f"A booking that is {booking.status.value} can't be reassigned"
             )
 
+        # SVC-320 PR 3: team Pros now have their own online toggle. The SP's
+        # Pro-for-self is exempt: the SP's toggle, part of eligibility, covers it.
+        if not pro.is_self and not pro.is_online:
+            raise AppException(
+                f"{pro.display_name} is offline.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=PRO_OFFLINE,
+            )
+
         if await self._busy_pro_ids([pro.id], except_booking=booking.id):
             raise AppException(
                 f"{pro.display_name} is already on another job.",
@@ -1212,8 +1240,25 @@ class BookingService:
                 raise UnauthorizedAction(
                     "This booking has already been claimed by another provider"
                 )
+        elif new_status in (
+            BookingStatus.EN_ROUTE,
+            BookingStatus.IN_PROGRESS,
+            BookingStatus.COMPLETED,
+        ):
+            # The job's own steps: only whoever is doing it — the SP holding the
+            # booking, or the Pro it is assigned to (SVC-320 PR 3). Never the
+            # consumer: before PR 3 this branch admitted them too, so a consumer
+            # could mark their own booking complete, crediting the provider's
+            # payout and firing the cash-payment task. The app never let them,
+            # but the API did.
+            if changed_by != booking.provider_id and not (
+                await self.is_assigned_pro(booking, changed_by)
+            ):
+                raise UnauthorizedAction("Only the assigned provider can perform this action")
         elif changed_by not in (booking.provider_id, booking.consumer_id):
-            # For other transitions (start, complete), only the assigned parts can mutate
+            # Cancel: either party, as always (who pays what is
+            # _apply_cancellation_policy's business, and cancel() handles a
+            # provider backing out of an ACCEPTED job before this).
             raise UnauthorizedAction(
                 "Only the assigned provider or consumer can perform this action"
             )

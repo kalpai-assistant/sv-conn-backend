@@ -4,6 +4,7 @@ All endpoints require the "admin" role.
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -11,6 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.config import get_settings
 from app.database import get_db
@@ -19,6 +21,7 @@ from app.exceptions import BookingNotFound
 from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, SettlementStatus
 from app.models.payment import Payment
+from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.user import User
 from app.schemas.booking import BookingListResponse, BookingResponse, ForceCancelBookingRequest
@@ -28,6 +31,7 @@ from app.schemas.provider import (
     KYCQueueRow,
     KYCRejectionRequest,
     KYCReviewResponse,
+    ProKYCDocsResponse,
 )
 from app.schemas.user import UserResponse
 from app.services.booking_service import BookingService
@@ -83,6 +87,14 @@ async def list_kyc_queue(
             "verifier bot in the last 7 days (SVC-307), for the admin spot-check tab."
         ),
     ),
+    kind: Literal["sp", "pro", "all"] = Query(
+        "sp",
+        description=(
+            "SVC-327: which KYC records. 'sp' (default, the queue as it has always "
+            "been): service providers. 'pro': team professionals' Aadhaar KYC, "
+            "reviewed via /admin/pros/{professional_id}/kyc. 'all': both, merged."
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """List providers filtered by KYC status.
@@ -102,23 +114,23 @@ async def list_kyc_queue(
     """
     settings = get_settings()
 
+    # SVC-327: which rows. "sp" (default) is exactly the old queue, so today's
+    # admin UI, which opens every row through /admin/providers/{id}/kyc, never
+    # receives a Pro id. The admin chip frontend opts in with all / pro.
     if status_filter == "auto_approved":
         # SVC-307 spot-check tab. Deliberately not a KYCStatus value — the
         # profile IS verified; the filter is on who verified it.
         bot_id = UUID(settings.KYC_VERIFIER_BOT_USER_ID)
         cutoff = datetime.now(UTC) - timedelta(days=7)
-        stmt = (
-            select(User, ProviderProfile)
-            .join(ProviderProfile, ProviderProfile.user_id == User.id)
-            .where(
-                ProviderProfile.kyc_status == KYCStatus.VERIFIED,
-                ProviderProfile.kyc_reviewed_by == bot_id,
-                ProviderProfile.kyc_reviewed_at > cutoff,
+
+        def where(model):
+            return (
+                model.kyc_status == KYCStatus.VERIFIED,
+                model.kyc_reviewed_by == bot_id,
+                model.kyc_reviewed_at > cutoff,
             )
-            .order_by(ProviderProfile.kyc_reviewed_at.desc())
-            .offset((page - 1) * per_page)
-            .limit(per_page)
-        )
+
+        newest_review_first = True
     else:
         try:
             kyc_status_filter = KYCStatus(status_filter)
@@ -130,23 +142,37 @@ async def list_kyc_queue(
                     f"{[s.value for s in KYCStatus]} or 'auto_approved'."
                 ),
             ) from exc
-        order_col = (
-            ProviderProfile.kyc_reviewed_at.desc()
-            if kyc_status_filter == KYCStatus.REJECTED
-            else ProviderProfile.kyc_submitted_at.asc()
-        )
-        stmt = (
+
+        def where(model):
+            return (model.kyc_status == kyc_status_filter,)
+
+        newest_review_first = kyc_status_filter == KYCStatus.REJECTED
+
+    def order(model):
+        return model.kyc_reviewed_at.desc() if newest_review_first else model.kyc_submitted_at.asc()
+
+    def sp_stmt():
+        return (
             select(User, ProviderProfile)
             .join(ProviderProfile, ProviderProfile.user_id == User.id)
-            .where(ProviderProfile.kyc_status == kyc_status_filter)
-            .order_by(order_col)
-            .offset((page - 1) * per_page)
-            .limit(per_page)
+            .where(*where(ProviderProfile))
+            .order_by(order(ProviderProfile))
         )
 
-    result = await db.execute(stmt)
-    return [
-        KYCQueueRow(
+    def pro_stmt():
+        # Team Pros only: a Pro-for-self's KYC is its SP's, reviewed as the SP.
+        sp = aliased(ProviderProfile)
+        return (
+            select(User, Professional, sp.business_name)
+            .join(Professional, Professional.user_id == User.id)
+            .join(sp, sp.user_id == Professional.service_provider_id)
+            .where(Professional.user_id != Professional.service_provider_id)
+            .where(*where(Professional))
+            .order_by(order(Professional))
+        )
+
+    def sp_row(user, profile) -> KYCQueueRow:
+        return KYCQueueRow(
             id=user.id,
             phone=user.phone,
             name=user.name,
@@ -155,8 +181,41 @@ async def list_kyc_queue(
             kyc_reviewed_at=profile.kyc_reviewed_at,
             kyc_rejection_reason=profile.kyc_rejection_reason,
         )
-        for user, profile in result.all()
-    ]
+
+    def pro_row(user, pro, business_name) -> KYCQueueRow:
+        return KYCQueueRow(
+            id=user.id,
+            phone=user.phone,
+            name=user.name,
+            email=user.email,
+            kyc_submitted_at=pro.kyc_submitted_at,
+            kyc_reviewed_at=pro.kyc_reviewed_at,
+            kyc_rejection_reason=pro.kyc_rejection_reason,
+            kind="pro",
+            professional_id=pro.id,
+            sp_user_id=pro.service_provider_id,
+            sp_business_name=business_name,
+        )
+
+    offset = (page - 1) * per_page
+    if kind == "sp":
+        result = await db.execute(sp_stmt().offset(offset).limit(per_page))
+        return [sp_row(*r) for r in result.all()]
+    if kind == "pro":
+        result = await db.execute(pro_stmt().offset(offset).limit(per_page))
+        return [pro_row(*r) for r in result.all()]
+
+    # all: the first page*per_page of each kind, merged in the same order, then
+    # this page cut out of the merge. Admin-scale volumes, so two bounded reads.
+    head = page * per_page
+    rows = [sp_row(*r) for r in (await db.execute(sp_stmt().limit(head))).all()]
+    rows += [pro_row(*r) for r in (await db.execute(pro_stmt().limit(head))).all()]
+    never = datetime.min.replace(tzinfo=UTC)
+    if newest_review_first:
+        rows.sort(key=lambda r: r.kyc_reviewed_at or never, reverse=True)
+    else:
+        rows.sort(key=lambda r: r.kyc_submitted_at or never)
+    return rows[offset : offset + per_page]
 
 
 @router.get(
@@ -196,6 +255,51 @@ async def reject_provider_kyc(
     profile = await ProviderService(db).reject_kyc(user_id, reason=body.reason)
     await db.commit()
     return profile
+
+
+# ---------------------------------------------------------------------------
+# Team Pro KYC (SVC-327): the same review, on a professionals row
+# ---------------------------------------------------------------------------
+#
+# Addressed by professional id, not user id: the SP routes above stay exactly as
+# the admin frontend uses them, and a Pro's KYC can never land on an SP row.
+# Pros-for-self 404 here; their KYC is their SP's.
+
+
+@router.get(
+    "/pros/{professional_id}/kyc",
+    response_model=ProKYCDocsResponse,
+    dependencies=[_admin_dep],
+)
+async def get_pro_kyc_review(professional_id: UUID, db: AsyncSession = Depends(get_db)):
+    """A team Pro's KYC review payload, with which SP they work for."""
+    return await ProviderService(db).get_pro_kyc_review_payload(professional_id)
+
+
+@router.post(
+    "/pros/{professional_id}/kyc/verify",
+    response_model=KYCReviewResponse,
+    dependencies=[_admin_dep],
+)
+async def verify_pro_kyc(professional_id: UUID, db: AsyncSession = Depends(get_db)):
+    pro = await ProviderService(db).verify_pro_kyc(professional_id)
+    await db.commit()
+    return pro
+
+
+@router.post(
+    "/pros/{professional_id}/kyc/reject",
+    response_model=KYCReviewResponse,
+    dependencies=[_admin_dep],
+)
+async def reject_pro_kyc(
+    professional_id: UUID,
+    body: KYCRejectionRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    pro = await ProviderService(db).reject_pro_kyc(professional_id, reason=body.reason)
+    await db.commit()
+    return pro
 
 
 # ---------------------------------------------------------------------------

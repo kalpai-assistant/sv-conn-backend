@@ -72,11 +72,16 @@ async def _self_pro(db, sp_id) -> Professional:
     )
 
 
-async def _team_pro(db, sp_id, name="Rohan", active=True) -> Professional:
-    """A team member, signed up the way invitees are: as a consumer."""
+async def _team_pro(db, sp_id, name="Rohan", active=True, online=True) -> Professional:
+    """A team member, signed up the way invitees are: as a consumer. Online by
+    default, since /assign refuses an offline team Pro (SVC-320 PR 3)."""
     user = await UserFactory.create(db, role="consumer", name=name)
     pro = Professional(
-        service_provider_id=sp_id, user_id=user.id, display_name=name, is_active=active
+        service_provider_id=sp_id,
+        user_id=user.id,
+        display_name=name,
+        is_active=active,
+        is_online=online,
     )
     db.add(pro)
     await db.flush()

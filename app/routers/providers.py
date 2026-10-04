@@ -49,7 +49,7 @@ _IMAGE_ALLOWED_CONTENT_TYPES = {
 }
 
 
-async def _read_image_upload(upload: UploadFile, field_name: str) -> tuple[bytes, str, str]:
+async def read_image_upload(upload: UploadFile, field_name: str) -> tuple[bytes, str, str]:
     """Validate + read an image upload. Returns (bytes, content_type, ext)."""
     if upload.content_type not in _IMAGE_ALLOWED_CONTENT_TYPES:
         raise HTTPException(
@@ -109,7 +109,7 @@ async def upload_profile_photo(
     db: AsyncSession = Depends(get_db),
 ):
     """Upload/replace the provider's profile photo. Returns the updated profile."""
-    photo_bytes, content_type, ext = await _read_image_upload(photo, "photo")
+    photo_bytes, content_type, ext = await read_image_upload(photo, "photo")
     return await ProviderService(db).update_photo(
         user_id=current_user.id,
         photo_bytes=photo_bytes,
@@ -125,7 +125,7 @@ async def upload_business_image(
     db: AsyncSession = Depends(get_db),
 ):
     """Upload/replace the provider's business image (SVC-336). Returns the updated profile."""
-    image_bytes, content_type, ext = await _read_image_upload(image, "image")
+    image_bytes, content_type, ext = await read_image_upload(image, "image")
     return await ProviderService(db).update_business_image(
         user_id=current_user.id,
         image_bytes=image_bytes,
@@ -348,9 +348,9 @@ async def submit_kyc(
     db: AsyncSession = Depends(get_db),
 ):
     """Upload KYC documents. Sets the profile's kyc_status to SUBMITTED."""
-    front_bytes, front_ct, front_ext = await _read_image_upload(aadhaar_front, "aadhaar_front")
-    back_bytes, back_ct, back_ext = await _read_image_upload(aadhaar_back, "aadhaar_back")
-    selfie_bytes, selfie_ct, selfie_ext = await _read_image_upload(selfie, "selfie")
+    front_bytes, front_ct, front_ext = await read_image_upload(aadhaar_front, "aadhaar_front")
+    back_bytes, back_ct, back_ext = await read_image_upload(aadhaar_back, "aadhaar_back")
+    selfie_bytes, selfie_ct, selfie_ext = await read_image_upload(selfie, "selfie")
 
     profile = await ProviderService(db).submit_kyc(
         user_id=current_user.id,

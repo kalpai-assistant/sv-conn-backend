@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -222,7 +223,9 @@ class KYCDocsResponse(BaseModel):
     kyc_reviewed_at: datetime | None
     kyc_rejection_reason: str | None
     # Presigned S3 URLs; nil if the provider hasn't uploaded yet.
-    aadhaar_url: str | None
+    aadhaar_url: str | None  # = aadhaar_front_url, for older admin builds
+    aadhaar_front_url: str | None
+    aadhaar_back_url: str | None
     selfie_url: str | None
     # SVC-307: full KYCVerdict payload from the AI verifier — extraction,
     # flags, outcome, confidence, and raw LLM response for audit. Null on
@@ -247,6 +250,14 @@ class KYCQueueRow(BaseModel):
     kyc_submitted_at: datetime | None
     kyc_reviewed_at: datetime | None
     kyc_rejection_reason: str | None
+
+    # SVC-327: which kind of record. Defaults keep an SP row identical to before.
+    # For a Pro, ``id`` is still the Pro's user id; review them with
+    # ``professional_id`` on /admin/pros/{professional_id}/kyc.
+    kind: Literal["sp", "pro"] = "sp"
+    professional_id: UUID | None = None
+    sp_user_id: UUID | None = None
+    sp_business_name: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -362,3 +373,13 @@ class ProviderPayoutListResponse(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+class ProKYCDocsResponse(KYCDocsResponse):
+    """Admin-only: a team Pro's KYC review payload (SVC-327) — the SP payload
+    plus which Pro row it is and which SP they work for."""
+
+    kind: Literal["pro"] = "pro"
+    professional_id: UUID
+    sp_user_id: UUID
+    sp_business_name: str | None
