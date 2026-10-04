@@ -96,6 +96,22 @@ class InvalidOTP(AppException):
         super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST)
 
 
+class AdminNotFound(AppException):
+    """SVC-345: phone does not belong to an existing admin user.
+
+    404, never 403: the client asking must not learn which phones are admin
+    accounts. Same shape for "user doesn't exist" and "user exists but is
+    consumer/provider" — leaking either would turn /auth/admin/send-otp into
+    a role-enumeration oracle.
+    """
+
+    def __init__(self):
+        super().__init__(
+            "No admin account exists for this phone.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+
 class PaymentError(AppException):
     def __init__(self, message: str):
         super().__init__(message, status_code=status.HTTP_402_PAYMENT_REQUIRED)

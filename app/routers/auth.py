@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_redis
 from app.schemas.auth import (
+    AdminVerifyOTPRequest,
     LogoutRequest,
     RefreshTokenRequest,
     SendOTPRequest,
@@ -35,6 +36,35 @@ async def verify_otp(
     return await AuthService(db, redis).verify_otp(
         phone=request.phone, otp=request.otp, role=request.role
     )
+
+
+# ---------------------------------------------------------------------------
+# SVC-345: dedicated admin login endpoints
+#
+# Live under /auth/admin/* so they share the auth router's prefix without
+# tripping AdminIPAllowlistMiddleware (which gates /api/v1/admin/*, not
+# /api/v1/auth/admin/*). Admins must be able to log in from any IP; the
+# actual admin API endpoints stay allowlist-gated.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/admin/send-otp", status_code=status.HTTP_200_OK)
+async def admin_send_otp(
+    request: SendOTPRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    await AuthService(db, redis).admin_send_otp(request.phone)
+    return {"message": "OTP sent successfully"}
+
+
+@router.post("/admin/verify-otp", response_model=TokenResponse)
+async def admin_verify_otp(
+    request: AdminVerifyOTPRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    return await AuthService(db, redis).admin_verify_otp(phone=request.phone, otp=request.otp)
 
 
 @router.post("/refresh", response_model=TokenResponse)
