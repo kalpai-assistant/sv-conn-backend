@@ -15,6 +15,15 @@ class VerifyOTPRequest(BaseModel):
     role: str = Field(default="consumer", pattern=r"^(consumer|provider)$")
 
 
+class AdminVerifyOTPRequest(BaseModel):
+    """SVC-345: admin verify-otp body. No `role` field — the dedicated admin
+    endpoint only ever issues an admin token, and the role is derived from the
+    user row, not the request."""
+
+    phone: str = Field(..., pattern=r"^\+91[6-9]\d{9}$")
+    otp: str = Field(..., min_length=6, max_length=6)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str

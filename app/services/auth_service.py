@@ -16,7 +16,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.exceptions import InvalidOTP, RateLimitExceeded, RoleMismatch, SMSDeliveryError
+from app.exceptions import (
+    AdminNotFound,
+    InvalidOTP,
+    RateLimitExceeded,
+    RoleMismatch,
+    SMSDeliveryError,
+)
 from app.models.user import User, UserRole
 from app.utils.otp import (
     generate_otp,
@@ -160,6 +166,82 @@ class AuthService:
             )
 
         return self._build_token_response(user, is_new=False)
+
+    # ------------------------------------------------------------------
+    # SVC-345: admin OTP flow — dedicated endpoints, no consumer-path hack
+    # ------------------------------------------------------------------
+    #
+    # Separate from `send_otp` / `verify_otp` on purpose: the only new rule is
+    # a role gate at the top ("this phone must already be an admin"). Reusing
+    # the shared OTP + MSG91 + rate-limit helpers keeps the SMS pipeline and
+    # the LOG_MOCK_OTP flag honoured identically. Admin accounts are created
+    # exclusively through `scripts/create_admin.py`; the send path never
+    # creates a user row.
+    async def admin_send_otp(self, phone: str) -> None:
+        """Generate + send an OTP, but only for an existing admin phone.
+
+        Non-admin phones (consumer, provider, unknown) raise ``AdminNotFound``
+        — a 404 with no leak of which category the phone fell into.
+        """
+        if self._is_e2e_test_phone(phone):
+            # The whitelist is a dev/staging-only shortcut; admins may be on it
+            # for the Playwright suite. Role check still runs first — only an
+            # actual admin row short-circuits here.
+            if not await self._phone_is_admin(phone):
+                raise AdminNotFound()
+            logger.info("auth.admin_e2e_bypass phone=%s", phone)
+            return
+
+        if not await self._phone_is_admin(phone):
+            raise AdminNotFound()
+
+        if await is_rate_limited(self.redis, phone):
+            retry = await otp_retry_after_seconds(self.redis, phone)
+            raise RateLimitExceeded(retry_after=retry)
+
+        otp = generate_otp(settings.OTP_LENGTH)
+        if settings.LOG_MOCK_OTP:
+            logger.info(f"\n{'='*40}\n🔑 [MOCK OTP] Use {otp} to login for {phone}\n{'='*40}\n")
+        await store_otp(self.redis, phone, otp)
+        try:
+            await self._sms.send_otp(phone, otp)
+        except SMSDeliveryError:
+            raise
+        except Exception as e:
+            logger.exception("Unexpected SMS send failure for %s", phone)
+            raise SMSDeliveryError(f"SMS provider error: {e}") from e
+
+    async def admin_verify_otp(self, phone: str, otp: str) -> dict:
+        """Verify an admin OTP and return an admin JWT.
+
+        Role gate runs before the OTP check so a valid OTP for a non-admin
+        phone (e.g. an admin phone that was later demoted mid-flow — rare but
+        possible) still 404s instead of leaking a mismatched token.
+        """
+        user = await self._get_admin_user(phone)
+        if user is None:
+            raise AdminNotFound()
+
+        if self._is_e2e_test_phone(phone):
+            valid = secrets.compare_digest(otp, settings.E2E_TEST_OTP)
+        else:
+            valid = await verify_otp(self.redis, phone, otp)
+        if not valid:
+            raise InvalidOTP("OTP is incorrect or has expired")
+
+        user.last_login_at = datetime.now(UTC)
+        await self.db.commit()
+        return self._build_token_response(user, is_new=False)
+
+    async def _phone_is_admin(self, phone: str) -> bool:
+        return await self._get_admin_user(phone) is not None
+
+    async def _get_admin_user(self, phone: str) -> User | None:
+        result = await self.db.execute(select(User).where(User.phone == phone))
+        user = result.scalar_one_or_none()
+        if user is None or user.role != UserRole.ADMIN or not user.is_active:
+            return None
+        return user
 
     async def logout(self, refresh_token: str) -> None:
         """SVC-241: blacklist the refresh token's `jti` in Redis with a TTL
