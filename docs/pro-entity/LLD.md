@@ -195,19 +195,27 @@ POST  /pros/me/jobs/{id}/decline        → the assigned Pro turns it down, befo
 - **Offer window.** The expiry sweep, the offer poll and the card countdown all run from `offer_window_start = COALESCE(reopened_at, created_at)`. Without it a booking reopened minutes after creation would be swept on the next 30s pass.
 - **Re-broadcast** (`broadcast_recipients_stmt`): eligible SPs minus those who already answered this booking (the releasing SP, anyone who declined). The poll skips answered rows the same way. Eligibility to *accept* is unchanged.
 
-### Pro-side app (NEW)
+### Pro-side app — shipped in SVC-320 PR 2 (decline) + PR 3 (the rest)
 
 ```
-GET  /pros/me                           → my Pro profile
-GET  /pros/me/jobs                      → active + past jobs assigned to me
-POST /pros/me/online                    → { is_online: bool }
-POST /pros/me/location                  → { lat, lng } heartbeat (every 30s while online)
-POST /pros/me/kyc                       → same shape as /providers/me/kyc (Aadhaar upload)
-POST /pros/me/jobs/{id}/decline         → decline assigned job → SP notified for re-pick
-POST /pros/me/jobs/{id}/en-route        → transition to en_route
-POST /pros/me/jobs/{id}/start           → { doorstep_otp } → in_progress
+GET  /pros/me                           → my Pro row + my SP's brand + the KYC that applies to me
+GET  /pros/me/jobs?scope=active|past    → jobs assigned to me (BookingListResponse), newest first
+POST /pros/me/online                    → { is_online }
+POST /pros/me/location                  → { lat, lng } heartbeat (~30 s), 10/min
+POST /pros/me/kyc                       → Aadhaar upload, same as /providers/me/kyc, onto my Pro row
+POST /pros/me/jobs/{id}/decline         → decline before setting off (PR 2)
+POST /pros/me/jobs/{id}/en-route        → en_route
+POST /pros/me/jobs/{id}/start           → { otp } → in_progress (same doorstep-OTP check)
 POST /pros/me/jobs/{id}/complete        → completed
 ```
+
+- **Auth**: every endpoint needs the caller's *active* `professionals` row (404 `NOT_A_PRO` otherwise); no role check, since invited Pros are consumer-role accounts. Job endpoints also need that row to be the booking's `professional_id` (404 `JOB_NOT_FOUND`).
+- **One job view**: there is no `/pros/me/jobs/{id}`. `GET /bookings/{id}` admits the booking's assigned active Pro, who sees what the provider sees (address, no OTP). `transition_status` admits them too.
+- **Same side effects**: the en-route/start/complete routes here and under `/bookings` share `notify_transition` (SVC-334 pushes, the cash-payment task) and `transition_status`.
+- **Only the provider or assigned Pro** may move a job en route / start / complete; the consumer can't (closed in PR 3: they could mark their own booking complete). Cancel is unchanged.
+- **Pro-for-self follows its SP**: its `is_online` mirrors the SP toggle (either route writes both), and its KYC *is* the SP's (`/pros/me/kyc` → 409 `SELF_PRO_KYC_IS_SP_KYC`; `GET /pros/me` shows the SP's status).
+- **`/assign`** refuses an offline *team* Pro (409 `PRO_OFFLINE`); picking the Pro-for-self is exempt. Dispatch itself still doesn't filter SPs by "has ≥1 online Pro" (future).
+- **Location** is stored on the Pro row only; it doesn't feed the tracking WebSockets (SVC-335).
 
 ### SP team management (Phase B) — shipped in SVC-320 PR 1
 
@@ -286,6 +294,7 @@ V2 (deferred): schedule-based availability, advance-booking calendars, blackout 
 - **Solo case**: same user completes both flows; two separate KYC records that happen to share a `user_id`.
 - **Team member Pro**: only Aadhaar. Payout KYC is the inviting SP's responsibility.
 - **Enforcement**: `POST /providers/me/team/invites` rejects with 403 if the inviting SP's `kyc_status != VERIFIED` — their team's payouts would fail otherwise.
+- **Shipped in SVC-320 PR 3.** One upload + AI-verifier path, `ProviderService.store_kyc_submission(row, …)`, writes only the row it is given (SP or Pro). Pro docs go under `kyc/pros/{professional_id}/`. A Pro has no payout fields or endpoints at all. Admin: the SP routes are unchanged; team Pros are reviewed at `/admin/pros/{professional_id}/kyc`, `/verify` and `/reject`. The queue `GET /admin/providers/kyc/pending` stays SP-only by default; `?kind=pro|all` (combinable with `?status`) adds Pro rows with `kind`, `professional_id`, `sp_user_id` and `sp_business_name`. Pros-for-self never appear as Pros: their KYC is their SP's.
 
 ## Payout resolution
 

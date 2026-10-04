@@ -285,6 +285,33 @@ async def decline_booking(
     await BookingService(db).decline_offer(booking_id=booking_id, provider_id=current_user.id)
 
 
+def notify_transition(booking) -> None:
+    """The side effects of a provider-side move, after it's done (SVC-320 PR 3).
+
+    Shared by the provider routes here and the Pro routes in ``pros.py``, so the
+    two can't drift:
+
+    * the consumer's push for en route / in progress / completed (SVC-334);
+    * on completing a cash booking, recording the cash payment (Fix #4).
+    """
+    if booking.status in (
+        BookingStatus.EN_ROUTE,
+        BookingStatus.IN_PROGRESS,
+        BookingStatus.COMPLETED,
+    ):
+        send_booking_notification.delay(booking_id=str(booking.id), event=booking.status.value)
+    if booking.status is BookingStatus.COMPLETED and booking.payment_method == PaymentMethod.CASH:
+        process_cash_payment.delay(booking_id=str(booking.id))
+
+
+def viewer_for(booking, user_id):
+    """Who to render ``booking`` as for this caller: themselves, except the
+    assigned Pro, who sees what the provider sees (address yes, OTP no)."""
+    if user_id in (booking.consumer_id, booking.provider_id):
+        return user_id
+    return booking.provider_id
+
+
 @router.patch("/{booking_id}/en-route", response_model=BookingResponse)
 async def mark_en_route(
     booking_id: UUID,
@@ -296,8 +323,7 @@ async def mark_en_route(
         new_status=BookingStatus.EN_ROUTE,
         changed_by=current_user.id,
     )
-    # SVC-334: the consumer is waiting on exactly this, and it used to be silent.
-    send_booking_notification.delay(booking_id=str(booking.id), event="en_route")
+    notify_transition(booking)
     # The window SVC-169 is about: ACCEPTED and EN_ROUTE are the two states
     # where the PIN is still live, and both of these routes are provider-driven.
     return BookingResponse.for_viewer(booking, current_user.id)
@@ -317,7 +343,7 @@ async def start_booking(
         changed_by=current_user.id,
         otp=request.otp,
     )
-    send_booking_notification.delay(booking_id=str(booking.id), event="in_progress")
+    notify_transition(booking)
     return BookingResponse.for_viewer(booking, current_user.id)
 
 
@@ -332,10 +358,7 @@ async def complete_booking(
         new_status=BookingStatus.COMPLETED,
         changed_by=current_user.id,
     )
-    send_booking_notification.delay(booking_id=str(booking.id), event="completed")
-    # Fix #4: Trigger cash payment recording if applicable
-    if booking.payment_method == PaymentMethod.CASH:
-        process_cash_payment.delay(booking_id=str(booking.id))
+    notify_transition(booking)
     return BookingResponse.for_viewer(booking, current_user.id)
 
 
@@ -468,4 +491,6 @@ async def get_booking(
     without ``doorstep_otp`` (SVC-169).
     """
     booking = await BookingService(db).get_booking(booking_id=booking_id, user_id=current_user.id)
-    return BookingResponse.for_viewer(booking, current_user.id)
+    # The assigned Pro (SVC-320 PR 3) is admitted by get_booking and sees the
+    # provider's view.
+    return BookingResponse.for_viewer(booking, viewer_for(booking, current_user.id))

@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta, timezone
 # path (that would fail at test collection time when creds aren't wired).
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -417,6 +417,17 @@ class ProviderService:
         if is_online and profile.service_area_center is None:
             raise ServiceAreaMissing()
         profile.is_online = is_online
+        # SVC-320 PR 3: the SP's Pro-for-self is the same person, so it follows
+        # this toggle. One switch for one person; /pros/me/online on a
+        # Pro-for-self comes through here too.
+        await self.db.execute(
+            update(Professional)
+            .where(
+                Professional.service_provider_id == user_id,
+                Professional.user_id == user_id,
+            )
+            .values(is_online=is_online)
+        )
         await self.db.flush()
         return profile
 
@@ -551,18 +562,48 @@ class ProviderService:
         first if the docs need to change.
         """
         profile, _ = await self.get_or_create_profile(user_id)
+        await self.store_kyc_submission(
+            profile,
+            key_prefix=f"kyc/{user_id}",
+            aadhaar_front=(aadhaar_front_bytes, aadhaar_front_content_type, aadhaar_front_ext),
+            aadhaar_back=(aadhaar_back_bytes, aadhaar_back_content_type, aadhaar_back_ext),
+            selfie=(selfie_bytes, selfie_content_type, selfie_ext),
+            verifier=verifier,
+        )
+        return profile
 
-        if profile.kyc_status in (KYCStatus.SUBMITTED, KYCStatus.VERIFIED):
+    async def store_kyc_submission(
+        self,
+        row: "ProviderProfile | Professional",
+        *,
+        key_prefix: str,
+        aadhaar_front: tuple[bytes, str, str],
+        aadhaar_back: tuple[bytes, str, str],
+        selfie: tuple[bytes, str, str],
+        verifier: "KYCVerifier | None" = None,
+    ) -> None:
+        """Upload the three KYC images and mark ``row`` SUBMITTED, then score it.
+
+        ``row`` is the SP (``provider_profiles``) or a Pro (``professionals``,
+        SVC-320 PR 3): both carry the same ``kyc_*`` columns, and this writes
+        only to the row it is given — a Pro's submission never touches its SP
+        (SVC-327). Each image is ``(bytes, content_type, extension)``.
+        """
+        if row.kyc_status in (KYCStatus.SUBMITTED, KYCStatus.VERIFIED):
             raise UnauthorizedAction(
                 "Cannot re-submit KYC while it is pending review or verified. "
                 "Contact support to reset."
             )
 
+        aadhaar_front_bytes, aadhaar_front_content_type, aadhaar_front_ext = aadhaar_front
+        aadhaar_back_bytes, aadhaar_back_content_type, aadhaar_back_ext = aadhaar_back
+        selfie_bytes, selfie_content_type, selfie_ext = selfie
+
         # Unguessable S3 keys; we never expose the bucket publicly anyway, but
         # this prevents enumeration if a presigned URL leaks.
-        aadhaar_front_key = f"kyc/{user_id}/aadhaar-front-{uuid.uuid4().hex}.{aadhaar_front_ext}"
-        aadhaar_back_key = f"kyc/{user_id}/aadhaar-back-{uuid.uuid4().hex}.{aadhaar_back_ext}"
-        selfie_key = f"kyc/{user_id}/selfie-{uuid.uuid4().hex}.{selfie_ext}"
+        aadhaar_front_key = f"{key_prefix}/aadhaar-front-{uuid.uuid4().hex}.{aadhaar_front_ext}"
+        aadhaar_back_key = f"{key_prefix}/aadhaar-back-{uuid.uuid4().hex}.{aadhaar_back_ext}"
+        selfie_key = f"{key_prefix}/selfie-{uuid.uuid4().hex}.{selfie_ext}"
 
         # boto3 is sync — offload to a thread so the event loop stays responsive.
         try:
@@ -590,7 +631,7 @@ class ProviderService:
                 status_code=502,
             ) from exc
 
-        profile.kyc_docs = {
+        row.kyc_docs = {
             "aadhaar_front_key": aadhaar_front_key,
             "aadhaar_back_key": aadhaar_back_key,
             "selfie_key": selfie_key,
@@ -598,15 +639,15 @@ class ProviderService:
             "aadhaar_back_content_type": aadhaar_back_content_type,
             "selfie_content_type": selfie_content_type,
         }
-        profile.kyc_status = KYCStatus.SUBMITTED
-        profile.kyc_submitted_at = datetime.now(UTC)
+        row.kyc_status = KYCStatus.SUBMITTED
+        row.kyc_submitted_at = datetime.now(UTC)
         # Clear any prior rejection notes / reviewer stamps so the admin UI
         # doesn't surface stale ones from an earlier reject that this
         # submission is trying to fix.
-        profile.kyc_reviewed_at = None
-        profile.kyc_rejection_reason = None
-        profile.kyc_reviewed_by = None
-        profile.kyc_ai_verdict = None
+        row.kyc_reviewed_at = None
+        row.kyc_rejection_reason = None
+        row.kyc_reviewed_by = None
+        row.kyc_ai_verdict = None
 
         await self.db.flush()
 
@@ -617,9 +658,8 @@ class ProviderService:
         # LLM failure it returns a ``needs_review`` verdict flagged
         # ``llm_unavailable``, so the submission still lands in the admin
         # queue rather than 500'ing the provider.
-        await self._score_and_maybe_auto_approve(profile, verifier=verifier)
+        await self._score_and_maybe_auto_approve(row, verifier=verifier)
         await self.db.flush()
-        return profile
 
     async def _score_and_maybe_auto_approve(
         self,
@@ -704,15 +744,7 @@ class ProviderService:
         profile = await self.get_profile(user_id)
         if profile is None:
             raise UserNotFound(user_id)
-        if profile.kyc_status != KYCStatus.SUBMITTED:
-            raise UnauthorizedAction(
-                f"Can only verify SUBMITTED KYC (current: {profile.kyc_status.value})"
-            )
-
-        profile.kyc_status = KYCStatus.VERIFIED
-        profile.kyc_reviewed_at = datetime.now(UTC)
-        profile.kyc_rejection_reason = None
-        await self.db.flush()
+        await self._verify_row(profile)
         return profile
 
     async def reject_kyc(self, user_id: uuid.UUID, reason: str) -> ProviderProfile:
@@ -720,16 +752,48 @@ class ProviderService:
         profile = await self.get_profile(user_id)
         if profile is None:
             raise UserNotFound(user_id)
-        if profile.kyc_status != KYCStatus.SUBMITTED:
-            raise UnauthorizedAction(
-                f"Can only reject SUBMITTED KYC (current: {profile.kyc_status.value})"
-            )
-
-        profile.kyc_status = KYCStatus.REJECTED
-        profile.kyc_reviewed_at = datetime.now(UTC)
-        profile.kyc_rejection_reason = reason
-        await self.db.flush()
+        await self._reject_row(profile, reason)
         return profile
+
+    async def get_team_pro(self, professional_id: uuid.UUID) -> Professional:
+        """A team Pro by id, for the admin KYC routes (SVC-327). A Pro-for-self
+        isn't one: its KYC is its SP's, reviewed on the SP routes."""
+        pro = await self.db.get(Professional, professional_id)
+        if pro is None or pro.is_self:
+            raise AppException("Professional not found.", status_code=404, code="PRO_NOT_FOUND")
+        return pro
+
+    async def verify_pro_kyc(self, professional_id: uuid.UUID) -> Professional:
+        """Admin-only: approve a team Pro's Aadhaar KYC. Writes the Pro row only."""
+        pro = await self.get_team_pro(professional_id)
+        await self._verify_row(pro)
+        return pro
+
+    async def reject_pro_kyc(self, professional_id: uuid.UUID, reason: str) -> Professional:
+        """Admin-only: reject a team Pro's Aadhaar KYC. Writes the Pro row only."""
+        pro = await self.get_team_pro(professional_id)
+        await self._reject_row(pro, reason)
+        return pro
+
+    async def _verify_row(self, row: "ProviderProfile | Professional") -> None:
+        if row.kyc_status != KYCStatus.SUBMITTED:
+            raise UnauthorizedAction(
+                f"Can only verify SUBMITTED KYC (current: {row.kyc_status.value})"
+            )
+        row.kyc_status = KYCStatus.VERIFIED
+        row.kyc_reviewed_at = datetime.now(UTC)
+        row.kyc_rejection_reason = None
+        await self.db.flush()
+
+    async def _reject_row(self, row: "ProviderProfile | Professional", reason: str) -> None:
+        if row.kyc_status != KYCStatus.SUBMITTED:
+            raise UnauthorizedAction(
+                f"Can only reject SUBMITTED KYC (current: {row.kyc_status.value})"
+            )
+        row.kyc_status = KYCStatus.REJECTED
+        row.kyc_reviewed_at = datetime.now(UTC)
+        row.kyc_rejection_reason = reason
+        await self.db.flush()
 
     async def get_kyc_review_payload(self, user_id: uuid.UUID) -> dict:
         """
@@ -751,8 +815,25 @@ class ProviderService:
         profile = result.scalar_one_or_none()
         if profile is None:
             raise UserNotFound(user_id)
+        return await self._kyc_review_payload(profile, profile.user)
 
-        docs = profile.kyc_docs or {}
+    async def get_pro_kyc_review_payload(self, professional_id: uuid.UUID) -> dict:
+        """Admin-only: the same review payload for a team Pro (SVC-327), plus
+        which SP they work for."""
+        pro = await self.get_team_pro(professional_id)
+        user = await self.db.get(User, pro.user_id)
+        sp = await self.get_profile(pro.service_provider_id)
+        payload = await self._kyc_review_payload(pro, user)
+        payload.update(
+            kind="pro",
+            professional_id=pro.id,
+            sp_user_id=pro.service_provider_id,
+            sp_business_name=sp.business_name if sp else None,
+        )
+        return payload
+
+    async def _kyc_review_payload(self, row: "ProviderProfile | Professional", user: User) -> dict:
+        docs = row.kyc_docs or {}
         aadhaar_key = docs.get("aadhaar_key")
         selfie_key = docs.get("selfie_key")
 
@@ -766,18 +847,18 @@ class ProviderService:
         )
 
         return {
-            "user_id": profile.user_id,
-            "name": profile.user.name,
-            "phone": profile.user.phone,
-            "kyc_status": profile.kyc_status,
-            "kyc_submitted_at": profile.kyc_submitted_at,
-            "kyc_reviewed_at": profile.kyc_reviewed_at,
-            "kyc_rejection_reason": profile.kyc_rejection_reason,
+            "user_id": row.user_id,
+            "name": user.name,
+            "phone": user.phone,
+            "kyc_status": row.kyc_status,
+            "kyc_submitted_at": row.kyc_submitted_at,
+            "kyc_reviewed_at": row.kyc_reviewed_at,
+            "kyc_rejection_reason": row.kyc_rejection_reason,
             "aadhaar_url": aadhaar_url,
             "selfie_url": selfie_url,
             # SVC-307: full AI verdict JSONB. Present when the submission was
             # scored, None for pre-SVC-307 rows that were never scored.
-            "ai_verdict": profile.kyc_ai_verdict,
+            "ai_verdict": row.kyc_ai_verdict,
         }
 
     # ------------------------------------------------------------------

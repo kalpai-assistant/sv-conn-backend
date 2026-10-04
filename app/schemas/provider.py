@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -248,6 +249,14 @@ class KYCQueueRow(BaseModel):
     kyc_reviewed_at: datetime | None
     kyc_rejection_reason: str | None
 
+    # SVC-327: which kind of record. Defaults keep an SP row identical to before.
+    # For a Pro, ``id`` is still the Pro's user id; review them with
+    # ``professional_id`` on /admin/pros/{professional_id}/kyc.
+    kind: Literal["sp", "pro"] = "sp"
+    professional_id: UUID | None = None
+    sp_user_id: UUID | None = None
+    sp_business_name: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Earnings (SC-33)
@@ -362,3 +371,13 @@ class ProviderPayoutListResponse(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+class ProKYCDocsResponse(KYCDocsResponse):
+    """Admin-only: a team Pro's KYC review payload (SVC-327) — the SP payload
+    plus which Pro row it is and which SP they work for."""
+
+    kind: Literal["pro"] = "pro"
+    professional_id: UUID
+    sp_user_id: UUID
+    sp_business_name: str | None

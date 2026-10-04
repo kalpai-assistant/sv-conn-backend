@@ -114,3 +114,47 @@ class DeclineJobResponse(BaseModel):
     # awaiting_repick: the SP has another Pro and has been asked to pick one.
     # reopened: nobody else on the team, so the job went back to the broadcast.
     outcome: Literal["awaiting_repick", "reopened"]
+
+
+# --- The Pro's own surface (SVC-320 PR 3) ----------------------------------------
+#
+# SVC-327 item 2: nothing here carries payout details. Payouts belong to the SP
+# (provider_profiles); a Pro has no field, and no endpoint, to set or read them.
+
+
+class ProServiceProvider(BaseModel):
+    user_id: UUID
+    business_name: str | None
+    business_image_url: str | None
+
+
+class ProMeResponse(BaseModel):
+    """``GET /pros/me``. ``kyc_status`` is the KYC that applies to this person:
+    their own Aadhaar KYC, or for a Pro-for-self, the SP's."""
+
+    id: UUID
+    user_id: UUID
+    display_name: str
+    profile_photo_url: str | None
+    is_self: bool
+    is_online: bool
+    kyc_status: KYCStatus
+    kyc_rejection_reason: str | None
+    last_location_at: datetime | None
+    service_provider: ProServiceProvider
+
+
+class ProOnlineRequest(BaseModel):
+    is_online: bool
+
+
+class ProLocationRequest(BaseModel):
+    lat: float = Field(..., ge=-90, le=90)
+    lng: float = Field(..., ge=-180, le=180)
+
+
+class ProStatusResponse(BaseModel):
+    is_online: bool
+    last_location_at: datetime | None
+
+    model_config = {"from_attributes": True}
