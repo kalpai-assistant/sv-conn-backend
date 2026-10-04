@@ -514,6 +514,11 @@ async def test_two_providers_racing_produce_exactly_one_winner(db_session):
 
                 from app.models.booking import Booking
 
+                # SVC-333: the winner's claim wrote an assignment event too.
+                await cleanup.execute(
+                    text("DELETE FROM booking_assignment_events WHERE booking_id = :b"),
+                    {"b": str(ids["booking"])},
+                )
                 await cleanup.execute(
                     text("DELETE FROM booking_status_logs WHERE booking_id = :b"),
                     {"b": str(ids["booking"])},

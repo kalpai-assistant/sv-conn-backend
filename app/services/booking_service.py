@@ -34,6 +34,7 @@ from app.models.booking import (
     PaymentMethod,
     PaymentStatus,
 )
+from app.models.booking_assignment_event import BookingAssignmentEvent
 from app.models.booking_item import BookingItem
 from app.models.booking_offer import BookingOffer, OfferResponse
 from app.models.booking_status_log import BookingStatusLog
@@ -41,12 +42,16 @@ from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.service import Service
 from app.models.service_variant import ServiceVariant
-from app.models.user import UserRole
+from app.models.user import User, UserRole
 from app.schemas.booking import (
+    AssignmentTimelineItem,
     BookingListResponse,
     BookingOfferResponse,
     BookingResponse,
+    BookingTimelineItem,
     CreateBookingItemRequest,
+    StatusTimelineItem,
+    TimelinePro,
 )
 from app.services.provider_matching import (
     is_eligible_provider_multi_stmt,
@@ -71,6 +76,12 @@ PRO_BUSY = "PRO_BUSY"
 PRO_OFFLINE = "PRO_OFFLINE"
 JOB_NOT_FOUND = "JOB_NOT_FOUND"
 PROVIDER_EN_ROUTE = "PROVIDER_EN_ROUTE"
+
+# Admin timeline tie-break (SVC-333), see ``admin_timeline``. A Pro arriving
+# (claimed / repicked) sorts after a status row stamped the same instant; any
+# other kind is a Pro leaving, and sorts before.
+_STATUS_RANK = 1
+_ARRIVING_KINDS = frozenset({"claimed", "repicked"})
 
 
 class BookingService:
@@ -933,11 +944,14 @@ class BookingService:
         # so this rides the transition's flush. ``provider_id`` is set there, to
         # ``changed_by`` — the SP, which is ``pro.service_provider_id``.
         booking.professional_id = pro.id if pro is not None else None
-        return await self.transition_status(
+        booking = await self.transition_status(
             booking_id=booking.id,
             new_status=BookingStatus.ACCEPTED,
             changed_by=sp_id,
         )
+        if pro is not None:
+            await self.record_assignment(booking, "claimed", None, pro.id, actor_id=sp_id)
+        return booking
 
     # ------------------------------------------------------------------
     # Two-level dispatch (SVC-320 PR 2)
@@ -1062,6 +1076,9 @@ class BookingService:
             )
 
         if holds_it:
+            await self.record_assignment(
+                booking, "repicked", booking.professional_id, pro.id, actor_id=sp_id
+            )
             booking.professional_id = pro.id
             await self.db.flush()
             await self.attach_addresses([booking])
@@ -1103,6 +1120,7 @@ class BookingService:
             raise InvalidStateTransition(f"A job that is {booking.status.value} can't be declined")
 
         others = [p for p in await self._active_pros(booking.provider_id) if p.id != pro.id]
+        await self.record_assignment(booking, "declined", pro.id, None, actor_id=user_id)
         booking.professional_id = None
         if others:
             await self.db.flush()
@@ -1132,6 +1150,10 @@ class BookingService:
             raise InvalidStateTransition(
                 f"A booking that is {booking.status.value} can't be released"
             )
+        # Before ``reopen``, which clears the Pro.
+        await self.record_assignment(
+            booking, "released", booking.professional_id, None, actor_id=sp_id
+        )
         return await self.reopen(booking, changed_by=sp_id, reason="released")
 
     async def reopen(self, booking: Booking, changed_by: uuid.UUID, reason: str) -> Booking:
@@ -1389,6 +1411,10 @@ class BookingService:
             raise BookingNotFound(booking_id)
         if booking.provider_id == user_id and booking.consumer_id != user_id:
             if booking.status is BookingStatus.ACCEPTED:
+                # Before ``reopen``, which clears the Pro.
+                await self.record_assignment(
+                    booking, "provider_cancelled", booking.professional_id, None, actor_id=user_id
+                )
                 booking = await self.reopen(
                     booking, changed_by=user_id, reason="provider_cancelled"
                 )
@@ -1669,6 +1695,87 @@ class BookingService:
         return booking
 
     # ------------------------------------------------------------------
+    # Admin timeline (SVC-333)
+    # ------------------------------------------------------------------
+
+    async def admin_timeline(self, booking_id: uuid.UUID) -> list[BookingTimelineItem]:
+        """Status changes and assignment events for one booking, as one list,
+        oldest first. Admin only: it names Pros and actors.
+
+        Rows written in the same transaction share ``created_at`` (``now()`` is
+        the transaction's start time), so a plain sort would put a claim's
+        "claimed" before its own requested → accepted, half the time. Ties
+        break by what happened first in the code: the leaving event (declined,
+        released, provider_cancelled) precedes the accepted → requested reopen
+        it causes, and the status change precedes the claim or re-pick that
+        follows it. ``id`` makes the order total.
+        """
+        if await self.db.get(Booking, booking_id) is None:
+            raise BookingNotFound(booking_id)
+
+        logs = (
+            await self.db.scalars(
+                select(BookingStatusLog).where(BookingStatusLog.booking_id == booking_id)
+            )
+        ).all()
+        events = (
+            await self.db.scalars(
+                select(BookingAssignmentEvent).where(
+                    BookingAssignmentEvent.booking_id == booking_id
+                )
+            )
+        ).all()
+
+        pro_ids = {
+            pid
+            for e in events
+            for pid in (e.from_professional_id, e.to_professional_id)
+            if pid is not None
+        }
+        pros: dict[uuid.UUID, Professional] = {}
+        if pro_ids:
+            rows = await self.db.execute(select(Professional).where(Professional.id.in_(pro_ids)))
+            pros = {p.id: p for p in rows.scalars()}
+        actor_ids = {log.changed_by for log in logs} | {e.actor_user_id for e in events}
+        actor_ids.discard(None)
+        names: dict[uuid.UUID, str | None] = {}
+        if actor_ids:
+            rows = await self.db.execute(select(User.id, User.name).where(User.id.in_(actor_ids)))
+            names = {uid: name for uid, name in rows.all()}
+
+        def pro(pid: uuid.UUID | None) -> TimelinePro | None:
+            p = pros.get(pid) if pid is not None else None
+            return TimelinePro(id=p.id, display_name=p.display_name) if p else None
+
+        keyed: list[tuple[tuple, BookingTimelineItem]] = []
+        for log in logs:
+            item = StatusTimelineItem(
+                type="status",
+                created_at=log.created_at,
+                from_status=log.from_status,
+                to_status=log.to_status,
+                actor_user_id=log.changed_by,
+                actor_name=names.get(log.changed_by),
+                note=log.note,
+            )
+            keyed.append(((log.created_at, _STATUS_RANK, str(log.id)), item))
+        for e in events:
+            item = AssignmentTimelineItem(
+                type="assignment",
+                created_at=e.created_at,
+                kind=e.kind,
+                from_professional=pro(e.from_professional_id),
+                to_professional=pro(e.to_professional_id),
+                actor_user_id=e.actor_user_id,
+                actor_name=names.get(e.actor_user_id),
+                note=e.note,
+            )
+            rank = _STATUS_RANK + (1 if e.kind in _ARRIVING_KINDS else -1)
+            keyed.append(((e.created_at, rank, str(e.id)), item))
+        keyed.sort(key=lambda pair: pair[0])
+        return [item for _, item in keyed]
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
@@ -1690,6 +1797,34 @@ class BookingService:
             note=note,
         )
         self.db.add(log)
+
+    async def record_assignment(
+        self,
+        booking: Booking,
+        kind: str,
+        from_pro_id: uuid.UUID | None,
+        to_pro_id: uuid.UUID | None,
+        actor_id: uuid.UUID | None,
+        note: str | None = None,
+    ) -> None:
+        """Record a change of the booking's Pro (SVC-333). The only writer of
+        ``booking_assignment_events``: every assignment path goes through here.
+
+        Only adds the row to the session, so it commits or rolls back with the
+        change it describes: an assign that fails afterwards leaves no row.
+        Callers record only an actual change, never a same-Pro re-assign.
+        ``actor_id`` None means the system.
+        """
+        self.db.add(
+            BookingAssignmentEvent(
+                booking_id=booking.id,
+                kind=kind,
+                from_professional_id=from_pro_id,
+                to_professional_id=to_pro_id,
+                actor_user_id=actor_id,
+                note=note,
+            )
+        )
 
     async def _increment_completed_jobs(self, provider_user_id: uuid.UUID) -> None:
         """Atomically increment total_completed_jobs on the provider's profile."""

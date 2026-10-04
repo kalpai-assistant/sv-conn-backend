@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, Field, model_validator
@@ -447,3 +447,48 @@ class BookingListResponse(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+# ---------------------------------------------------------------------------
+# Admin booking timeline (SVC-333)
+# ---------------------------------------------------------------------------
+
+
+class TimelinePro(BaseModel):
+    """A Pro as the admin timeline names them."""
+
+    id: UUID
+    display_name: str
+
+
+class StatusTimelineItem(BaseModel):
+    """A ``booking_status_logs`` row. ``metadata`` is withheld for the reason
+    ``BookingStatusLogResponse`` gives: free-form JSONB nobody has audited."""
+
+    type: Literal["status"]
+    created_at: datetime
+    from_status: str
+    to_status: str
+    # None = the system (SVC-344's no-taker cancel).
+    actor_user_id: UUID | None
+    actor_name: str | None
+    note: str | None
+
+
+class AssignmentTimelineItem(BaseModel):
+    """A ``booking_assignment_events`` row: the booking's Pro changed."""
+
+    type: Literal["assignment"]
+    created_at: datetime
+    kind: str
+    # None = nobody (before a claim, after a decline / release).
+    from_professional: TimelinePro | None
+    to_professional: TimelinePro | None
+    actor_user_id: UUID | None
+    actor_name: str | None
+    note: str | None
+
+
+BookingTimelineItem = Annotated[
+    StatusTimelineItem | AssignmentTimelineItem, Field(discriminator="type")
+]

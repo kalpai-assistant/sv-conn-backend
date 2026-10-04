@@ -24,7 +24,12 @@ from app.models.payment import Payment
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.user import User
-from app.schemas.booking import BookingListResponse, BookingResponse, ForceCancelBookingRequest
+from app.schemas.booking import (
+    BookingListResponse,
+    BookingResponse,
+    BookingTimelineItem,
+    ForceCancelBookingRequest,
+)
 from app.schemas.payout import PendingSettlementsResponse, ProviderPayoutHistoryResponse
 from app.schemas.provider import (
     KYCDocsResponse,
@@ -491,6 +496,25 @@ async def get_any_booking(booking_id: UUID, db: AsyncSession = Depends(get_db)):
     await svc.attach_items([booking])
     await svc.attach_status_logs([booking])
     return await _for_admin_with_parties(db, booking)
+
+
+@router.get(
+    "/bookings/{booking_id}/timeline",
+    response_model=list[BookingTimelineItem],
+    dependencies=[_admin_dep],
+    responses={404: {"description": "No such booking"}},
+)
+async def get_booking_timeline(booking_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Everything that happened to one booking, oldest first (SVC-333): status
+    changes (``type: "status"``) merged with changes of its Pro (``type:
+    "assignment"``: claimed, repicked, declined, released, provider_cancelled).
+
+    Answers "who was actually sent, by whom, and when" in a dispute. Its own
+    route rather than more fields on ``GET /admin/bookings/{id}``, which reuses
+    the consumer's ``BookingResponse``: Pro and actor names must never reach that
+    shape.
+    """
+    return await BookingService(db).admin_timeline(booking_id)
 
 
 async def _for_admin_with_parties(db: AsyncSession, booking: Booking) -> BookingResponse:
