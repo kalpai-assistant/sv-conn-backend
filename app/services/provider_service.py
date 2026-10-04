@@ -834,17 +834,22 @@ class ProviderService:
 
     async def _kyc_review_payload(self, row: "ProviderProfile | Professional", user: User) -> dict:
         docs = row.kyc_docs or {}
-        aadhaar_key = docs.get("aadhaar_key")
+        # Submissions store the two Aadhaar sides as aadhaar_front_key /
+        # aadhaar_back_key. This used to read "aadhaar_key", which nothing
+        # writes, so the admin screen never showed the Aadhaar at all. Still
+        # honoured as a fallback for any row stored that way.
+        front_key = docs.get("aadhaar_front_key") or docs.get("aadhaar_key")
+        back_key = docs.get("aadhaar_back_key")
         selfie_key = docs.get("selfie_key")
 
-        # boto3 presign is sync — to_thread to keep the loop responsive even
-        # though presigning itself is local (no network call).
-        aadhaar_url = (
-            await asyncio.to_thread(storage.get_presigned_url, aadhaar_key) if aadhaar_key else None
-        )
-        selfie_url = (
-            await asyncio.to_thread(storage.get_presigned_url, selfie_key) if selfie_key else None
-        )
+        async def presign(key: str | None) -> str | None:
+            # boto3 presign is sync — to_thread to keep the loop responsive even
+            # though presigning itself is local (no network call).
+            return await asyncio.to_thread(storage.get_presigned_url, key) if key else None
+
+        aadhaar_front_url = await presign(front_key)
+        aadhaar_back_url = await presign(back_key)
+        selfie_url = await presign(selfie_key)
 
         return {
             "user_id": row.user_id,
@@ -854,7 +859,11 @@ class ProviderService:
             "kyc_submitted_at": row.kyc_submitted_at,
             "kyc_reviewed_at": row.kyc_reviewed_at,
             "kyc_rejection_reason": row.kyc_rejection_reason,
-            "aadhaar_url": aadhaar_url,
+            # Kept as the front side, so the admin screen that only knows
+            # aadhaar_url shows it straight away.
+            "aadhaar_url": aadhaar_front_url,
+            "aadhaar_front_url": aadhaar_front_url,
+            "aadhaar_back_url": aadhaar_back_url,
             "selfie_url": selfie_url,
             # SVC-307: full AI verdict JSONB. Present when the submission was
             # scored, None for pre-SVC-307 rows that were never scored.

@@ -401,3 +401,33 @@ async def test_admin_get_kyc_review_includes_user_metadata(client, auth_headers,
     # UserFactory sets a default phone; name may be None pre-onboarding.
     assert body["phone"] == provider_user.phone
     assert "name" in body  # may be None — important that the field exists
+
+
+@pytest.mark.asyncio
+async def test_admin_review_shows_both_aadhaar_sides_as_submitted(client, auth_headers, db_session):
+    """The keys submit_kyc really writes. Before the fix the review read
+    "aadhaar_key", which nothing writes, so the admin screen never showed the
+    Aadhaar. ``aadhaar_url`` stays = the front side for older admin builds."""
+    provider_user, profile = await _seed_provider(db_session, kyc_status=KYCStatus.SUBMITTED)
+    base = f"kyc/{provider_user.id}"
+    profile.kyc_docs = {
+        "aadhaar_front_key": f"{base}/aadhaar-front-1.png",
+        "aadhaar_back_key": f"{base}/aadhaar-back-2.png",
+        "selfie_key": f"{base}/selfie-3.png",
+    }
+    await db_session.flush()
+    admin_user = await UserFactory.create(db_session, role="admin")
+
+    with patch("app.services.provider_service.storage.get_presigned_url") as mock_presign:
+        mock_presign.side_effect = lambda key: f"https://signed.example/{key}"
+        body = (
+            await client.get(
+                f"/api/v1/admin/providers/{provider_user.id}/kyc",
+                headers=auth_headers(str(admin_user.id), "admin"),
+            )
+        ).json()
+
+    assert body["aadhaar_front_url"] == f"https://signed.example/{base}/aadhaar-front-1.png"
+    assert body["aadhaar_back_url"] == f"https://signed.example/{base}/aadhaar-back-2.png"
+    assert body["aadhaar_url"] == body["aadhaar_front_url"]
+    assert body["selfie_url"] == f"https://signed.example/{base}/selfie-3.png"

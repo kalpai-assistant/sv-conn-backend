@@ -223,7 +223,9 @@ class KYCDocsResponse(BaseModel):
     kyc_reviewed_at: datetime | None
     kyc_rejection_reason: str | None
     # Presigned S3 URLs; nil if the provider hasn't uploaded yet.
-    aadhaar_url: str | None
+    aadhaar_url: str | None  # = aadhaar_front_url, for older admin builds
+    aadhaar_front_url: str | None
+    aadhaar_back_url: str | None
     selfie_url: str | None
     # SVC-307: full KYCVerdict payload from the AI verifier — extraction,
     # flags, outcome, confidence, and raw LLM response for audit. Null on

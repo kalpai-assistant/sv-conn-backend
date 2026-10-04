@@ -462,3 +462,26 @@ async def test_admin_rejects_a_pro_and_non_admins_are_refused(client, db_session
     assert resp.status_code == 200, resp.text
     await db_session.refresh(member)
     assert (member.kyc_status, member.kyc_rejection_reason) == (KYCStatus.REJECTED, "blurry")
+
+
+@pytest.mark.asyncio
+async def test_admin_pro_review_shows_both_aadhaar_sides(client, db_session, auth_headers):
+    _, _, _, member, member_user = await _team(db_session)
+    with patch(UPLOAD):
+        resp = await client.post(
+            f"{ME}/kyc", files=_kyc_files(), headers=_as(auth_headers, member_user)
+        )
+    assert resp.status_code == 201, resp.text
+    await db_session.refresh(member)
+    with patch("app.services.provider_service.storage.get_presigned_url") as presign:
+        presign.side_effect = lambda key: f"https://signed.example/{key}"
+        body = (
+            await client.get(
+                f"/api/v1/admin/pros/{member.id}/kyc",
+                headers=_as(auth_headers, await _admin(db_session)),
+            )
+        ).json()
+    docs = member.kyc_docs
+    assert body["aadhaar_front_url"] == f"https://signed.example/{docs['aadhaar_front_key']}"
+    assert body["aadhaar_back_url"] == f"https://signed.example/{docs['aadhaar_back_key']}"
+    assert body["aadhaar_url"] == body["aadhaar_front_url"]
