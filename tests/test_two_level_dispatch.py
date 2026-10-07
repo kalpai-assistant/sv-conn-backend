@@ -28,6 +28,7 @@ from app.models.booking import Booking, BookingStatus
 from app.models.booking_offer import BookingOffer, OfferResponse
 from app.models.booking_status_log import BookingStatusLog
 from app.models.professional import Professional
+from app.models.provider_profile import KYCStatus
 from app.models.user import User
 from app.services.booking_service import BookingService
 from app.services.provider_matching import broadcast_recipients_stmt
@@ -72,9 +73,12 @@ async def _self_pro(db, sp_id) -> Professional:
     )
 
 
-async def _team_pro(db, sp_id, name="Rohan", active=True, online=True) -> Professional:
-    """A team member, signed up the way invitees are: as a consumer. Online by
-    default, since /assign refuses an offline team Pro (SVC-320 PR 3)."""
+async def _team_pro(
+    db, sp_id, name="Rohan", active=True, online=True, kyc=KYCStatus.VERIFIED
+) -> Professional:
+    """A team member, signed up the way invitees are: as a consumer. Online and
+    KYC-verified by default, since /assign refuses an offline team Pro (SVC-320
+    PR 3) and an unverified one."""
     user = await UserFactory.create(db, role="consumer", name=name)
     pro = Professional(
         service_provider_id=sp_id,
@@ -82,6 +86,7 @@ async def _team_pro(db, sp_id, name="Rohan", active=True, online=True) -> Profes
         display_name=name,
         is_active=active,
         is_online=online,
+        kyc_status=kyc,
     )
     db.add(pro)
     await db.flush()
@@ -369,6 +374,60 @@ async def test_repick_replaces_the_pro_without_a_second_confirmation(
     resp = await client.post(ASSIGN.format(booking.id), json=body, headers=_as(auth_headers, sp))
     assert resp.status_code == 200
     assert _events(pushes) == ["assigned"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kyc", [KYCStatus.PENDING, KYCStatus.SUBMITTED, KYCStatus.REJECTED])
+async def test_assign_refuses_a_team_pro_without_verified_kyc(
+    client, db_session, auth_headers, pushes, kyc
+):
+    """A team Pro goes into a consumer's home, so their own KYC must be approved
+    first. Nothing else checks it: accept-invite and /pros/me/online don't."""
+    service = await _service(db_session)
+    sp, _, _ = await _team_sp(db_session, service)
+    member = await _team_pro(db_session, sp.id, name="Asha", kyc=kyc)
+    _, booking = await _booking(db_session, service=service)
+
+    resp = await client.post(
+        ASSIGN.format(booking.id),
+        json={"professional_id": str(member.id)},
+        headers=_as(auth_headers, sp),
+    )
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "PRO_KYC_INCOMPLETE"
+    await db_session.refresh(booking)
+    assert booking.status is BookingStatus.REQUESTED, "nothing was claimed"
+    assert booking.provider_id is None
+    assert _events(pushes) == []
+
+    member.kyc_status = KYCStatus.VERIFIED
+    await db_session.flush()
+    resp = await client.post(
+        ASSIGN.format(booking.id),
+        json={"professional_id": str(member.id)},
+        headers=_as(auth_headers, sp),
+    )
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_the_pro_for_self_is_exempt_from_the_pro_kyc_check(
+    client, db_session, auth_headers, pushes
+):
+    """Its KYC is the SP's, which eligibility already requires. Its own row can
+    hold a stale SVC-339 copy that must not block the SP doing the job."""
+    service = await _service(db_session)
+    sp, self_pro, _ = await _team_sp(db_session, service)
+    self_pro.kyc_status = KYCStatus.PENDING
+    await db_session.flush()
+    _, booking = await _booking(db_session, service=service)
+
+    resp = await client.post(
+        ASSIGN.format(booking.id),
+        json={"professional_id": str(self_pro.id)},
+        headers=_as(auth_headers, sp),
+    )
+    assert resp.status_code == 200, resp.text
 
 
 @pytest.mark.asyncio

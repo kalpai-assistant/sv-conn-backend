@@ -214,7 +214,7 @@ POST /pros/me/jobs/{id}/complete        → completed
 - **Same side effects**: the en-route/start/complete routes here and under `/bookings` share `notify_transition` (SVC-334 pushes, the cash-payment task) and `transition_status`.
 - **Only the provider or assigned Pro** may move a job en route / start / complete; the consumer can't (closed in PR 3: they could mark their own booking complete). Cancel is unchanged.
 - **Pro-for-self follows its SP**: its `is_online` mirrors the SP toggle (either route writes both), and its KYC *is* the SP's (`/pros/me/kyc` → 409 `SELF_PRO_KYC_IS_SP_KYC`; `GET /pros/me` shows the SP's status).
-- **`/assign`** refuses an offline *team* Pro (409 `PRO_OFFLINE`); picking the Pro-for-self is exempt. Dispatch itself still doesn't filter SPs by "has ≥1 online Pro" (future).
+- **`/assign`** refuses a *team* Pro whose own KYC isn't `VERIFIED` (409 `PRO_KYC_INCOMPLETE`, checked first) or who is offline (409 `PRO_OFFLINE`); picking the Pro-for-self is exempt from both, since its KYC and online state are the SP's, which eligibility requires. The KYC check is the only place a Pro's identity KYC is enforced: accept-invite and `/pros/me/online` don't check it. Dispatch itself still doesn't filter SPs by "has ≥1 online Pro" (future).
 - **Location** is stored on the Pro row only; it doesn't feed the tracking WebSockets (SVC-335).
 
 ### SP team management (Phase B) — shipped in SVC-320 PR 1
