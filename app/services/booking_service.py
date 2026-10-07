@@ -74,6 +74,7 @@ _ACTIVE_JOB_STATUSES = (
 PRO_NOT_FOUND = "PRO_NOT_FOUND"
 PRO_BUSY = "PRO_BUSY"
 PRO_OFFLINE = "PRO_OFFLINE"
+PRO_KYC_INCOMPLETE = "PRO_KYC_INCOMPLETE"
 JOB_NOT_FOUND = "JOB_NOT_FOUND"
 PROVIDER_EN_ROUTE = "PROVIDER_EN_ROUTE"
 
@@ -1029,9 +1030,10 @@ class BookingService:
         same for "not yours" and "doesn't exist"), and not busy on another
         unfinished job (409 ``PRO_BUSY``). That check is ``assign``'s alone:
         the solo accept path never had it, and adding it there would change
-        live behaviour. ``is_online`` isn't checked: nothing sets it for a Pro
-        until PR 3's ``/pros/me/online``, and the SP's own online state is
-        already part of eligibility.
+        live behaviour. A team Pro must also have verified KYC (409
+        ``PRO_KYC_INCOMPLETE``) and be online (409 ``PRO_OFFLINE``); the
+        Pro-for-self is exempt from both, since the SP's own KYC and online
+        state are part of eligibility.
         """
         booking = await self.db.get(Booking, booking_id, with_for_update=True)
         if not booking:
@@ -1057,6 +1059,18 @@ class BookingService:
             # Theirs, but past ACCEPTED: en route or later.
             raise InvalidStateTransition(
                 f"A booking that is {booking.status.value} can't be reassigned"
+            )
+
+        # A team Pro goes into a consumer's home, so their own identity KYC
+        # must be approved first (SVC-318; wireframes §3B). Nothing else stops
+        # it: accept-invite and /pros/me/online have no KYC gate, and
+        # broadcast eligibility checks only the SP's KYC. The Pro-for-self is
+        # exempt: its KYC *is* the SP's, which eligibility already requires.
+        if not pro.is_self and pro.kyc_status != KYCStatus.VERIFIED:
+            raise AppException(
+                f"{pro.display_name} hasn't finished KYC yet.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=PRO_KYC_INCOMPLETE,
             )
 
         # SVC-320 PR 3: team Pros now have their own online toggle. The SP's

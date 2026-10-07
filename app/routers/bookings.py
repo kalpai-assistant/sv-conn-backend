@@ -200,8 +200,10 @@ async def accept_booking(
         403: {"description": "You were not offered this booking"},
         404: {"description": "No such booking, or that Pro isn't on your team"},
         409: {
-            "description": "PRO_BUSY: the Pro is on another unfinished job; or the "
-            "booking is already en route or later"
+            "description": "PRO_BUSY: the Pro is on another unfinished job; "
+            "PRO_OFFLINE: a team Pro who is offline; PRO_KYC_INCOMPLETE: a team Pro "
+            "whose own KYC isn't verified; or (no code) the booking is already en "
+            "route or later"
         },
         410: {"description": "The offer is over — claimed by another SP, cancelled or expired"},
     },

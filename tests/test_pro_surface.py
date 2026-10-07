@@ -71,6 +71,9 @@ async def _assigned_job(db, service, sp, member, *, cash=False):
     consumer, booking = await _booking(db, service=service)
     if cash:
         booking.payment_method = PaymentMethod.CASH
+    # /assign needs a team Pro's own KYC verified. ``_team`` leaves it pending on
+    # purpose, for the KYC tests, so verify it here, where a job is assigned.
+    member.kyc_status = KYCStatus.VERIFIED
     await db.flush()
     booking, _, _ = await BookingService(db).assign(booking.id, sp.id, member.id)
     return consumer, booking
@@ -319,6 +322,7 @@ async def test_assign_refuses_an_offline_team_pro_but_not_the_sp_itself(
     client, db_session, auth_headers, pushes
 ):
     service, sp, self_pro, member, _ = await _team(db_session)
+    member.kyc_status = KYCStatus.VERIFIED  # so the online check is what answers
     member.is_online = False
     self_pro.is_online = False
     await db_session.flush()
