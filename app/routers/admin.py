@@ -369,6 +369,7 @@ async def list_all_bookings(
     # response schema is going to read it, not because this listing needs a
     # per-booking transition log (SVC-248).
     await svc.attach_status_logs(bookings)
+    await svc.attach_professionals(bookings)
 
     # SVC-299: the admin bookings page renders "consumer phone" and "provider
     # name" columns, both of which live on `users` and neither of which is on
@@ -495,6 +496,7 @@ async def get_any_booking(booking_id: UUID, db: AsyncSession = Depends(get_db)):
     await svc.attach_addresses([booking])
     await svc.attach_items([booking])
     await svc.attach_status_logs([booking])
+    await svc.attach_professionals([booking])
     return await _for_admin_with_parties(db, booking)
 
 

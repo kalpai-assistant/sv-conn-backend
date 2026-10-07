@@ -176,6 +176,32 @@ class BookingStatusLogResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ProfessionalBrief(BaseModel):
+    """Who is doing the job (SVC-324): the assigned Pro, as a booking shows them.
+
+    No phone, ever: the consumer must not get a Pro's number, and the SP doesn't
+    need it from here. ``is_self`` marks the SP's own Pro-for-self, so a client
+    can collapse "Rohan from Rohan" to one name on a solo job.
+    """
+
+    id: UUID
+    display_name: str
+    profile_photo_url: str | None
+    is_self: bool
+
+    model_config = {"from_attributes": True}
+
+
+class ServiceProviderBrief(BaseModel):
+    """The business behind the job (SVC-324): the SP's brand, never payout details."""
+
+    user_id: UUID
+    business_name: str | None
+    business_image_url: str | None
+
+    model_config = {"from_attributes": True}
+
+
 class BookingResponse(BaseModel):
     id: UUID
     consumer_id: UUID
@@ -244,6 +270,15 @@ class BookingResponse(BaseModel):
     # payload and every existing client keeps working.
     consumer_phone: str | None = None
     provider_name: str | None = None
+    # Who is doing the job and for which business (SVC-324). Null until a Pro is
+    # assigned, and null again while a team SP re-picks after a Pro declined:
+    # an ACCEPTED booking with ``professional_id`` null is exactly that state.
+    # Same rule as ``address`` for being required-but-nullable. Read from
+    # ``Booking.professional`` and the SP profile, so every path must call
+    # ``BookingService.attach_professionals`` first.
+    professional_id: UUID | None
+    professional: ProfessionalBrief | None
+    service_provider: ServiceProviderBrief | None
     scheduled_at: datetime | None
     created_at: datetime
 
@@ -337,6 +372,19 @@ class BookingResponse(BaseModel):
             status_history=[
                 BookingStatusLogResponse.model_validate(log) for log in booking.status_logs
             ],
+            professional_id=booking.professional_id,
+            professional=(
+                ProfessionalBrief.model_validate(booking.professional)
+                if booking.professional is not None
+                else None
+            ),
+            # Set by ``attach_professionals``; it isn't a mapped relationship
+            # (provider_profiles is keyed by user_id, not by a booking FK).
+            service_provider=(
+                ServiceProviderBrief.model_validate(profile)
+                if (profile := getattr(booking, "service_provider_profile", None)) is not None
+                else None
+            ),
             scheduled_at=booking.scheduled_at,
             created_at=booking.created_at,
         )
