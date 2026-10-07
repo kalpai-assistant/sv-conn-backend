@@ -104,6 +104,7 @@ class ProService:
         await service.attach_addresses(bookings)
         await service.attach_items(bookings)
         await service.attach_status_logs(bookings)
+        await service.attach_professionals(bookings)
         return bookings, total or 0
 
     async def set_online(self, pro: Professional, is_online: bool) -> Professional:

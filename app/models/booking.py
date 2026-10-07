@@ -285,7 +285,10 @@ class Booking(Base):
         order_by="BookingStatusLog.created_at",
     )
     review: Mapped["Review"] = relationship("Review", back_populates="booking", uselist=False)
-    # SVC-339. Lazy by default; no response path reads it yet.
+    # SVC-339. Lazy (default) on purpose: the Celery worker resolves the payee
+    # through it in a sync session (test_professional pins that). Response
+    # paths read it via ``BookingService.attach_professionals`` (SVC-324);
+    # under AsyncSession a path that forgets fails loudly with MissingGreenlet.
     professional: Mapped["Professional | None"] = relationship("Professional")
     # SVC-186 (G29): plural, not scalar. `44a9651a7ef8_drop_payment_unique_constraint`
     # deliberately allowed multiple payment rows per booking (failed attempts +

@@ -176,6 +176,42 @@ class BookingService:
     # Status-history hydration
     # ------------------------------------------------------------------
 
+    async def attach_professionals(self, bookings: Iterable[Booking]) -> None:
+        """Load who is doing each booking, and for which business (SVC-324).
+
+        Fourth of the read-path hydrators, for ``BookingResponse.professional``
+        and ``.service_provider``. ``Booking.professional`` stays lazy for the
+        Celery payee lookup, so an async path that skips this fails with
+        MissingGreenlet. The explicit fetch (not ``selectinload``) is for the
+        identity-map reason ``attach_addresses`` documents.
+
+        The SP's profile isn't a relationship on ``Booking``: provider_profiles
+        is keyed by ``user_id`` = ``booking.provider_id``. It is set as a plain,
+        unmapped attribute, ``service_provider_profile``, which the unit of work
+        never sees. Two queries regardless of page size.
+        """
+        bookings = list(bookings)
+        if not bookings:
+            return
+
+        pro_ids = {b.professional_id for b in bookings if b.professional_id}
+        pros: dict[uuid.UUID, Professional] = {}
+        if pro_ids:
+            rows = await self.db.execute(select(Professional).where(Professional.id.in_(pro_ids)))
+            pros = {pro.id: pro for pro in rows.scalars()}
+
+        sp_ids = {b.provider_id for b in bookings if b.provider_id}
+        profiles: dict[uuid.UUID, ProviderProfile] = {}
+        if sp_ids:
+            rows = await self.db.execute(
+                select(ProviderProfile).where(ProviderProfile.user_id.in_(sp_ids))
+            )
+            profiles = {profile.user_id: profile for profile in rows.scalars()}
+
+        for booking in bookings:
+            set_committed_value(booking, "professional", pros.get(booking.professional_id))
+            booking.service_provider_profile = profiles.get(booking.provider_id)
+
     async def attach_status_logs(self, bookings: Iterable[Booking]) -> None:
         """Load each booking's transition history, ready for serialisation.
 
@@ -495,6 +531,7 @@ class BookingService:
         # `status_history`, and this booking's first entry is the row written
         # immediately above. The SELECT autoflushes it into existence.
         await self.attach_status_logs([booking])
+        await self.attach_professionals([booking])
 
         return booking
 
@@ -532,6 +569,7 @@ class BookingService:
         await self.attach_addresses([booking])
         await self.attach_items([booking])
         await self.attach_status_logs([booking])
+        await self.attach_professionals([booking])
         return booking
 
     async def get_offer(
@@ -845,6 +883,7 @@ class BookingService:
             await self.attach_addresses([booking])
             await self.attach_items([booking])
             await self.attach_status_logs([booking])
+            await self.attach_professionals([booking])
             return booking, False
 
         self_pro = await ProviderService(self.db).ensure_self_professional(provider_id)
@@ -1051,6 +1090,7 @@ class BookingService:
             await self.attach_addresses([booking])
             await self.attach_items([booking])
             await self.attach_status_logs([booking])
+            await self.attach_professionals([booking])
             return booking, False, None
 
         if not holds_it and booking.status is not BookingStatus.REQUESTED:
@@ -1084,6 +1124,7 @@ class BookingService:
             await self.attach_addresses([booking])
             await self.attach_items([booking])
             await self.attach_status_logs([booking])
+            await self.attach_professionals([booking])
             logger.info("booking.repicked booking_id=%s pro_id=%s", booking.id, pro.id)
             return booking, False, pro
 
@@ -1127,6 +1168,7 @@ class BookingService:
             await self.attach_addresses([booking])
             await self.attach_items([booking])
             await self.attach_status_logs([booking])
+            await self.attach_professionals([booking])
             logger.info("booking.pro_declined booking_id=%s pro_id=%s", booking.id, pro.id)
             return booking, "awaiting_repick"
 
@@ -1221,6 +1263,7 @@ class BookingService:
         await self.attach_addresses([booking])
         await self.attach_items([booking])
         await self.attach_status_logs([booking])
+        await self.attach_professionals([booking])
         logger.info(
             "booking.reopened booking_id=%s reason=%s released_by=%s",
             booking.id,
@@ -1378,6 +1421,7 @@ class BookingService:
         await self.attach_addresses([booking])
         await self.attach_items([booking])
         await self.attach_status_logs([booking])
+        await self.attach_professionals([booking])
 
         return booking
 
@@ -1579,6 +1623,7 @@ class BookingService:
         await self.attach_addresses([booking])
         await self.attach_items([booking])
         await self.attach_status_logs([booking])
+        await self.attach_professionals([booking])
         return booking
 
     # ------------------------------------------------------------------
@@ -1641,6 +1686,7 @@ class BookingService:
         await self.attach_addresses(bookings)
         await self.attach_items(bookings)
         await self.attach_status_logs(bookings)
+        await self.attach_professionals(bookings)
 
         return BookingListResponse(
             # Per-row redaction, not a role check: `role` says what kind of user
@@ -1692,6 +1738,7 @@ class BookingService:
         await self.attach_addresses([booking])
         await self.attach_items([booking])
         await self.attach_status_logs([booking])
+        await self.attach_professionals([booking])
         return booking
 
     # ------------------------------------------------------------------
