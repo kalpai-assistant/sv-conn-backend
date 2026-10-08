@@ -265,6 +265,14 @@ class KYCQueueRow(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class EarningsProfessional(BaseModel):
+    """The Pro who did an earnings row's job (SVC-323)."""
+
+    id: UUID
+    display_name: str
+    is_self: bool
+
+
 class EarningsBookingItem(BaseModel):
     booking_id: UUID
     service_name: str
@@ -290,6 +298,9 @@ class EarningsBookingItem(BaseModel):
     # The bank's own words on a failed payout, so the error block can say what
     # actually went wrong rather than apologising generically.
     settlement_failure_reason: str | None = None
+    # SVC-323: who did the job, from ``bookings.professional_id``. None when it
+    # completed with no Pro on it (declined, then the SP drove it). Additive.
+    professional: EarningsProfessional | None = None
 
     model_config = {"from_attributes": True}
 
@@ -312,6 +323,34 @@ class EarningsSummaryResponse(BaseModel):
 
     lifetime_payout: float
     completed_count: int
+
+
+class ProEarningsItem(BaseModel):
+    """One Pro's share of the SP's earnings in a range (SVC-323).
+
+    ``professional_id`` None is the "Not assigned" row: jobs that completed with
+    no Pro on them, so the rows always add up to the SP's total. That row has
+    ``is_self`` and ``is_active`` False and no photo.
+    """
+
+    professional_id: UUID | None
+    display_name: str
+    profile_photo_url: str | None
+    is_self: bool
+    is_active: bool
+    payout: float
+    completed_count: int
+
+
+class EarningsByProResponse(BaseModel):
+    """The SP's earnings split by Pro (SVC-323). ``total_payout`` and
+    ``completed_count`` equal ``/me/earnings`` for a window and
+    ``/me/earnings/summary`` for ``all``."""
+
+    range: Literal["today", "week", "month", "all"]
+    total_payout: float
+    completed_count: int
+    pros: list[ProEarningsItem]
 
 
 # ---------------------------------------------------------------------------
