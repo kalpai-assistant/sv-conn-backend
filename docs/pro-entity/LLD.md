@@ -233,6 +233,15 @@ POST   /providers/me/accept-invite      → { token: "<6-digit code>" } invitee 
 - **Remove**: an SP can't remove its own Pro-for-self (400 `CANNOT_REMOVE_SELF`). Going off-tools is SVC-326, which brings the dispatch filter it needs.
 - **Pro-for-self at signup**: `ProviderService.get_or_create_profile` creates it in the same transaction as the SP row.
 
+### Per-Pro earnings for the SP (SVC-323)
+
+```
+GET /providers/me/earnings/by-pro?range=today|week|month|all → { range, total_payout, completed_count, pros: [{ professional_id, display_name, profile_photo_url, is_self, is_active, payout, completed_count }] }
+GET /providers/me/earnings?range=…&professional_id=<id>     → the existing window, narrowed to one Pro (the detail view)
+```
+
+Built into the SP's existing earnings, not `GET /me/team` (the pick-a-Pro step calls that on every accept). Same IST calendar windows plus `all`, and the same definition of earned (`_earned_filter`: completed, not refunded, cash counts). A job belongs to `bookings.professional_id`, the Pro on it when it completed; the SP's own jobs are its Pro-for-self's. Every Pro of the SP is listed, removed ones (they keep their history) and zero-job ones included. Jobs that completed with **no** Pro (a Pro declined, then the SP drove it) are one `professional_id: null` "Not assigned" row, so the rows always add up to the SP's `/me/earnings` (windows) and `/me/earnings/summary` (`all`) totals: all three go through `ProviderService._earned_scope`, and a window buckets each booking once, at its first COMPLETED log row. Two statements regardless of team size. `professional_id` on `/me/earnings` must be one of the SP's Pros (removed included), else 404 `PRO_NOT_FOUND`; each earnings row also carries `professional: {id, display_name, is_self} | null`. The SP stays the payee; Pros are settled off-platform.
+
 ## Booking state machine (updated)
 
 > **Naming:** `assigned` in this doc is `BookingStatus.ACCEPTED` in code. There is no separate `ASSIGNED` value; the "SP picked a Pro" step writes `ACCEPTED`.

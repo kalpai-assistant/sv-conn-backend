@@ -9,6 +9,7 @@ from app.dependencies import get_current_user, require_role
 from app.models.user import User
 from app.schemas.booking import BookingOfferResponse
 from app.schemas.provider import (
+    EarningsByProResponse,
     EarningsResponse,
     EarningsSummaryResponse,
     KYCSubmissionResponse,
@@ -289,9 +290,28 @@ async def get_my_earnings_summary(
     return await ProviderService(db).get_earnings_summary(current_user.id)
 
 
+@router.get("/me/earnings/by-pro", response_model=EarningsByProResponse)
+async def get_my_earnings_by_pro(
+    range: Literal["today", "week", "month", "all"] = Query("week"),
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    The SP's earnings split by the Pro who did each job (SVC-323).
+
+    Same windows as `/me/earnings`, plus `all`. Every Pro of the SP is listed,
+    removed ones and those with no jobs included; jobs that completed with no
+    Pro on them are one `professional_id: null` "Not assigned" row. The totals
+    equal `/me/earnings` (windows) and `/me/earnings/summary` (`all`). Separate
+    from `GET /me/team`, which the pick-a-Pro step calls on every accept.
+    """
+    return await ProviderService(db).get_earnings_by_pro(current_user.id, range)
+
+
 @router.get("/me/earnings", response_model=EarningsResponse)
 async def get_my_earnings(
     range: Literal["today", "week", "month"] = Query("week"),
+    professional_id: UUID | None = Query(None),
     current_user: User = Depends(require_role("provider")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -301,8 +321,13 @@ async def get_my_earnings(
     Window is the IST calendar boundary (today = since 00:00 IST, week = since
     Monday 00:00 IST, month = since the 1st 00:00 IST). Refunded payments are
     excluded. Used by the provider Earnings dashboard (SC-27).
+
+    `professional_id` (SVC-323) narrows it to one of the SP's Pros, removed ones
+    included: the per-Pro detail view. Anyone else's Pro is a 404 `PRO_NOT_FOUND`.
     """
-    return await ProviderService(db).get_earnings(current_user.id, range)
+    return await ProviderService(db).get_earnings(
+        current_user.id, range, professional_id=professional_id
+    )
 
 
 @router.post(

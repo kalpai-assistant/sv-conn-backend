@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta, timezone
 # path (that would fail at test collection time when creds aren't wired).
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -50,6 +50,8 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 logger = logging.getLogger(__name__)
 
 EarningsRange = Literal["today", "week", "month"]
+# A window, or "all" for the lifetime figure (SVC-323's per-Pro split takes both).
+EarningsScope = Literal["today", "week", "month", "all"]
 
 
 def professional_display_name(user_name: str | None, business_name: str | None = None) -> str:
@@ -897,6 +899,48 @@ class ProviderService:
             Booking.payment_status != PaymentStatus.REFUNDED,
         )
 
+    @staticmethod
+    def _first_completed():
+        """Each booking's **first** COMPLETED instant, as a LATERAL subquery.
+
+        Windows bucket a booking by when it completed, read from
+        ``booking_status_logs`` rather than ``bookings.updated_at`` (which later
+        payment/webhook writes bump). A plain join on ``to_status = COMPLETED``
+        gives a booking with two COMPLETED log rows twice, so the window total
+        counted it twice (SVC-323). ``MIN`` with no ``GROUP BY`` always yields
+        exactly one row per booking: its first completion, or NULL, which the
+        window's ``>=`` then drops. Correlated per booking, so it reads only
+        this provider's log rows, via ``booking_status_logs.booking_id``.
+        """
+        return (
+            select(func.min(BookingStatusLog.created_at).label("completed_at"))
+            .where(
+                BookingStatusLog.booking_id == Booking.id,
+                BookingStatusLog.to_status == BookingStatus.COMPLETED.value,
+            )
+            .correlate(Booking)
+            .lateral("first_completed")
+        )
+
+    def _earned_scope(self, stmt, provider_user_id: uuid.UUID, range_: EarningsScope, first=None):
+        """Narrow ``stmt`` to the provider's earned bookings in ``range_``.
+
+        The one scope behind every earnings figure: the window and lifetime
+        totals and the per-Pro split (SVC-323) all go through here, so they can't
+        disagree about which bookings count or when they completed. ``"all"``
+        joins no status log, since a lifetime total doesn't need a completion
+        time. A window joins ``first`` (a :meth:`_first_completed`; pass the
+        caller's own when it also selects ``first.c.completed_at``).
+        """
+        stmt = stmt.where(Booking.provider_id == provider_user_id, *self._earned_filter())
+        if range_ == "all":
+            return stmt
+        if first is None:
+            first = self._first_completed()
+        return stmt.join(first, true()).where(
+            first.c.completed_at >= _earnings_window_start_utc(range_)
+        )
+
     async def get_earnings_summary(self, provider_user_id: uuid.UUID) -> dict:
         """Lifetime payout total and completed count — no per-booking breakdown.
 
@@ -906,19 +950,20 @@ class ProviderService:
         Provider Home would download all of it to render a single number. This
         returns two scalars whatever the history looks like.
 
-        No ``BookingStatusLog`` join, unlike the windowed query. That join exists
-        only to bucket a booking by the instant it completed, which a lifetime total
-        has no need for — and it is an inner join on ``to_status == COMPLETED``, so a
-        booking carrying two COMPLETED log rows would be counted **twice**. A
-        window hides that; a lifetime sum would show it as a wrong total.
+        No ``BookingStatusLog`` join, unlike the windowed query: the ``"all"``
+        scope of :meth:`_earned_scope` has no need for a completion time.
 
         Tips are included for the same reason they are in the windowed figure: a tip
         is 100% provider-side (see ``Booking.tip_amount``).
         """
-        stmt = select(
-            func.coalesce(func.sum(Booking.provider_payout + Booking.tip_amount), 0),
-            func.count(Booking.id),
-        ).where(Booking.provider_id == provider_user_id, *self._earned_filter())
+        stmt = self._earned_scope(
+            select(
+                func.coalesce(func.sum(Booking.provider_payout + Booking.tip_amount), 0),
+                func.count(Booking.id),
+            ).select_from(Booking),
+            provider_user_id,
+            "all",
+        )
 
         total, count = (await self.db.execute(stmt)).one()
         return {
@@ -933,24 +978,30 @@ class ProviderService:
         self,
         provider_user_id: uuid.UUID,
         range_: EarningsRange,
+        professional_id: uuid.UUID | None = None,
     ) -> dict:
         """
         Sum the provider's payouts from COMPLETED bookings inside the named
         IST calendar window, plus the per-booking breakdown.
 
-        Completion timestamp comes from `booking_status_logs` (the precise
-        moment the booking transitioned to COMPLETED), not `bookings.updated_at`
-        — that gets bumped by subsequent payment/webhook updates and would
-        bucket a booking into the wrong day.
+        Completion timestamp is the booking's first COMPLETED row in
+        `booking_status_logs` (see :meth:`_first_completed`), not
+        `bookings.updated_at` — that gets bumped by subsequent payment/webhook
+        updates and would bucket a booking into the wrong day.
 
         Refunded payments are excluded — that's no longer money the provider
         earns. Cancelled bookings naturally fall out via the COMPLETED filter.
+
+        ``professional_id`` (SVC-323) narrows the rows and the totals to one Pro
+        of this SP, removed Pros included; anyone else's Pro, or an unknown id,
+        is a 404 like the team routes.
 
         Caching: spec asks for ~30s per provider; intentionally NOT done here
         yet. See backlog item — adds a Redis fixture story to every test and
         the call rate at beta scale is negligible. Easy follow-up.
         """
-        start_utc = _earnings_window_start_utc(range_)
+        if professional_id is not None:
+            await self._get_own_pro(provider_user_id, professional_id)
 
         # ``Booking.service_id`` was the single-service pointer that a booking
         # used to carry; a booking now holds a cart via ``booking_items``.
@@ -976,6 +1027,7 @@ class ProviderService:
         # Selected as an expression so both the per-row and total sums stay
         # consistent without a Python re-derive.
         effective_payout = (Booking.provider_payout + Booking.tip_amount).label("payout")
+        first = self._first_completed()
 
         stmt = (
             select(
@@ -983,7 +1035,7 @@ class ProviderService:
                 effective_payout,
                 Booking.tip_amount,
                 service_names_subq.label("service_name"),
-                BookingStatusLog.created_at.label("completed_at"),
+                first.c.completed_at,
                 # SVC-303: where this job's money is. Plain columns on the
                 # booking — no extra join, so the cost of the query is
                 # unchanged. A per-job *paid date* would need a join onto
@@ -994,19 +1046,21 @@ class ProviderService:
                 Booking.settlement_status,
                 Booking.payment_method,
                 Booking.settlement_failure_reason,
+                # SVC-323: who did the job. An outer join, since a job can
+                # complete with no Pro on it (declined, then the SP drove it).
+                Professional.id.label("pro_id"),
+                Professional.display_name.label("pro_display_name"),
+                Professional.user_id.label("pro_user_id"),
             )
-            .join(
-                BookingStatusLog,
-                (BookingStatusLog.booking_id == Booking.id)
-                & (BookingStatusLog.to_status == BookingStatus.COMPLETED.value),
-            )
-            .where(Booking.provider_id == provider_user_id)
-            # Shared with the lifetime summary, so a window and the all-time
-            # total cannot disagree about which bookings count as earned.
-            .where(*self._earned_filter())
-            .where(BookingStatusLog.created_at >= start_utc)
-            .order_by(BookingStatusLog.created_at.desc())
+            .select_from(Booking)
+            .outerjoin(Professional, Professional.id == Booking.professional_id)
         )
+        # Shared with the lifetime summary and the per-Pro split, so none of
+        # them can disagree about which bookings count as earned.
+        stmt = self._earned_scope(stmt, provider_user_id, range_, first)
+        if professional_id is not None:
+            stmt = stmt.where(Booking.professional_id == professional_id)
+        stmt = stmt.order_by(first.c.completed_at.desc())
 
         rows = (await self.db.execute(stmt)).all()
 
@@ -1020,6 +1074,15 @@ class ProviderService:
                 "settlement_status": row.settlement_status,
                 "payment_method": row.payment_method,
                 "settlement_failure_reason": row.settlement_failure_reason,
+                "professional": (
+                    {
+                        "id": row.pro_id,
+                        "display_name": row.pro_display_name,
+                        "is_self": row.pro_user_id == provider_user_id,
+                    }
+                    if row.pro_id is not None
+                    else None
+                ),
             }
             for row in rows
         ]
@@ -1029,3 +1092,97 @@ class ProviderService:
             "completed_count": len(rows),
             "bookings": bookings,
         }
+
+    async def get_earnings_by_pro(self, provider_user_id: uuid.UUID, range_: EarningsScope) -> dict:
+        """The SP's earnings in ``range_`` split by the Pro who did each job (SVC-323).
+
+        Attribution is ``bookings.professional_id``: the Pro on the job when it
+        completed. Every Pro of this SP is listed, removed ones too (they keep
+        their history) and those with no jobs (0s). Jobs that completed with no
+        Pro on them land in one ``professional_id = None`` "Not assigned" row, so
+        the rows always add up to the SP's total, which is the same figure
+        :meth:`get_earnings` (windows) and :meth:`get_earnings_summary` (``"all"``)
+        return: all three use :meth:`_earned_scope`.
+
+        Two statements whatever the team size: one grouped sum, one Pro list.
+        """
+        totals_stmt = self._earned_scope(
+            select(
+                Booking.professional_id,
+                func.sum(Booking.provider_payout + Booking.tip_amount).label("payout"),
+                func.count(Booking.id).label("completed_count"),
+            ).select_from(Booking),
+            provider_user_id,
+            range_,
+        ).group_by(Booking.professional_id)
+        totals = {
+            row.professional_id: (row.payout, row.completed_count)
+            for row in (await self.db.execute(totals_stmt)).all()
+        }
+
+        # This SP's Pros, plus any Pro a job here points at that isn't one
+        # (shouldn't happen), so such a job is still named rather than vanishing
+        # from the rows while staying in the total.
+        attributed = [pro_id for pro_id in totals if pro_id is not None]
+        pros = (
+            await self.db.scalars(
+                select(Professional)
+                .where(
+                    (Professional.service_provider_id == provider_user_id)
+                    | Professional.id.in_(attributed)
+                )
+                .order_by(
+                    Professional.user_id != provider_user_id,
+                    Professional.is_active.desc(),
+                    Professional.created_at,
+                    Professional.id,
+                )
+            )
+        ).all()
+
+        rows = []
+        for pro in pros:
+            payout, count = totals.get(pro.id, (0, 0))
+            rows.append(
+                {
+                    "professional_id": pro.id,
+                    "display_name": pro.display_name,
+                    "profile_photo_url": pro.profile_photo_url,
+                    "is_self": pro.user_id == provider_user_id,
+                    "is_active": pro.is_active,
+                    "payout": round(float(payout), 2),
+                    "completed_count": count,
+                }
+            )
+        if None in totals:
+            payout, count = totals[None]
+            rows.append(
+                {
+                    "professional_id": None,
+                    "display_name": "Not assigned",
+                    "profile_photo_url": None,
+                    "is_self": False,
+                    "is_active": False,
+                    "payout": round(float(payout), 2),
+                    "completed_count": count,
+                }
+            )
+
+        return {
+            "range": range_,
+            "total_payout": round(float(sum(payout for payout, _ in totals.values())), 2),
+            "completed_count": sum(count for _, count in totals.values()),
+            "pros": rows,
+        }
+
+    async def _get_own_pro(self, sp_id: uuid.UUID, professional_id: uuid.UUID) -> Professional:
+        """One of this SP's Pros, active or removed; a 404 for anyone else's."""
+        pro = await self.db.scalar(
+            select(Professional).where(
+                Professional.id == professional_id,
+                Professional.service_provider_id == sp_id,
+            )
+        )
+        if pro is None:
+            raise AppException("Team member not found.", status_code=404, code="PRO_NOT_FOUND")
+        return pro
