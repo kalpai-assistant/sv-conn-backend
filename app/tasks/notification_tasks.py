@@ -71,21 +71,29 @@ NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
         # {service} is filled per booking — see build_new_request_body.
         "body": "{service} — accept within 2 minutes.",
     },
+    # SVC-330: these four tell the consumer about the person coming to them.
+    # "body_named" is used when the booking has a Pro, with {who} from
+    # consumer_push_who ("Rohan from Sparkle Cleaners", or just "Sunita"
+    # solo). "body" stays the copy for a booking with nobody to name.
     "accepted": {
         "title": "Booking Confirmed",
         "body": "Your provider has accepted the booking and will arrive soon.",
+        "body_named": "{who} will complete your order.",
     },
     "en_route": {
         "title": "Provider on the way",
         "body": "Your provider is on the way to you.",
+        "body_named": "{who} is on the way to you.",
     },
     "in_progress": {
         "title": "Service Started",
         "body": "Your service is now in progress.",
+        "body_named": "{who} has started your service.",
     },
     "completed": {
         "title": "Service Completed",
         "body": "Your service has been completed. Please proceed to payment.",
+        "body_named": "{who} has completed your service. Please proceed to payment.",
     },
     # Goes to whichever party did not cancel — see send_booking_notification.
     # Worded to read correctly either way: "the other side pulled out" is true
@@ -213,6 +221,106 @@ def build_new_request_body(service_name: str | None) -> str:
     return NOTIFICATION_TEMPLATES["new_request"]["body"].format(
         service=service_name or "A new service request",
     )
+
+
+# SVC-330: a notification shade shows roughly this much before cutting the body
+# off, so a named body is held to it, the "…" included.
+PUSH_BODY_MAX_CHARS = 100
+
+# Below this many characters a truncated brand ("Sp…") tells the consumer
+# nothing, so the name stands alone instead.
+_MIN_BRAND_CHARS = 4
+
+
+def _truncate(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` characters, the "…" counted in the limit."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def consumer_push_who(
+    display_name: str | None,
+    business_name: str | None,
+    *,
+    is_self: bool,
+    max_len: int,
+) -> str | None:
+    """Who is coming, as a consumer push names them (SVC-330).
+
+    A team Pro is "Rohan from Sparkle Cleaners", as the in-app booking screens
+    show it (HLD "Consumer visibility rules"). A solo SP's own job (the
+    Pro-for-self), an SP with no business name, or one whose business name is
+    just the person's name collapses to the name alone. Returns None when
+    there is no name, and the caller falls back to the generic copy.
+
+    The result is at most ``max_len`` characters. The brand is truncated first,
+    because the name is the part the consumer meets at the door.
+    """
+    name = (display_name or "").strip()
+    if not name or max_len <= 0:
+        return None
+    brand = (business_name or "").strip()
+    if is_self or not brand or brand.casefold() == name.casefold():
+        return _truncate(name, max_len)
+
+    joiner = " from "
+    room = max_len - len(name) - len(joiner)
+    if room >= _MIN_BRAND_CHARS:
+        return f"{name}{joiner}{_truncate(brand, room)}"
+    return _truncate(name, max_len)
+
+
+def build_consumer_body(template: dict[str, str], who_parts: tuple | None) -> str:
+    """The body of a push that names who is coming, or the generic one.
+
+    ``who_parts`` is ``(display_name, business_name, is_self)`` for the
+    booking's Pro, or None when it has none. The budget for {who} is whatever
+    the template's own words leave of PUSH_BODY_MAX_CHARS.
+    """
+    named = template.get("body_named")
+    if named is None or who_parts is None:
+        return template["body"]
+    display_name, business_name, is_self = who_parts
+    max_len = PUSH_BODY_MAX_CHARS - (len(named) - len("{who}"))
+    who = consumer_push_who(display_name, business_name, is_self=is_self, max_len=max_len)
+    if who is None:
+        return template["body"]
+    return named.format(who=who)
+
+
+def _assigned_pro_who_parts(db, booking) -> tuple | None:
+    """``(display_name, business_name, is_self)`` for the booking's Pro, in one query.
+
+    The SP's row is joined on ``provider_profiles.user_id``, the column
+    ``professionals.service_provider_id`` references. It's an outer join: an SP
+    with no profile row shouldn't exist, but if one does the push names the
+    Pro alone rather than failing.
+    """
+    if booking.professional_id is None:
+        return None
+
+    from sqlalchemy import select as sync_select
+
+    from app.models.professional import Professional
+    from app.models.provider_profile import ProviderProfile
+
+    row = db.execute(
+        sync_select(
+            Professional.display_name,
+            ProviderProfile.business_name,
+            Professional.user_id,
+            Professional.service_provider_id,
+        )
+        .outerjoin(
+            ProviderProfile,
+            ProviderProfile.user_id == Professional.service_provider_id,
+        )
+        .where(Professional.id == booking.professional_id)
+    ).one_or_none()
+    if row is None:
+        return None
+    return (row.display_name, row.business_name, row.user_id == row.service_provider_id)
 
 
 def _expire_unbroadcastable(db, booking, reason: str) -> None:
@@ -462,6 +570,9 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                 # push was "Service Started", with the provider already at the
                 # door.
                 recipients = [booking.consumer]
+                # SVC-330: name the Pro on the job, and their business.
+                if "body_named" in template:
+                    body = build_consumer_body(template, _assigned_pro_who_parts(db, booking))
 
             for recipient in recipients:
                 if not (recipient and getattr(recipient, "fcm_token", None)):
