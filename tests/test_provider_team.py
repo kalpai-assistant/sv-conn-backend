@@ -438,7 +438,9 @@ async def test_a_pro_removed_elsewhere_can_join_a_new_team(client, db_session, a
     resp = await client.delete(
         f"{TEAM}/{pro_a['id']}", headers=auth_headers(str(sp_a.id), "provider")
     )
-    assert resp.status_code == 204
+    # SVC-326: a 200 with ``self_reenabled`` (the SP never switched off here).
+    assert resp.status_code == 200
+    assert resp.json() == {"self_reenabled": False}
 
     second = (await _invite(client, auth_headers, sp_b, invitee.phone)).json()
     resp = await _accept(client, auth_headers, invitee, second["token"])

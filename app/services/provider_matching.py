@@ -17,13 +17,79 @@ intersect" that would run N queries and merge in Python).
 
 from collections.abc import Sequence
 
-from sqlalchemy import Select, exists, func, select
+from sqlalchemy import Select, exists, func, or_, select
+from sqlalchemy.orm import aliased
 
+from app.models.booking import ACTIVE_JOB_STATUSES, Booking
 from app.models.booking_offer import BookingOffer
+from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.user import User
 from app.utils.geo import st_dwithin_column_radius
+
+
+def assignable_team_pro_exists():
+    """EXISTS a team Pro of the outer query's SP who could take a job right now
+    (SVC-326): not the Pro-for-self, still on the team, KYC-verified, online,
+    and not holding a booking in ``ACTIVE_JOB_STATUSES``.
+
+    The same tests ``/assign`` applies to a team Pro, and the busy test reads
+    the same status tuple, so dispatch can't offer an SP a job that no one on
+    its team could then be given. Correlated on ``ProviderProfile.user_id``.
+    """
+    pro = aliased(Professional)
+    job = aliased(Booking)
+    return exists().where(
+        pro.service_provider_id == ProviderProfile.user_id,
+        pro.user_id != ProviderProfile.user_id,
+        pro.is_active.is_(True),
+        pro.kyc_status == KYCStatus.VERIFIED,
+        pro.is_online.is_(True),
+        ~exists().where(
+            job.professional_id == pro.id,
+            job.status.in_(ACTIVE_JOB_STATUSES),
+        ),
+    )
+
+
+def has_someone_to_do_it():
+    """The SP takes jobs itself, or has a team Pro who can (SVC-326).
+
+    Phrased as "no switched-off Pro-for-self" rather than "a Pro-for-self that
+    is on", so an SP whose Pro-for-self row is missing (accept repairs that)
+    keeps the behaviour it had before the switch existed. That branch is a
+    single-row index probe and comes first; the team branch only runs for an
+    SP that has switched off.
+    """
+    self_pro = aliased(Professional)
+    return or_(
+        ~exists().where(
+            self_pro.service_provider_id == ProviderProfile.user_id,
+            self_pro.user_id == ProviderProfile.user_id,
+            self_pro.accepts_direct_jobs.is_(False),
+        ),
+        assignable_team_pro_exists(),
+    )
+
+
+def _base_conditions(address_location) -> list:
+    """Every eligibility condition except which services the SP covers.
+
+    The one list behind the single-service and cart statements alike, so they
+    can't drift; before SVC-326 it was written out three times.
+    """
+    return [
+        ProviderProfile.is_online.is_(True),
+        ProviderProfile.kyc_status == KYCStatus.VERIFIED,
+        User.fcm_token.is_not(None),
+        st_dwithin_column_radius(
+            ProviderProfile.service_area_center,
+            address_location,
+            ProviderProfile.service_area_radius_km,
+        ),
+        has_someone_to_do_it(),
+    ]
 
 
 def eligible_provider_conditions(service_id, address_location) -> list:
@@ -45,19 +111,16 @@ def eligible_provider_conditions(service_id, address_location) -> list:
     Defence-in-depth in ``notification_tasks.send_booking_notification`` still
     skips a NULL token per-recipient, so the two remain redundant on purpose.
 
+    SVC-326 adds the last condition (``has_someone_to_do_it``): an SP that has
+    switched off taking jobs itself is eligible only while a team Pro could be
+    assigned the job.
+
     ``address_location`` is the address's geography value, passed in rather than
     re-queried so the caller controls the fetch.
     """
     return [
         ProviderServiceModel.service_id == service_id,
-        ProviderProfile.is_online.is_(True),
-        ProviderProfile.kyc_status == KYCStatus.VERIFIED,
-        User.fcm_token.is_not(None),
-        st_dwithin_column_radius(
-            ProviderProfile.service_area_center,
-            address_location,
-            ProviderProfile.service_area_radius_km,
-        ),
+        *_base_conditions(address_location),
     ]
 
 
@@ -127,16 +190,7 @@ def eligible_providers_multi_stmt(service_ids: Sequence, address_location) -> Se
 
     # Same conditions as the single-service form, minus the single-service
     # equality — that's replaced by the IN + HAVING pair below.
-    base_conditions = [
-        ProviderProfile.is_online.is_(True),
-        ProviderProfile.kyc_status == KYCStatus.VERIFIED,
-        User.fcm_token.is_not(None),
-        st_dwithin_column_radius(
-            ProviderProfile.service_area_center,
-            address_location,
-            ProviderProfile.service_area_radius_km,
-        ),
-    ]
+    base_conditions = _base_conditions(address_location)
     return (
         select(User)
         .join(ProviderProfile, User.id == ProviderProfile.user_id)
@@ -190,16 +244,7 @@ def is_eligible_provider_multi_stmt(service_ids: Sequence, address_location, pro
     if len(service_ids) == 1:
         return is_eligible_provider_stmt(service_ids[0], address_location, provider_id)
 
-    base_conditions = [
-        ProviderProfile.is_online.is_(True),
-        ProviderProfile.kyc_status == KYCStatus.VERIFIED,
-        User.fcm_token.is_not(None),
-        st_dwithin_column_radius(
-            ProviderProfile.service_area_center,
-            address_location,
-            ProviderProfile.service_area_radius_km,
-        ),
-    ]
+    base_conditions = _base_conditions(address_location)
     return (
         select(ProviderProfile.user_id)
         .join(User, User.id == ProviderProfile.user_id)

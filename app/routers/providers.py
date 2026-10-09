@@ -26,6 +26,9 @@ from app.schemas.provider import (
 from app.schemas.team import (
     AcceptInviteRequest,
     ProfessionalResponse,
+    RemoveProResponse,
+    SelfProResponse,
+    SelfProUpdate,
     TeamInviteCreate,
     TeamInviteResponse,
 )
@@ -448,7 +451,7 @@ async def list_my_team(
     return await TeamService(db).list_team(current_user.id)
 
 
-@router.delete("/me/team/{pro_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/me/team/{pro_id}", response_model=RemoveProResponse)
 async def remove_team_member(
     pro_id: UUID,
     current_user: User = Depends(require_role("provider")),
@@ -456,9 +459,58 @@ async def remove_team_member(
 ):
     """Remove a Pro from my team (soft: the row is kept for past bookings).
 
-    400 ``CANNOT_REMOVE_SELF`` for my own Pro-for-self; going off-tools is SVC-326.
+    400 ``CANNOT_REMOVE_SELF`` for my own Pro-for-self; to stop taking jobs
+    myself, use ``PATCH /me/self-pro``. ``self_reenabled`` is true when this
+    removed my last other Pro while I had switched that off, so it was turned
+    back on (SVC-326). Was a 204 with no body before SVC-326.
     """
-    await TeamService(db).remove_pro(current_user.id, pro_id)
+    self_reenabled = await TeamService(db).remove_pro(current_user.id, pro_id)
+    return RemoveProResponse(self_reenabled=self_reenabled)
+
+
+def _self_pro_response(pro, team_has_assignable_pro: bool) -> SelfProResponse:
+    return SelfProResponse(
+        professional_id=pro.id,
+        accepts_direct_jobs=pro.accepts_direct_jobs,
+        team_has_assignable_pro=team_has_assignable_pro,
+    )
+
+
+@router.get("/me/self-pro", response_model=SelfProResponse)
+async def get_self_pro(
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Whether I take jobs myself, and whether anyone on my team could take one
+    right now (SVC-326)."""
+    return _self_pro_response(*await TeamService(db).get_self_pro(current_user.id))
+
+
+@router.patch(
+    "/me/self-pro",
+    response_model=SelfProResponse,
+    responses={
+        409: {
+            "description": "NO_TEAM_TO_DISPATCH: switching off needs at least one other "
+            "active Pro on my team"
+        }
+    },
+)
+async def update_self_pro(
+    request: SelfProUpdate,
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Switch taking jobs myself on or off, while my team keeps working (SVC-326).
+
+    Off: I'm broadcast to only while a team Pro could be assigned the job, a
+    plain accept and assigning myself answer 409 ``SELF_NOT_TAKING_JOBS``, and
+    the pick list flags my row. Bookings already on me are unaffected. I stay
+    "online" to receive and dispatch.
+    """
+    return _self_pro_response(
+        *await TeamService(db).set_accepts_direct_jobs(current_user.id, request.accepts_direct_jobs)
+    )
 
 
 @router.post(

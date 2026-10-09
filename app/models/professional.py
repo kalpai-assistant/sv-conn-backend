@@ -109,6 +109,16 @@ class Professional(Base):
         Boolean, nullable=False, default=True, server_default=text("true")
     )
 
+    # SVC-326: an SP can stop taking jobs itself ("off tools") while its team
+    # keeps working. Only the Pro-for-self's value is settable today, through
+    # ``PATCH /providers/me/self-pro``; it is neither ``is_active`` (removed from
+    # the team) nor ``is_online`` (mirrors the SP's switch, which still governs
+    # whether the SP is broadcast to). Invariant: false only while the SP has
+    # another active Pro (``TeamService.remove_pro`` restores it).
+    accepts_direct_jobs: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

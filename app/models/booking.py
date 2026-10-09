@@ -72,6 +72,15 @@ VALID_TRANSITIONS: dict[BookingStatus, list[BookingStatus]] = {
     BookingStatus.EXPIRED: [],
 }
 
+# A Pro holding a booking in one of these is on a job: busy for ``/assign``
+# (SVC-320) and not assignable for broadcast eligibility (SVC-326). One tuple,
+# so dispatch and ``/assign`` can't disagree about who is free.
+ACTIVE_JOB_STATUSES = (
+    BookingStatus.ACCEPTED,
+    BookingStatus.EN_ROUTE,
+    BookingStatus.IN_PROGRESS,
+)
+
 
 class Booking(Base):
     __tablename__ = "bookings"

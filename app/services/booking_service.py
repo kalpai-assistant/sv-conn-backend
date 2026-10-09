@@ -28,6 +28,7 @@ from app.exceptions import (
 )
 from app.models.address import Address
 from app.models.booking import (
+    ACTIVE_JOB_STATUSES,
     VALID_TRANSITIONS,
     Booking,
     BookingStatus,
@@ -63,13 +64,6 @@ from app.utils.money import to_decimal
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
-# A Pro holding a booking in one of these is on a job (SVC-320 ``assign``).
-_ACTIVE_JOB_STATUSES = (
-    BookingStatus.ACCEPTED,
-    BookingStatus.EN_ROUTE,
-    BookingStatus.IN_PROGRESS,
-)
-
 # Stable codes for two-level dispatch (SVC-320 PR 2).
 PRO_NOT_FOUND = "PRO_NOT_FOUND"
 PRO_BUSY = "PRO_BUSY"
@@ -77,6 +71,8 @@ PRO_OFFLINE = "PRO_OFFLINE"
 PRO_KYC_INCOMPLETE = "PRO_KYC_INCOMPLETE"
 JOB_NOT_FOUND = "JOB_NOT_FOUND"
 PROVIDER_EN_ROUTE = "PROVIDER_EN_ROUTE"
+# SVC-326: the SP has switched off taking jobs itself.
+SELF_NOT_TAKING_JOBS = "SELF_NOT_TAKING_JOBS"
 
 # Admin timeline tie-break (SVC-333), see ``admin_timeline``. A Pro arriving
 # (claimed / repicked) sorts after a status row stamped the same instant; any
@@ -888,8 +884,24 @@ class BookingService:
             return booking, False
 
         self_pro = await ProviderService(self.db).ensure_self_professional(provider_id)
+        # SVC-326: a plain accept claims with the Pro-for-self, so it can't go
+        # through while the SP has stopped taking jobs. A 409, never the pick
+        # list's 202: an old client reads any 2xx as "you got it".
+        if self_pro is not None:
+            self._refuse_if_not_taking_jobs(self_pro)
         booking = await self._claim(booking, provider_id, self_pro)
         return booking, True
+
+    @staticmethod
+    def _refuse_if_not_taking_jobs(pro: Professional) -> None:
+        """409 when ``pro`` is a Pro-for-self that is switched off (SVC-326)."""
+        if pro.is_self and not pro.accepts_direct_jobs:
+            raise AppException(
+                "You've switched off taking jobs yourself. "
+                "Assign this booking to someone on your team.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=SELF_NOT_TAKING_JOBS,
+            )
 
     async def _check_claim(self, booking: Booking, provider_id: uuid.UUID) -> bool:
         """The accept precondition ladder, shared by ``accept_booking``,
@@ -1017,7 +1029,7 @@ class BookingService:
             return set()
         stmt = select(Booking.professional_id).where(
             Booking.professional_id.in_(pro_ids),
-            Booking.status.in_(_ACTIVE_JOB_STATUSES),
+            Booking.status.in_(ACTIVE_JOB_STATUSES),
         )
         if except_booking is not None:
             stmt = stmt.where(Booking.id != except_booking)
@@ -1028,6 +1040,9 @@ class BookingService:
     ) -> list[tuple[Professional, bool]] | None:
         """For a client that opted in to the pick step: the Pros a team SP can
         assign this booking to, each with whether they're busy. No write.
+
+        A switched-off Pro-for-self (SVC-326) stays in the list; the router
+        flags it with its ``accepts_direct_jobs`` so the SP sees why.
 
         ``None`` means "not a pick": a solo SP, a booking they already hold, or
         one past REQUESTED. The router then runs the plain accept, so every
@@ -1072,7 +1087,8 @@ class BookingService:
         live behaviour. A team Pro must also have verified KYC (409
         ``PRO_KYC_INCOMPLETE``) and be online (409 ``PRO_OFFLINE``); the
         Pro-for-self is exempt from both, since the SP's own KYC and online
-        state are part of eligibility.
+        state are part of eligibility; instead it is refused while the SP has
+        switched off taking jobs itself (409 ``SELF_NOT_TAKING_JOBS``, SVC-326).
         """
         booking = await self.db.get(Booking, booking_id, with_for_update=True)
         if not booking:
@@ -1100,6 +1116,8 @@ class BookingService:
             raise InvalidStateTransition(
                 f"A booking that is {booking.status.value} can't be reassigned"
             )
+
+        self._refuse_if_not_taking_jobs(pro)
 
         # A team Pro goes into a consumer's home, so their own identity KYC
         # must be approved first (SVC-318; wireframes §3B). Nothing else stops
