@@ -78,9 +78,34 @@ class ProfessionalResponse(BaseModel):
     is_online: bool
     is_active: bool
     is_self: bool
+    # SVC-326. Settable only on the Pro-for-self (PATCH /providers/me/self-pro).
+    accepts_direct_jobs: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class SelfProUpdate(BaseModel):
+    accepts_direct_jobs: bool
+
+
+class SelfProResponse(BaseModel):
+    """``GET`` / ``PATCH /providers/me/self-pro`` (SVC-326)."""
+
+    professional_id: UUID
+    accepts_direct_jobs: bool
+    # Whether any team Pro (not the SP itself) could be assigned a job right
+    # now: active, KYC-verified, online and not on another job. The same rule
+    # broadcast eligibility uses. False → "nobody on your team is available".
+    team_has_assignable_pro: bool
+
+
+class RemoveProResponse(BaseModel):
+    """``DELETE /providers/me/team/{pro_id}`` (SVC-326)."""
+
+    # True when this removal left the SP with no other active Pro, so its own
+    # switched-off Pro-for-self was turned back on.
+    self_reenabled: bool
 
 
 # --- Two-level dispatch (SVC-320 PR 2) -----------------------------------------
@@ -99,6 +124,9 @@ class TeamPickPro(BaseModel):
     is_self: bool
     # Already on another unfinished job; /assign would answer 409 PRO_BUSY.
     busy: bool
+    # SVC-326: false only for a Pro-for-self whose SP has switched off taking
+    # jobs itself; /assign would answer 409 SELF_NOT_TAKING_JOBS.
+    accepts_direct_jobs: bool
 
 
 class TeamPickResponse(BaseModel):

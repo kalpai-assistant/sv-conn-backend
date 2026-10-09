@@ -132,6 +132,11 @@ async def create_booking(
             "hasn't been notified about."
         },
         404: {"description": "No such booking"},
+        409: {
+            "description": "SELF_NOT_TAKING_JOBS: the SP has switched off taking jobs "
+            "itself (SVC-326); assign it to a team Pro with POST /bookings/{id}/assign. "
+            "(No code) the booking is already en route or later."
+        },
         410: {
             "description": "The offer is over — claimed by another provider, "
             "cancelled, or expired. Dismiss the card."
@@ -176,6 +181,7 @@ async def accept_booking(
                         profile_photo_url=pro.profile_photo_url,
                         is_self=pro.is_self,
                         busy=busy,
+                        accepts_direct_jobs=pro.accepts_direct_jobs,
                     )
                     for pro, busy in options
                 ],
@@ -202,8 +208,9 @@ async def accept_booking(
         409: {
             "description": "PRO_BUSY: the Pro is on another unfinished job; "
             "PRO_OFFLINE: a team Pro who is offline; PRO_KYC_INCOMPLETE: a team Pro "
-            "whose own KYC isn't verified; or (no code) the booking is already en "
-            "route or later"
+            "whose own KYC isn't verified; SELF_NOT_TAKING_JOBS: the Pro-for-self, "
+            "while the SP has switched off taking jobs itself; or (no code) the "
+            "booking is already en route or later"
         },
         410: {"description": "The offer is over — claimed by another SP, cancelled or expired"},
     },

@@ -20,13 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import AppException
 from app.models.professional import Professional
-from app.models.provider_profile import KYCStatus
+from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.provider_team_invite import (
     INVITE_CODE_DIGITS,
     InviteStatus,
     ProviderTeamInvite,
 )
 from app.models.user import User
+from app.services.provider_matching import assignable_team_pro_exists
 from app.services.provider_service import ProviderService, professional_display_name
 from app.utils import sms_client
 
@@ -56,6 +57,7 @@ INVITE_CODE_UNAVAILABLE = "INVITE_CODE_UNAVAILABLE"
 ALREADY_PRO_ELSEWHERE = "ALREADY_PRO_ELSEWHERE"
 PRO_NOT_FOUND = "PRO_NOT_FOUND"
 CANNOT_REMOVE_SELF = "CANNOT_REMOVE_SELF"
+NO_TEAM_TO_DISPATCH = "NO_TEAM_TO_DISPATCH"
 
 
 class TeamService:
@@ -259,14 +261,19 @@ class TeamService:
         )
         return list(result.scalars().all())
 
-    async def remove_pro(self, sp_id: uuid.UUID, pro_id: uuid.UUID) -> None:
+    async def remove_pro(self, sp_id: uuid.UUID, pro_id: uuid.UUID) -> bool:
         """Soft-remove a Pro: ``is_active = false``. The row stays, since
-        bookings and reviews reference it.
+        bookings and reviews reference it. Returns whether the SP's own
+        Pro-for-self was switched back on (SVC-326).
 
-        An SP can't remove its own Pro-for-self here. Going "off tools" is
-        SVC-326, which also changes dispatch so an SP whose team has no eligible
-        Pro stops being broadcast to. Doing it here, before that exists, would
-        leave a solo SP broadcast-eligible with nobody to do the job.
+        An SP can't remove its own Pro-for-self; going "off tools" is
+        ``set_accepts_direct_jobs`` instead.
+
+        This is the only place a Pro is deactivated, so it is where the SVC-326
+        invariant is kept: an SP that has switched off taking jobs itself must
+        have another active Pro. Removing the last one switches the Pro-for-self
+        back on in the same transaction, under the same row lock the switch
+        takes, so a concurrent switch-off can't slip between the two.
         """
         pro = await self.db.scalar(
             select(Professional)
@@ -293,7 +300,93 @@ class TeamService:
         # A removed Pro must not look available to anything reading is_online.
         pro.is_online = False
         await self.db.flush()
-        logger.info("team.pro_removed pro_id=%s sp=%s", pro.id, sp_id)
+
+        self_reenabled = False
+        self_pro = await self._lock_self_pro(sp_id)
+        if (
+            self_pro is not None
+            and not self_pro.accepts_direct_jobs
+            and not await self._has_other_active_pro(sp_id)
+        ):
+            self_pro.accepts_direct_jobs = True
+            await self.db.flush()
+            self_reenabled = True
+        logger.info(
+            "team.pro_removed pro_id=%s sp=%s self_reenabled=%s", pro.id, sp_id, self_reenabled
+        )
+        return self_reenabled
+
+    # ------------------------------------------------------------------
+    # SP off tools (SVC-326)
+    # ------------------------------------------------------------------
+
+    async def get_self_pro(self, sp_id: uuid.UUID) -> tuple[Professional, bool]:
+        """The SP's Pro-for-self and whether any team Pro is assignable now."""
+        await ProviderService(self.db).get_or_create_profile(sp_id)
+        self_pro = await ProviderService(self.db).ensure_self_professional(sp_id)
+        return self_pro, await self._team_has_assignable_pro(sp_id)
+
+    async def set_accepts_direct_jobs(
+        self, sp_id: uuid.UUID, accepts: bool
+    ) -> tuple[Professional, bool]:
+        """Switch the SP's own job-taking on or off. Only new dispatch changes:
+        bookings already on the Pro-for-self are left alone.
+
+        Off needs another active Pro (409 ``NO_TEAM_TO_DISPATCH``), or the SP
+        would stop being broadcast to with nobody to send. Whether that Pro is
+        online or free right now doesn't matter here; while none is,
+        eligibility simply leaves the SP out, and ``team_has_assignable_pro``
+        tells the app to warn.
+        """
+        await ProviderService(self.db).get_or_create_profile(sp_id)
+        await ProviderService(self.db).ensure_self_professional(sp_id)
+        self_pro = await self._lock_self_pro(sp_id)
+        if not accepts and not await self._has_other_active_pro(sp_id):
+            raise AppException(
+                "Add someone to your team before you stop taking jobs yourself.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=NO_TEAM_TO_DISPATCH,
+            )
+        if self_pro.accepts_direct_jobs != accepts:
+            self_pro.accepts_direct_jobs = accepts
+            await self.db.flush()
+            logger.info("team.self_accepts_direct_jobs sp=%s value=%s", sp_id, accepts)
+        return self_pro, await self._team_has_assignable_pro(sp_id)
+
+    async def _lock_self_pro(self, sp_id: uuid.UUID) -> Professional | None:
+        # populate_existing: the row may already be in the identity map from an
+        # earlier unlocked read; refresh it with what the lock now guards.
+        return await self.db.scalar(
+            select(Professional)
+            .where(Professional.service_provider_id == sp_id, Professional.user_id == sp_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    async def _has_other_active_pro(self, sp_id: uuid.UUID) -> bool:
+        return (
+            await self.db.scalar(
+                select(Professional.id)
+                .where(
+                    Professional.service_provider_id == sp_id,
+                    Professional.user_id != sp_id,
+                    Professional.is_active.is_(True),
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
+    async def _team_has_assignable_pro(self, sp_id: uuid.UUID) -> bool:
+        # The broadcast's own predicate, narrowed to this SP.
+        return (
+            await self.db.scalar(
+                select(ProviderProfile.user_id).where(
+                    ProviderProfile.user_id == sp_id, assignable_team_pro_exists()
+                )
+            )
+            is not None
+        )
 
     # ------------------------------------------------------------------
     # Invitee side
