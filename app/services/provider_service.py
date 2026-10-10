@@ -66,6 +66,19 @@ def professional_display_name(user_name: str | None, business_name: str | None =
     return "Professional"
 
 
+def effective_kyc_status(pro: Professional, sp_kyc_status: KYCStatus | None) -> KYCStatus:
+    """The KYC to *show* for a Pro row (SVC-329).
+
+    A Pro-for-self's KYC is its SP's: verifying or rejecting an owner writes
+    only ``provider_profiles``, so the self row's own ``kyc_status`` keeps
+    whatever it was created with. Display only: the self row is deliberately
+    not synced (one source of truth), and ``/assign`` exempts it anyway.
+    """
+    if pro.is_self and sp_kyc_status is not None:
+        return sp_kyc_status
+    return pro.kyc_status
+
+
 def _earnings_window_start_utc(range_: EarningsRange) -> datetime:
     """Convert a named range into the inclusive UTC start instant."""
     now_ist = datetime.now(_IST)
