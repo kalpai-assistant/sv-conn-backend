@@ -42,6 +42,7 @@ from app.schemas.user import UserResponse
 from app.services.booking_service import BookingService
 from app.services.payout_service import PayoutService
 from app.services.provider_service import ProviderService
+from app.services.team_service import TeamService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -68,9 +69,13 @@ async def list_users(
     "/users/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT, dependencies=[_admin_dep]
 )
 async def deactivate_user(user_id: UUID, db: AsyncSession = Depends(get_db)):
-    user = await db.get(User, user_id)
-    if user:
-        user.is_active = False
+    """Deactivate a user. An unknown id is a silent 204.
+
+    SVC-329: 409 ``USER_HAS_ACTIVE_JOBS`` (ids in ``details.booking_ids``)
+    while they hold a job, with nothing changed. Otherwise they also go offline
+    everywhere and are removed from any team they're a Pro on.
+    """
+    if await TeamService(db).deactivate_user(user_id) is not None:
         await db.commit()
 
 

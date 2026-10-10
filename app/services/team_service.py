@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import AppException
+from app.models.booking import ACTIVE_JOB_STATUSES, Booking
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.provider_team_invite import (
@@ -57,6 +58,8 @@ INVITE_CODE_UNAVAILABLE = "INVITE_CODE_UNAVAILABLE"
 ALREADY_PRO_ELSEWHERE = "ALREADY_PRO_ELSEWHERE"
 PRO_NOT_FOUND = "PRO_NOT_FOUND"
 CANNOT_REMOVE_SELF = "CANNOT_REMOVE_SELF"
+PRO_HAS_ACTIVE_JOB = "PRO_HAS_ACTIVE_JOB"
+USER_HAS_ACTIVE_JOBS = "USER_HAS_ACTIVE_JOBS"
 NO_TEAM_TO_DISPATCH = "NO_TEAM_TO_DISPATCH"
 
 
@@ -274,6 +277,13 @@ class TeamService:
         have another active Pro. Removing the last one switches the Pro-for-self
         back on in the same transaction, under the same row lock the switch
         takes, so a concurrent switch-off can't slip between the two.
+
+        A Pro holding a job in ``ACTIVE_JOB_STATUSES`` is refused (409
+        ``PRO_HAS_ACTIVE_JOB``, SVC-329): removal ends their access to the job,
+        and past ACCEPTED nobody could re-pick it. Lock order: this Pro FOR
+        UPDATE, then an unlocked read of bookings, then the Pro-for-self.
+        ``BookingService.assign`` locks the booking and then this Pro FOR SHARE,
+        so the two serialize on the Pro row; don't lock a booking in here.
         """
         pro = await self.db.scalar(
             select(Professional)
@@ -296,6 +306,17 @@ class TeamService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 code=CANNOT_REMOVE_SELF,
             )
+        active_job = await self.db.scalar(
+            select(Booking.id)
+            .where(Booking.professional_id == pro.id, Booking.status.in_(ACTIVE_JOB_STATUSES))
+            .limit(1)
+        )
+        if active_job is not None:
+            raise AppException(
+                f"{pro.display_name} is on a job. Reassign or finish it before removing them.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=PRO_HAS_ACTIVE_JOB,
+            )
         pro.is_active = False
         # A removed Pro must not look available to anything reading is_online.
         pro.is_online = False
@@ -315,6 +336,75 @@ class TeamService:
             "team.pro_removed pro_id=%s sp=%s self_reenabled=%s", pro.id, sp_id, self_reenabled
         )
         return self_reenabled
+
+    async def deactivate_user(self, user_id: uuid.UUID) -> User | None:
+        """Admin deactivation (SVC-329): ``users.is_active = false`` plus what
+        keeps it from stranding work. Returns the user, or ``None`` if unknown.
+
+        Refused first (409 ``USER_HAS_ACTIVE_JOBS``, ids in
+        ``details.booking_ids``) while the person holds a job: as the SP on a
+        booking, or as its Pro. Nothing is written then; the admin resolves
+        those (force-cancel, or the owner re-picks) and retries.
+
+        Otherwise the person goes offline everywhere and each team-Pro row they
+        hold is soft-removed through ``remove_pro``, so the other SP's SVC-326
+        invariant holds. Their own Pro-for-self and their own team are left
+        alone: eligibility already skips an inactive owner.
+
+        The user row is locked FOR UPDATE first, the lock ``accept_invite``
+        takes, so an accept can't add an active Pro row mid-way.
+        """
+        user = await self.db.scalar(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if user is None:
+            return None
+
+        rows = list(
+            (await self.db.execute(select(Professional).where(Professional.user_id == user_id)))
+            .scalars()
+            .all()
+        )
+        active_pro_ids = [row.id for row in rows if row.is_active]
+        held = Booking.provider_id == user_id
+        if active_pro_ids:
+            held = held | Booking.professional_id.in_(active_pro_ids)
+        job_ids = list(
+            (
+                await self.db.execute(
+                    select(Booking.id)
+                    .where(held, Booking.status.in_(ACTIVE_JOB_STATUSES))
+                    .order_by(Booking.created_at, Booking.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if job_ids:
+            raise AppException(
+                "This user is on active jobs. Resolve them before deactivating.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=USER_HAS_ACTIVE_JOBS,
+                details={"booking_ids": [str(i) for i in job_ids]},
+            )
+
+        user.is_active = False
+        profile = await self.db.scalar(
+            select(ProviderProfile).where(ProviderProfile.user_id == user_id)
+        )
+        if profile is not None:
+            profile.is_online = False
+        for row in rows:
+            row.is_online = False
+        await self.db.flush()
+        for row in rows:
+            if row.is_active and not row.is_self:
+                await self.remove_pro(row.service_provider_id, row.id)
+        logger.info("team.user_deactivated user=%s", user_id)
+        return user
 
     # ------------------------------------------------------------------
     # SP off tools (SVC-326)

@@ -32,13 +32,15 @@ from app.utils.geo import st_dwithin_column_radius
 def assignable_team_pro_exists():
     """EXISTS a team Pro of the outer query's SP who could take a job right now
     (SVC-326): not the Pro-for-self, still on the team, KYC-verified, online,
-    and not holding a booking in ``ACTIVE_JOB_STATUSES``.
+    their user account active (SVC-329), and not holding a booking in
+    ``ACTIVE_JOB_STATUSES``.
 
     The same tests ``/assign`` applies to a team Pro, and the busy test reads
     the same status tuple, so dispatch can't offer an SP a job that no one on
     its team could then be given. Correlated on ``ProviderProfile.user_id``.
     """
     pro = aliased(Professional)
+    pro_user = aliased(User)
     job = aliased(Booking)
     return exists().where(
         pro.service_provider_id == ProviderProfile.user_id,
@@ -46,6 +48,8 @@ def assignable_team_pro_exists():
         pro.is_active.is_(True),
         pro.kyc_status == KYCStatus.VERIFIED,
         pro.is_online.is_(True),
+        # A deactivated person can't log in to do the job (SVC-329).
+        exists().where(pro_user.id == pro.user_id, pro_user.is_active.is_(True)),
         ~exists().where(
             job.professional_id == pro.id,
             job.status.in_(ACTIVE_JOB_STATUSES),
@@ -82,6 +86,9 @@ def _base_conditions(address_location) -> list:
     return [
         ProviderProfile.is_online.is_(True),
         ProviderProfile.kyc_status == KYCStatus.VERIFIED,
+        # A deactivated owner can't log in to accept; their token may still be
+        # set, so is_online and fcm_token alone don't exclude them (SVC-329).
+        User.is_active.is_(True),
         User.fcm_token.is_not(None),
         st_dwithin_column_radius(
             ProviderProfile.service_area_center,
