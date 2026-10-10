@@ -14,12 +14,22 @@ class AppException(Exception):
     ``code`` is optional and, when set, is included in the JSON response body
     so the frontend can branch on a stable identifier instead of parsing the
     message. Existing subclasses that don't set one keep the same wire shape.
+
+    ``details`` is optional structured context, emitted as ``"details"`` only
+    when set (e.g. the booking ids behind ``USER_HAS_ACTIVE_JOBS``, SVC-329).
     """
 
-    def __init__(self, message: str, status_code: int = 400, code: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        code: str | None = None,
+        details: dict | None = None,
+    ):
         self.message = message
         self.status_code = status_code
         self.code = code
+        self.details = details
         super().__init__(message)
 
 
@@ -275,6 +285,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         }
         if exc.code is not None:
             content["code"] = exc.code
+        if exc.details is not None:
+            content["details"] = exc.details
         return JSONResponse(
             status_code=exc.status_code,
             content=content,

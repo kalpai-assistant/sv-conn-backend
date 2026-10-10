@@ -1010,12 +1010,19 @@ class BookingService:
     # ------------------------------------------------------------------
 
     async def _active_pros(self, sp_id: uuid.UUID) -> list[Professional]:
-        """The SP's active Pros, Pro-for-self first, then by join date."""
+        """The SP's active Pros, Pro-for-self first, then by join date.
+
+        A Pro whose user account is deactivated is left out (SVC-329): they
+        can't log in, so they can't be picked, and a decline doesn't wait for a
+        re-pick that only they could do.
+        """
         result = await self.db.execute(
             select(Professional)
+            .join(User, User.id == Professional.user_id)
             .where(
                 Professional.service_provider_id == sp_id,
                 Professional.is_active.is_(True),
+                User.is_active.is_(True),
             )
             .order_by((Professional.user_id != sp_id), Professional.created_at, Professional.id)
         )
@@ -1096,8 +1103,27 @@ class BookingService:
 
         holds_it = await self._check_claim(booking, sp_id)
 
-        pro = await self.db.get(Professional, professional_id)
-        if pro is None or pro.service_provider_id != sp_id or not pro.is_active:
+        # FOR SHARE on the Pro row (SVC-329): ``TeamService.remove_pro`` takes
+        # it FOR UPDATE before checking for active jobs, so an assign and a
+        # removal serialize and a removed Pro can't be handed a job. Lock
+        # order: booking, then Pro. Never lock a booking while holding a Pro
+        # row (remove_pro), or the two can deadlock.
+        pro = await self.db.scalar(
+            select(Professional)
+            .where(Professional.id == professional_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        pro_user_active = pro is not None and await self.db.scalar(
+            select(User.is_active).where(User.id == pro.user_id)
+        )
+        if (
+            pro is None
+            or pro.service_provider_id != sp_id
+            or not pro.is_active
+            # A deactivated person is as good as off the team (SVC-329).
+            or not pro_user_active
+        ):
             raise AppException(
                 "That professional isn't on your team.",
                 status_code=status.HTTP_404_NOT_FOUND,
