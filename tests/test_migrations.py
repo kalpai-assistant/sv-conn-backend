@@ -1,6 +1,6 @@
 """
 Migration round trips on a scratch database (SVC-319, SVC-339, SVC-340, SVC-320,
-SVC-344, SVC-333).
+SVC-344, SVC-333, SVC-329).
 
 The rest of the suite builds its schema with ``Base.metadata.create_all``, and CI
 only ever runs ``alembic upgrade head`` — so a migration's ``downgrade()`` is not
@@ -769,6 +769,62 @@ def test_svc_333_creates_the_event_table_and_downgrade_drops_it(scratch_db):
         _query(
             scratch_db,
             "SELECT 1 FROM information_schema.tables WHERE table_name = 'booking_assignment_events'",
+        )
+        == []
+    )
+
+
+# SVC-329 (admin_actions) and the revision it builds on (SVC-326).
+SVC_329 = "1866e2059674"
+BEFORE_SVC_329 = "b62ccfb038a4"
+
+
+def test_svc_329_creates_the_admin_actions_table_and_downgrade_drops_it(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_329)
+
+    _alembic(scratch_db, "upgrade", SVC_329)
+    shape = _shape(scratch_db, "admin_actions")
+    assert {n: nl for n, _, nl in shape["columns"]} == {
+        "id": False,
+        "admin_user_id": False,
+        "action": False,
+        "target_type": False,
+        "target_id": False,
+        "sp_user_id": True,
+        "to_sp_user_id": True,
+        "reason": True,
+        "details": False,
+        "created_at": False,
+    }
+    assert {(cols, table) for _, cols, table, _, _ in shape["foreign_keys"]} == {
+        (("admin_user_id",), "users"),
+        (("sp_user_id",), "users"),
+        (("to_sp_user_id",), "users"),
+    }
+    assert {(name, cols) for name, cols, *_ in shape["indexes"]} == {
+        ("ix_admin_actions_target", ("target_type", "target_id")),
+        ("ix_admin_actions_created_at", ("created_at",)),
+        ("ix_admin_actions_sp_user_id", ("sp_user_id",)),
+        ("ix_admin_actions_to_sp_user_id", ("to_sp_user_id",)),
+    }
+    checks = {
+        row["conname"]: row["def"]
+        for row in _query(
+            scratch_db,
+            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint "
+            "WHERE conname LIKE 'ck_admin_actions_%'",
+        )
+    }
+    for action in ("user_deactivated", "pro_force_removed", "pro_reassigned"):
+        assert f"'{action}'" in checks["ck_admin_actions_action"]
+    for target_type in ("user", "professional"):
+        assert f"'{target_type}'" in checks["ck_admin_actions_target_type"]
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_329)
+    assert (
+        _query(
+            scratch_db,
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'admin_actions'",
         )
         == []
     )

@@ -256,6 +256,45 @@ GET /providers/me/earnings?range=…&professional_id=<id>     → the existing w
 
 Built into the SP's existing earnings, not `GET /me/team` (the pick-a-Pro step calls that on every accept). Same IST calendar windows plus `all`, and the same definition of earned (`_earned_filter`: completed, not refunded, cash counts). A job belongs to `bookings.professional_id`, the Pro on it when it completed; the SP's own jobs are its Pro-for-self's. Every Pro of the SP is listed, removed ones (they keep their history) and zero-job ones included. Jobs that completed with **no** Pro (a Pro declined, then the SP drove it) are one `professional_id: null` "Not assigned" row, so the rows always add up to the SP's `/me/earnings` (windows) and `/me/earnings/summary` (`all`) totals: all three go through `ProviderService._earned_scope`, and a window buckets each booking once, at its first COMPLETED log row. Two statements regardless of team size. `professional_id` on `/me/earnings` must be one of the SP's Pros (removed included), else 404 `PRO_NOT_FOUND`; each earnings row also carries `professional: {id, display_name, is_self} | null`. The SP stays the payee; Pros are settled off-platform.
 
+### Admin team management (SVC-329)
+
+```
+GET  /admin/providers?q=&page=&per_page=      → owners: user_id, name, phone, business_name, kyc_status, is_online, user_is_active, active_pro_count
+GET  /admin/providers/{sp_user_id}/team       → every Pro row, removed included, + phone, user_is_active, active_job_count
+GET  /admin/providers/{sp_user_id}/invites    → invite history, every status, no code
+GET  /admin/pros/{professional_id}            → the Pro row + its owner
+POST /admin/pros/{professional_id}/force-remove { reason }                    → { professional_id, self_reenabled }
+POST /admin/pros/{professional_id}/reassign     { target_sp_user_id, reason } → { old_professional_id, professional, reactivated, self_reenabled }
+GET  /admin/actions?target_type=&target_id=&sp_user_id=&page=&per_page=       → the audit log, newest first
+```
+
+Admin role plus the `/admin/*` IP allowlist (`app/routers/admin_team.py`, `app/services/admin_team_service.py`). Paths follow the existing admin routes: owners by user id under `/admin/providers`, Pros by row id under `/admin/pros`.
+
+- **Reads**: search matches `q` (2+ chars) against phone (substring, with spaces/dashes/brackets dropped, so `98765…` finds `+9198765…`), name and business name, with ILIKE wildcards escaped; no `q` lists every owner. Search and team are one statement per page whatever the counts. An unknown owner is 404 `SP_NOT_FOUND`, and admin reads never create an SP. Invites go through `list_invites`, so the stale PENDING → EXPIRED flip is saved; the code is left out, since a pending one is a live credential.
+- **Force-remove**: `TeamService.remove_pro` on the owner's behalf, so it is the same soft remove with the same answers: 404 `PRO_NOT_FOUND` (missing or already removed), 400 `CANNOT_REMOVE_SELF`, 409 `PRO_HAS_ACTIVE_JOB`, and the SVC-326 `self_reenabled`. `reason` is required (3–500 chars).
+- **Reassign**: moves a person to another owner's team **by admin authority, with no invite or accept by either party** (mergers, support). The old row is removed through `remove_pro` (so 409 `PRO_HAS_ACTIVE_JOB` and the SVC-326 invariant apply). **KYC is never copied between owners (Option A)**: KYC lives on the row, so if the target already has an old row for this person it is reactivated with its own KYC (the `accept_invite` pattern), otherwise a new row starts `PENDING`. Either way it starts offline. Refused: 400 `CANNOT_REASSIGN_SELF` (a Pro-for-self), 400 `SAME_SERVICE_PROVIDER`, 404 `TARGET_SP_NOT_FOUND` (no provider profile), 409 `TARGET_SP_INACTIVE`, 409 `TARGET_SP_KYC_INCOMPLETE` (the invite gate: payouts settle to the target), 409 `USER_INACTIVE`, 409 `ALREADY_ON_TEAM`. Lock order: the person's user row FOR UPDATE (`accept_invite`'s lock), then the Pro row and the old owner's Pro-for-self inside `remove_pro`. Two admins moving the same Pro serialize; the second gets 404. Pending invites are left alone; a later accept meets the usual one-active-row checks.
+- **Deactivate** (`PATCH /admin/users/{id}/deactivate`, SVC-329 1/2): 409 `USER_HAS_ACTIVE_JOBS` with `details.booking_ids` while the person holds a job as owner or Pro; otherwise offline everywhere and each team-Pro row removed through `remove_pro`. Takes an optional `{ reason }` body. Deactivated users are also excluded from eligibility, `assignable_team_pro_exists`, the pick list and `/assign`.
+
+#### admin_actions
+
+```sql
+CREATE TABLE admin_actions (
+  id             UUID PRIMARY KEY,
+  admin_user_id  UUID NOT NULL REFERENCES users(id),
+  action         VARCHAR(40) NOT NULL  -- user_deactivated | pro_force_removed | pro_reassigned
+  target_type    VARCHAR(20) NOT NULL  -- user | professional
+  target_id      UUID NOT NULL,        -- no FK: either table
+  sp_user_id     UUID NULL REFERENCES users(id),
+  to_sp_user_id  UUID NULL REFERENCES users(id),
+  reason         TEXT NULL,
+  details        JSONB NOT NULL DEFAULT '{}',
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- ix (target_type, target_id), ix (created_at), ix (sp_user_id), ix (to_sp_user_id); CHECKs on action + target_type
+```
+
+One row per admin mutation, written by `record_admin_action` (the only writer) in the same transaction as the change; append-only. Target: the user for a deactivation, the Pro row for a force-remove, the *old* Pro row for a reassign (the new row id is in `details.to_professional_id`). `sp_user_id` is the owner affected (the owner a Pro was removed or moved from; for a deactivation, the user themself if they own an SP, else the owner whose team they left), and `to_sp_user_id` the owner a Pro was moved to. `?sp_user_id=` matches either column, so a move shows in both owners' histories.
+
 ## Booking state machine (updated)
 
 > **Naming:** `assigned` in this doc is `BookingStatus.ACCEPTED` in code. There is no separate `ASSIGNED` value; the "SP picked a Pro" step writes `ACCEPTED`.

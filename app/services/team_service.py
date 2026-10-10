@@ -337,9 +337,12 @@ class TeamService:
         )
         return self_reenabled
 
-    async def deactivate_user(self, user_id: uuid.UUID) -> User | None:
+    async def deactivate_user(
+        self, user_id: uuid.UUID
+    ) -> tuple[User, list[tuple[Professional, bool]]] | None:
         """Admin deactivation (SVC-329): ``users.is_active = false`` plus what
-        keeps it from stranding work. Returns the user, or ``None`` if unknown.
+        keeps it from stranding work. Returns the user and each team-Pro row it
+        removed with ``remove_pro``'s ``self_reenabled``, or ``None`` if unknown.
 
         Refused first (409 ``USER_HAS_ACTIVE_JOBS``, ids in
         ``details.booking_ids``) while the person holds a job: as the SP on a
@@ -400,11 +403,12 @@ class TeamService:
         for row in rows:
             row.is_online = False
         await self.db.flush()
+        removed = []
         for row in rows:
             if row.is_active and not row.is_self:
-                await self.remove_pro(row.service_provider_id, row.id)
+                removed.append((row, await self.remove_pro(row.service_provider_id, row.id)))
         logger.info("team.user_deactivated user=%s", user_id)
-        return user
+        return user, removed
 
     # ------------------------------------------------------------------
     # SP off tools (SVC-326)
