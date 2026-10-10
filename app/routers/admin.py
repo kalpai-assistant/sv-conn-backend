@@ -24,6 +24,7 @@ from app.models.payment import Payment
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.user import User
+from app.schemas.admin_team import DeactivateUserRequest
 from app.schemas.booking import (
     BookingListResponse,
     BookingResponse,
@@ -39,10 +40,10 @@ from app.schemas.provider import (
     ProKYCDocsResponse,
 )
 from app.schemas.user import UserResponse
+from app.services.admin_team_service import AdminTeamService
 from app.services.booking_service import BookingService
 from app.services.payout_service import PayoutService
 from app.services.provider_service import ProviderService
-from app.services.team_service import TeamService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -65,17 +66,23 @@ async def list_users(
     return list(result.scalars().all())
 
 
-@router.patch(
-    "/users/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT, dependencies=[_admin_dep]
-)
-async def deactivate_user(user_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Deactivate a user. An unknown id is a silent 204.
+@router.patch("/users/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT)
+async def deactivate_user(
+    user_id: UUID,
+    body: DeactivateUserRequest | None = None,
+    admin: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Deactivate a user. An unknown id is a silent 204. The body (an optional
+    ``reason`` for the audit log) may be left out entirely.
 
     SVC-329: 409 ``USER_HAS_ACTIVE_JOBS`` (ids in ``details.booking_ids``)
     while they hold a job, with nothing changed. Otherwise they also go offline
-    everywhere and are removed from any team they're a Pro on.
+    everywhere and are removed from any team they're a Pro on, and an
+    ``admin_actions`` row is written in the same transaction.
     """
-    if await TeamService(db).deactivate_user(user_id) is not None:
+    reason = body.reason if body is not None else None
+    if await AdminTeamService(db).deactivate_user(admin.id, user_id, reason):
         await db.commit()
 
 

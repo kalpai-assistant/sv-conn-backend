@@ -5,6 +5,7 @@ FK dependencies come first.
 """
 
 from app.models.address import Address  # noqa: F401
+from app.models.admin_action import AdminAction  # noqa: F401
 from app.models.app_version import AppPlatform, AppVersion  # noqa: F401
 from app.models.booking import (  # noqa: F401
     VALID_TRANSITIONS,
