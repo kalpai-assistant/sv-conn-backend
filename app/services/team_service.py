@@ -28,8 +28,13 @@ from app.models.provider_team_invite import (
     ProviderTeamInvite,
 )
 from app.models.user import User
+from app.schemas.team import ProfessionalResponse
 from app.services.provider_matching import assignable_team_pro_exists
-from app.services.provider_service import ProviderService, professional_display_name
+from app.services.provider_service import (
+    ProviderService,
+    effective_kyc_status,
+    professional_display_name,
+)
 from app.utils import sms_client
 
 logger = logging.getLogger(__name__)
@@ -45,6 +50,9 @@ INVITE_TTL = timedelta(days=7)
 # phone. Each collision is a ~1-in-10^6 event, so this is never exhausted in
 # practice; it only keeps the loop bounded.
 _CODE_ATTEMPTS = 5
+# How many blocking booking ids a PRO_HAS_ACTIVE_JOB 409 lists. A Pro holds
+# one job at a time in practice; this only bounds the response.
+_BLOCKING_IDS_SHOWN = 10
 
 # Stable codes the frontend can branch on (SVC-321 / SVC-322).
 INVITER_PAYOUT_KYC_INCOMPLETE = "INVITER_PAYOUT_KYC_INCOMPLETE"
@@ -249,11 +257,19 @@ class TeamService:
             await self.db.flush()
         return invites
 
-    async def list_team(self, sp_id: uuid.UUID) -> list[Professional]:
-        """Active Pros under this SP, Pro-for-self first, then by join date."""
+    async def list_team(self, sp_id: uuid.UUID) -> list[ProfessionalResponse]:
+        """Active Pros under this SP, Pro-for-self first, then by join date.
+
+        The Pro-for-self shows the SP's KYC (``effective_kyc_status``, SVC-329),
+        set on the response only: changing the ORM row would be flushed into
+        the self row, which deliberately isn't synced. The SP's KYC comes from
+        the profile read this already did, so the statement count is unchanged
+        and doesn't grow with the team; the pick-a-Pro step calls this on
+        every accept.
+        """
         # Creates the SP (and so its Pro-for-self) if this is a provider's first
         # call, like every other /providers/me read.
-        await ProviderService(self.db).get_or_create_profile(sp_id)
+        profile, _ = await ProviderService(self.db).get_or_create_profile(sp_id)
         result = await self.db.execute(
             select(Professional)
             .where(
@@ -262,7 +278,12 @@ class TeamService:
             )
             .order_by((Professional.user_id != sp_id), Professional.created_at, Professional.id)
         )
-        return list(result.scalars().all())
+        return [
+            ProfessionalResponse.model_validate(pro).model_copy(
+                update={"kyc_status": effective_kyc_status(pro, profile.kyc_status)}
+            )
+            for pro in result.scalars().all()
+        ]
 
     async def remove_pro(self, sp_id: uuid.UUID, pro_id: uuid.UUID) -> bool:
         """Soft-remove a Pro: ``is_active = false``. The row stays, since
@@ -306,16 +327,28 @@ class TeamService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 code=CANNOT_REMOVE_SELF,
             )
-        active_job = await self.db.scalar(
-            select(Booking.id)
-            .where(Booking.professional_id == pro.id, Booking.status.in_(ACTIVE_JOB_STATUSES))
-            .limit(1)
+        active_jobs = list(
+            (
+                await self.db.execute(
+                    select(Booking.id)
+                    .where(
+                        Booking.professional_id == pro.id,
+                        Booking.status.in_(ACTIVE_JOB_STATUSES),
+                    )
+                    .order_by(Booking.created_at, Booking.id)
+                    .limit(_BLOCKING_IDS_SHOWN)
+                )
+            )
+            .scalars()
+            .all()
         )
-        if active_job is not None:
+        if active_jobs:
             raise AppException(
                 f"{pro.display_name} is on a job. Reassign or finish it before removing them.",
                 status_code=status.HTTP_409_CONFLICT,
                 code=PRO_HAS_ACTIVE_JOB,
+                # Which job(s), so the UI can link straight to them (SVC-329).
+                details={"booking_ids": [str(i) for i in active_jobs]},
             )
         pro.is_active = False
         # A removed Pro must not look available to anything reading is_online.

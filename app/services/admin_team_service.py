@@ -30,7 +30,7 @@ from app.schemas.admin_team import (
     AdminProviderRow,
     AdminTeamPro,
 )
-from app.services.provider_service import professional_display_name
+from app.services.provider_service import effective_kyc_status, professional_display_name
 from app.services.team_service import ALREADY_ON_TEAM, PRO_NOT_FOUND, TeamService
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,12 @@ _PHONE_NOISE_RE = re.compile(r"[\s\-()]")
 def _escape_like(term: str) -> str:
     """Make ``%``, ``_`` and ``\\`` match themselves in an ILIKE pattern."""
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _sp_not_found() -> AppException:
+    return AppException(
+        "Service provider not found.", status_code=status.HTTP_404_NOT_FOUND, code=SP_NOT_FOUND
+    )
 
 
 def _pro_not_found() -> AppException:
@@ -94,16 +100,10 @@ class AdminTeamService:
     # Reads
     # ------------------------------------------------------------------
 
-    async def search_providers(
-        self, q: str | None, page: int, per_page: int
-    ) -> list[AdminProviderRow]:
-        """Owners, newest first, optionally matching ``q`` against phone, name
-        or business name. One statement per page, counts included.
-
-        Phones are stored as ``+91XXXXXXXXXX`` and matched as a substring with
-        spaces, dashes and brackets dropped, so ``98765``, ``9876543210`` and
-        ``+91 98765 43210`` all find ``+919876543210``.
-        """
+    @staticmethod
+    def _provider_rows_stmt() -> Select:
+        """Owners with their profile and active team size: the one statement
+        behind search and the owner detail, so the two rows can't drift."""
         team_size = (
             select(
                 Professional.service_provider_id.label("sp_id"),
@@ -116,11 +116,37 @@ class AdminTeamService:
             .group_by(Professional.service_provider_id)
             .subquery()
         )
-        stmt = (
+        return (
             select(User, ProviderProfile, func.coalesce(team_size.c.n, 0))
             .join(ProviderProfile, ProviderProfile.user_id == User.id)
             .outerjoin(team_size, team_size.c.sp_id == User.id)
         )
+
+    @staticmethod
+    def _provider_row(user: User, profile: ProviderProfile, count: int) -> AdminProviderRow:
+        return AdminProviderRow(
+            user_id=user.id,
+            name=user.name,
+            phone=user.phone,
+            business_name=profile.business_name,
+            kyc_status=profile.kyc_status,
+            is_online=profile.is_online,
+            user_is_active=user.is_active,
+            active_pro_count=count,
+            created_at=user.created_at,
+        )
+
+    async def search_providers(
+        self, q: str | None, page: int, per_page: int
+    ) -> list[AdminProviderRow]:
+        """Owners, newest first, optionally matching ``q`` against phone, name
+        or business name. One statement per page, counts included.
+
+        Phones are stored as ``+91XXXXXXXXXX`` and matched as a substring with
+        spaces, dashes and brackets dropped, so ``98765``, ``9876543210`` and
+        ``+91 98765 43210`` all find ``+919876543210``.
+        """
+        stmt = self._provider_rows_stmt()
         term = (q or "").strip()
         if term:
             text_pattern = f"%{_escape_like(term)}%"
@@ -137,20 +163,16 @@ class AdminTeamService:
             .offset((page - 1) * per_page)
             .limit(per_page)
         )
-        return [
-            AdminProviderRow(
-                user_id=user.id,
-                name=user.name,
-                phone=user.phone,
-                business_name=profile.business_name,
-                kyc_status=profile.kyc_status,
-                is_online=profile.is_online,
-                user_is_active=user.is_active,
-                active_pro_count=count,
-                created_at=user.created_at,
-            )
-            for user, profile, count in (await self.db.execute(stmt)).all()
-        ]
+        return [self._provider_row(*row) for row in (await self.db.execute(stmt)).all()]
+
+    async def provider(self, sp_user_id: uuid.UUID) -> AdminProviderRow:
+        """One owner, the same row the search returns. 404 ``SP_NOT_FOUND``."""
+        row = (
+            await self.db.execute(self._provider_rows_stmt().where(User.id == sp_user_id))
+        ).first()
+        if row is None:
+            raise _sp_not_found()
+        return self._provider_row(*row)
 
     async def _require_owner(self, sp_user_id: uuid.UUID) -> ProviderProfile:
         # A plain read: unlike /providers/me, admin must never create an SP.
@@ -158,11 +180,7 @@ class AdminTeamService:
             select(ProviderProfile).where(ProviderProfile.user_id == sp_user_id)
         )
         if profile is None:
-            raise AppException(
-                "Service provider not found.",
-                status_code=status.HTTP_404_NOT_FOUND,
-                code=SP_NOT_FOUND,
-            )
+            raise _sp_not_found()
         return profile
 
     def _team_rows_stmt(self) -> Select:
@@ -178,13 +196,27 @@ class AdminTeamService:
             .subquery()
         )
         return (
-            select(Professional, User.phone, User.is_active, func.coalesce(jobs.c.n, 0))
+            select(
+                Professional,
+                User.phone,
+                User.is_active,
+                func.coalesce(jobs.c.n, 0),
+                # The owner's KYC, which a Pro-for-self shows (SVC-329).
+                ProviderProfile.kyc_status,
+            )
             .join(User, User.id == Professional.user_id)
             .outerjoin(jobs, jobs.c.pro_id == Professional.id)
+            .outerjoin(ProviderProfile, ProviderProfile.user_id == Professional.service_provider_id)
         )
 
     @staticmethod
-    def _team_pro(pro: Professional, phone: str, user_active: bool, jobs: int) -> AdminTeamPro:
+    def _team_pro(
+        pro: Professional,
+        phone: str,
+        user_active: bool,
+        jobs: int,
+        sp_kyc_status: KYCStatus | None,
+    ) -> AdminTeamPro:
         return AdminTeamPro(
             id=pro.id,
             service_provider_id=pro.service_provider_id,
@@ -193,7 +225,7 @@ class AdminTeamService:
             phone=phone,
             user_is_active=user_active,
             profile_photo_url=pro.profile_photo_url,
-            kyc_status=pro.kyc_status,
+            kyc_status=effective_kyc_status(pro, sp_kyc_status),
             is_online=pro.is_online,
             is_active=pro.is_active,
             is_self=pro.is_self,

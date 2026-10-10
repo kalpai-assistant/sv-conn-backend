@@ -53,6 +53,17 @@ async def search_providers(
 
 
 @router.get(
+    "/providers/{sp_user_id}",
+    response_model=AdminProviderRow,
+    dependencies=[_admin_dep],
+)
+async def get_provider(sp_user_id: UUID, db: AsyncSession = Depends(get_db)):
+    """One owner: the same row the search returns, for the owner page header.
+    404 ``SP_NOT_FOUND`` for an unknown id or a user who isn't an owner."""
+    return await AdminTeamService(db).provider(sp_user_id)
+
+
+@router.get(
     "/providers/{sp_user_id}/team",
     response_model=list[AdminTeamPro],
     dependencies=[_admin_dep],

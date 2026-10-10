@@ -21,7 +21,7 @@ from app.models.booking import Booking, BookingStatus
 from app.models.professional import Professional
 from app.models.provider_profile import ProviderProfile
 from app.services.booking_service import BookingService
-from app.services.provider_service import ProviderService
+from app.services.provider_service import ProviderService, effective_kyc_status
 from app.utils.geo import build_point_wkt
 
 NOT_A_PRO = "NOT_A_PRO"
@@ -59,7 +59,7 @@ class ProService:
         sp = await self.db.scalar(
             select(ProviderProfile).where(ProviderProfile.user_id == pro.service_provider_id)
         )
-        kyc_status = sp.kyc_status if pro.is_self and sp is not None else pro.kyc_status
+        kyc_status = effective_kyc_status(pro, sp.kyc_status if sp is not None else None)
         return {
             "id": pro.id,
             "user_id": pro.user_id,
