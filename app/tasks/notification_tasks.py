@@ -589,6 +589,11 @@ def send_booking_notification(
                 recipients = [pro.user] if pro is not None else []
             elif event in ("job_cancelled", "unassigned"):
                 recipients = []
+                if event == "unassigned" and professional_id is None:
+                    # The booking's current Pro is the one who *got* the job,
+                    # or nobody: never a stand-in for the one who lost it.
+                    logger.warning("push.unassigned_without_pro booking_id=%s", booking_id)
+                    return
                 team_pro = _team_pro_user(db, professional_id or booking.professional_id)
                 if team_pro is not None:
                     pro_pushes.append((team_pro, event))

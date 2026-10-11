@@ -188,6 +188,15 @@ async def test_unassigned_goes_to_the_pro_it_names_not_the_current_one(db_sessio
 
 
 @pytest.mark.asyncio
+async def test_unassigned_without_a_named_pro_sends_nothing(db_session, committed, caplog):
+    """Never falls back to the booking's Pro: after a re-pick that's the new one."""
+    booking, _, _ = await _job(db_session, committed, brand="Sparkle", team=True)
+
+    assert _sent(booking.id, "unassigned") == []
+    assert "push.unassigned_without_pro" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_unassigned_never_goes_to_the_pro_for_self(db_session, committed):
     booking, _, _ = await _job(db_session, committed, brand="Sparkle", team=False)
 
