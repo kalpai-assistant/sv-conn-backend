@@ -768,34 +768,73 @@
   <h3><span class="planned-badge">PROPOSAL — UNDECIDED, CONFLICTS WITH SHIPPED</span> SVC-354 · Tushar · To Do (Vipul's proposal)</h3>
   <div class="flex gap-8 items-start flex-wrap">
     <div>
-      <p class="frame-title">6G · <code>/invite</code> with provider-flavoured sign-in</p>
-      <div class="phone planned" style="height: 420px;">
-        <div class="phone-body p-4 text-sm text-gray-500">Provider-style sign-in on the invite page. Layout and copy <span class="tbd">TBD in ticket</span></div>
+      <p class="frame-title">6G · <code>/invite</code>, signed out</p>
+      <div class="phone planned" style="height: 520px;">
+        <div class="phone-body p-6">
+          <div class="text-xl font-semibold">Join as a service provider</div>
+          <div class="mt-6 text-xs uppercase font-semibold text-gray-500">Phone number</div>
+          <div class="mt-1 flex gap-2"><div class="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-50">+91</div><div class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-400">98765 43210</div></div>
+          <button class="w-full mt-4 bg-purple-600 text-white rounded-lg py-2.5 font-semibold">Continue <span class="tbd">TBD in ticket</span></button>
+          <div class="mt-4 text-center text-sm text-gray-500 underline">Consumer-switch link (stays visible)</div>
+        </div>
       </div>
+      <p class="caption">The shared sign-in (<code>AuthFlow</code>) opened with <code>initialRole='provider'</code>, under the heading "Join as a service provider". Signed in, <code>/invite</code> shows the 6-digit code step (as 2D).</p>
     </div>
     <div>
-      <p class="frame-title">6H · <code>/pros</code> routes</p>
-      <div class="phone planned" style="height: 420px;">
-        <div class="phone-body p-4 text-sm text-gray-500">The Pro surface under <code>/pros/…</code>. Screens <span class="tbd">TBD in ticket</span></div>
+      <p class="frame-title">6H · <code>/invite</code> code step — errors and success</p>
+      <div class="phone planned" style="height: 520px;">
+        <div class="phone-body p-4 space-y-3 text-sm">
+          <div class="flex justify-center gap-1.5"><div class="otp-box">4</div><div class="otp-box">8</div><div class="otp-box">2</div><div class="otp-box">9</div><div class="otp-box">1</div><div class="otp-box">7</div></div>
+          <div class="rounded-lg bg-red-50 p-3 text-red-700"><span class="font-mono text-xs">404</span> This invite isn't for you. Check with your Service Provider.</div>
+          <div class="rounded-lg bg-red-50 p-3 text-red-700"><span class="font-mono text-xs">403 INVITER_PAYOUT_KYC_INCOMPLETE</span><br>Your Service Provider needs to complete KYC first.</div>
+          <div class="rounded-lg bg-red-50 p-3 text-red-700"><span class="font-mono text-xs">429</span> Too many attempts. Try again in a few minutes.</div>
+          <div class="rounded-lg bg-gray-900 text-white p-3">Toast: You're now part of Sparkle Cleaners</div>
+        </div>
       </div>
+      <p class="caption">Error copy per status, as the ticket lists it. On success the toast is followed by the Pro home.</p>
     </div>
     <div>
-      <p class="frame-title">6I · Customer-home banner</p>
-      <div class="phone planned" style="height: 420px;">
+      <p class="frame-title">6I · <code>/pros</code> — "Jobs for me"</p>
+      <div class="phone planned" style="height: 520px;">
+        <div class="phone-header"><div class="font-semibold">Jobs for me</div></div>
+        <div class="phone-body p-4 space-y-2 text-sm">
+          <div class="border border-gray-200 rounded-xl p-3"><div class="flex justify-between"><span class="font-medium">Bathroom deep cleaning</span><span class="tag badge-primary">assigned</span></div><div class="text-xs text-gray-500 mt-1">Aundh, Pune · Meera</div></div>
+          <div class="border border-gray-200 rounded-xl p-3"><div class="flex justify-between"><span class="font-medium">Kitchen cleaning</span><span class="tag badge-warning">en_route</span></div><div class="text-xs text-gray-500 mt-1">Baner, Pune · Arjun</div></div>
+        </div>
+      </div>
+      <p class="caption">List rows: service, address, the customer's first name, status. Each opens <code>/pros/jobs/$id</code>, whose actions follow the status: assigned → "Set off" + "Decline"; en_route → doorstep OTP → "Start"; in_progress → "Complete". Layout <span class="tbd">TBD in ticket</span>.</p>
+    </div>
+    <div>
+      <p class="frame-title">6J · <code>/pros/profile</code></p>
+      <div class="phone planned" style="height: 520px;">
+        <div class="phone-body p-4 text-sm">
+          <div class="border border-gray-200 rounded-xl p-4"><div class="text-xs text-gray-500">You're with</div><div class="font-semibold">Sparkle Cleaners</div></div>
+          <div class="mt-3 border border-dashed border-gray-300 rounded-xl p-3 flex items-center justify-between text-gray-500"><span>Self-off toggle (only if the backend supports it)</span><div class="switch"></div></div>
+        </div>
+      </div>
+      <p class="caption">Which SP the Pro is with, plus the self-off toggle only if the backend supports it. Copy <span class="tbd">TBD in ticket</span>.</p>
+    </div>
+    <div>
+      <p class="frame-title">6K · Post-login: customer home banner</p>
+      <div class="phone planned" style="height: 520px;">
         <div class="phone-body p-4">
-          <div class="border border-purple-200 bg-purple-50 rounded-xl p-3 text-sm">You also work with Sparkle Cleaners. <span class="text-purple-600 font-medium">Open worker view →</span></div>
+          <div class="border border-purple-200 bg-purple-50 rounded-xl p-3 text-sm flex gap-2"><span class="flex-1">You also work with Sparkle Cleaners. <span class="text-purple-600 font-medium">Open worker view →</span></span><span class="text-gray-400">✕</span></div>
           <div class="mt-3 text-xs text-gray-400">Rest of customer home</div>
         </div>
       </div>
+      <p class="caption">Post-login matrix: a customer with a Pro row who logs in from <code>/</code> lands on customer home with this dismissible banner. Entering from <code>/invite</code> goes straight to <code>/pros</code>.</p>
     </div>
   </div>
+  <p class="caption" style="max-width: 820px;">6G–6K follow the SVC-354 ticket text as read from Jira by the tracking session on 2026-10-11. Example names are illustrative.</p>
   <div class="history mt-4">
-    <strong>Conflicts with what shipped</strong> (to settle before any of 6G–6I is built):
+    <strong>Conflicts with what shipped</strong> (to settle before any of 6G–6K is built):
     <ul class="list-disc ml-5 mt-2 space-y-1">
       <li>Shipped <code>/invite</code> is customer-only. A provider account can't join a team: its own Pro-for-self counts, so accept-invite answers 400 <code>ALREADY_PRO_ELSEWHERE</code>.</li>
       <li>A Pro <em>lands</em> on <code>/pro</code> once per sign-in (2A), rather than seeing a banner on customer home.</li>
       <li>The shipped route is <code>/pro</code>, not <code>/pros</code> (the backend API is <code>/pros/me/*</code>).</li>
-      <li>The Pro KYC screen (<code>/pro/kyc</code>) exists because a team Pro can't be assigned until their own KYC is verified (<code>/assign</code> answers 409 <code>PRO_KYC_INCOMPLETE</code>); a proposal without it leaves team Pros unassignable.</li>
+      <li>The Pro KYC screen (<code>/pro/kyc</code>) exists because a team Pro can't be assigned until their own KYC is verified (<code>/assign</code> answers 409 <code>PRO_KYC_INCOMPLETE</code>, backend #196, 4ee8c10); a proposal without it leaves team Pros unassignable.</li>
+      <li>Shipped accept-invite has no 403 <code>INVITER_PAYOUT_KYC_INCOMPLETE</code>: that check runs when the SP <em>creates</em> the invite (3B), so a code is never issued by an unverified SP.</li>
+      <li>The shipped "I take jobs myself" switch (SVC-326) belongs to the SP, on My Team (3A). It isn't a toggle a team Pro has.</li>
     </ul>
   </div>
 
