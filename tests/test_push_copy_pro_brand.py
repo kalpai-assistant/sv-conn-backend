@@ -294,6 +294,8 @@ async def test_the_pro_declined_push_to_the_sp_is_unchanged(db_session, committe
 async def test_the_cancelled_push_is_unchanged(db_session, committed):
     booking, sp, _ = await _job(db_session, committed, brand="Sparkle Cleaners", team=True)
 
+    # The team Pro's own push is SVC-348's (test_pro_loss_push.py).
     assert _pushes(booking.id, "cancelled", actor_id=str(sp.id)) == [
-        ("consumer-token", "Booking Cancelled", NOTIFICATION_TEMPLATES["cancelled"]["body"])
+        ("consumer-token", "Booking Cancelled", NOTIFICATION_TEMPLATES["cancelled"]["body"]),
+        ("pro-token", "Job cancelled", NOTIFICATION_TEMPLATES["job_cancelled"]["body"]),
     ]

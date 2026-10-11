@@ -226,13 +226,14 @@ async def test_cancelling_before_anyone_accepts_pushes_to_nobody(
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_actor_still_reaches_the_provider(
+async def test_a_third_party_actor_reaches_both_parties(
     client, auth_headers, db_session, committed
 ):
-    """Defensive: a missing/garbled actor must not silence the notification.
+    """An actor who is neither party (an admin force-cancel) tells both (SVC-348).
 
-    The provider is the higher-cost party to leave uninformed — they may be
-    travelling — so an ambiguous actor falls that way rather than to nobody.
+    Before, this fell to the provider only, so a consumer whose booking support
+    cancelled heard nothing. The provider must still be told: they may be
+    travelling.
     """
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
@@ -251,7 +252,7 @@ async def test_an_unknown_actor_still_reaches_the_provider(
 
     tokens = _tokens_pushed_to(booking.id, "cancelled", str(uuid.uuid4()))
 
-    assert tokens == ["provider-token"]
+    assert tokens == ["consumer-token", "provider-token"]
 
 
 # ---------------------------------------------------------------------------

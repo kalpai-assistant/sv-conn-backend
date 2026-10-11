@@ -18,6 +18,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.config import get_settings
+from app.database import call_after_commit
 from app.exceptions import (
     AppException,
     BookingNotFound,
@@ -1919,6 +1920,11 @@ class BookingService:
         change it describes: an assign that fails afterwards leaves no row.
         Callers record only an actual change, never a same-Pro re-assign.
         ``actor_id`` None means the system.
+
+        Being the one writer also makes it the one place to tell a team Pro the
+        job was taken off them (SVC-348): re-picked, released, or given back.
+        Not a Pro who declined it themselves, and not the Pro-for-self, whose
+        SP did it. The push is enqueued only once this commits.
         """
         self.db.add(
             BookingAssignmentEvent(
@@ -1930,6 +1936,21 @@ class BookingService:
                 note=note,
             )
         )
+        if from_pro_id is None:
+            return
+        from_pro = await self.db.get(Professional, from_pro_id)
+        if from_pro is None or from_pro.is_self or from_pro.user_id == actor_id:
+            return
+        booking_id, pro_id = str(booking.id), str(from_pro_id)
+
+        def _push() -> None:
+            from app.tasks.notification_tasks import send_booking_notification
+
+            send_booking_notification.delay(
+                booking_id=booking_id, event="unassigned", professional_id=pro_id
+            )
+
+        call_after_commit(self.db, _push)
 
     async def _increment_completed_jobs(self, provider_user_id: uuid.UUID) -> None:
         """Atomically increment total_completed_jobs on the provider's profile."""

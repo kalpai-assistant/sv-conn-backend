@@ -120,6 +120,19 @@ NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
         "title": "Finding another professional",
         "body": "Your professional can't make it. We're finding you someone else.",
     },
+    # SVC-348: to a team Pro whose job is gone, so they don't travel to it.
+    # Never to the Pro-for-self: the SP already gets, or caused, its own push.
+    # "job_cancelled" rides along with "cancelled"; "unassigned" is enqueued by
+    # BookingService.record_assignment when the SP re-picks, releases or gives
+    # the job back.
+    "job_cancelled": {
+        "title": "Job cancelled",
+        "body": "This job has been cancelled. Please don't travel to it.",
+    },
+    "unassigned": {
+        "title": "Job removed",
+        "body": "This job is no longer assigned to you. Please don't travel to it.",
+    },
     # SVC-344: the system cancelled a PAID booking nobody took, refunding it in
     # full. Two cases; NO_TAKER_AFTER_ACCEPT_TEMPLATE below is the other one.
     # {amount} is pre-formatted with the ₹ sign (_format_rupees).
@@ -323,6 +336,23 @@ def _assigned_pro_who_parts(db, booking) -> tuple | None:
     return (row.display_name, row.business_name, row.user_id == row.service_provider_id)
 
 
+def _team_pro_user(db, professional_id):
+    """The user behind a team Pro, or None for no Pro or the Pro-for-self (SVC-348).
+
+    The Pro-for-self is the SP's own user, who hears about the job as the SP.
+    Pushing them as the Pro too would send the same news twice.
+    """
+    if professional_id is None:
+        return None
+
+    from app.models.professional import Professional
+
+    pro = db.get(Professional, professional_id)
+    if pro is None or pro.is_self:
+        return None
+    return pro.user
+
+
 def _expire_unbroadcastable(db, booking, reason: str) -> None:
     """Terminate a booking the broadcast can never reach (SVC-278 issue 5).
 
@@ -381,13 +411,22 @@ def notify_reopened(booking_id) -> None:
     default_retry_delay=5,
     name="app.tasks.notification_tasks.send_booking_notification",
 )
-def send_booking_notification(self, booking_id: str, event: str, actor_id: str | None = None):
+def send_booking_notification(
+    self,
+    booking_id: str,
+    event: str,
+    actor_id: str | None = None,
+    professional_id: str | None = None,
+):
     """Send push notification for booking lifecycle events.
 
     ``actor_id`` is who caused the event, and only ``cancelled`` needs it:
     either party can cancel, so the recipient is "the other one". Optional so
     the events with a fixed direction (a provider accepts, a consumer is told)
     keep calling this unchanged.
+
+    ``professional_id`` is for ``unassigned`` (SVC-348): the Pro the job was
+    taken off, since by now the booking points at someone else or no one.
     """
     from app.database import SyncSessionLocal
     from app.models.booking import Booking
@@ -403,6 +442,9 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                 return
 
             body = template["body"]
+            # (user, event) pushes in a Pro-facing template of their own,
+            # sent after the main recipients (SVC-348).
+            pro_pushes: list[tuple] = []
 
             if event == "new_request":
                 from sqlalchemy.orm import selectinload
@@ -522,11 +564,20 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                 # before acceptance has nobody to notify. That is correct, not
                 # a gap: no provider has committed to the job yet. The
                 # `if recipient` guard below already handles it.
-                recipients = (
-                    [booking.consumer]
-                    if actor_id and str(booking.provider_id) == actor_id
-                    else [booking.provider]
-                )
+                #
+                # An admin force-cancel (SVC-299) is neither party, so both
+                # are told (SVC-348); before, only the provider was.
+                if actor_id and str(booking.provider_id) == actor_id:
+                    recipients = [booking.consumer]
+                elif actor_id and str(booking.consumer_id) != actor_id:
+                    recipients = [booking.consumer, booking.provider]
+                else:
+                    recipients = [booking.provider]
+                # SVC-348: the team Pro on the job hears it too, in their own
+                # words. The cancel leaves professional_id in place.
+                team_pro = _team_pro_user(db, booking.professional_id)
+                if team_pro is not None:
+                    pro_pushes.append((team_pro, "job_cancelled"))
             elif event == "assigned":
                 from app.models.professional import Professional
 
@@ -536,6 +587,16 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                     else None
                 )
                 recipients = [pro.user] if pro is not None else []
+            elif event in ("job_cancelled", "unassigned"):
+                recipients = []
+                if event == "unassigned" and professional_id is None:
+                    # The booking's current Pro is the one who *got* the job,
+                    # or nobody: never a stand-in for the one who lost it.
+                    logger.warning("push.unassigned_without_pro booking_id=%s", booking_id)
+                    return
+                team_pro = _team_pro_user(db, professional_id or booking.professional_id)
+                if team_pro is not None:
+                    pro_pushes.append((team_pro, event))
             elif event == "pro_declined":
                 from sqlalchemy import select as sync_select
 
@@ -574,25 +635,35 @@ def send_booking_notification(self, booking_id: str, event: str, actor_id: str |
                 if "body_named" in template:
                     body = build_consumer_body(template, _assigned_pro_who_parts(db, booking))
 
-            for recipient in recipients:
+            sends = [(recipient, event, template["title"], body) for recipient in recipients]
+            sends += [
+                (
+                    user,
+                    pro_event,
+                    NOTIFICATION_TEMPLATES[pro_event]["title"],
+                    NOTIFICATION_TEMPLATES[pro_event]["body"],
+                )
+                for user, pro_event in pro_pushes
+            ]
+            for recipient, push_event, title, push_body in sends:
                 if not (recipient and getattr(recipient, "fcm_token", None)):
                     continue
                 try:
                     send_push_notification(
                         token=recipient.fcm_token,
-                        title=template["title"],
-                        body=body,
+                        title=title,
+                        body=push_body,
                         # Only the job request gets its own channel. Giving
                         # every event one would leave a provider with a wall of
                         # equally urgent sounds and nothing distinguishing the
                         # one that pays them.
                         android_channel_id=(
-                            JOB_REQUEST_CHANNEL_ID if event == "new_request" else None
+                            JOB_REQUEST_CHANNEL_ID if push_event == "new_request" else None
                         ),
                         # Payload stays a bare pointer — the card fetches its data
                         # from the offer endpoint, which can revoke access once the
                         # booking is claimed. A push cannot be taken back.
-                        data={"booking_id": booking_id, "event": event},
+                        data={"booking_id": booking_id, "event": push_event},
                     )
                 except _DEAD_TOKEN_ERRORS as dead:
                     # SVC-301: FCM has confirmed this token can never succeed.

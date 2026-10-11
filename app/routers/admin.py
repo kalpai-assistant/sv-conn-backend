@@ -459,17 +459,17 @@ async def force_cancel_booking(
 
     ``booking_status_logs`` gets a row with ``changed_by=admin.id`` and the
     reason in the ``note`` column; ``booking.cancellation_reason`` is stamped
-    with the same string. The other party gets the standard cancelled push
-    (SVC-278) with the admin as actor so the notification tone matches
+    with the same string. Both parties get the standard cancelled push
+    (SVC-278, SVC-348) with the admin as actor so the notification tone matches
     consumer-initiated cancels — the customer/provider hears "your booking
     was cancelled", not the internal detail that support did it.
     """
     booking = await BookingService(db).force_cancel(
         booking_id=booking_id, admin_id=admin.id, reason=body.reason
     )
-    # Mirror the consumer-cancel push. Both consumer and provider need to know,
-    # and passing the admin's id keeps the notification worker's actor→recipient
-    # routing coherent: whoever the admin is not is who gets pushed. Import here
+    # Mirror the consumer-cancel push. Both consumer and provider need to know:
+    # the admin's id is neither party's, so the worker pushes both (SVC-348),
+    # plus a team Pro on the job. Import here
     # rather than at module top for the same reason ``pay_out_provider`` does —
     # keeps FastAPI cold start off the Celery broker path.
     from app.tasks.notification_tasks import send_booking_notification
