@@ -38,6 +38,10 @@
   .history { background: #fafafa; border: 1px dashed #d4d4d8; border-radius: 12px; padding: 12px 16px; color: #52525b; font-size: 13px; line-height: 1.5; max-width: 820px; }
   .history strong { color: #18181b; }
   .key { background: #fff; border: 1px solid #e4e4e7; border-radius: 12px; padding: 12px 16px; font-size: 13px; line-height: 1.6; color: #3f3f46; max-width: 820px; }
+  .phone.planned { border: 4px dashed #a1a1aa; height: 600px; box-shadow: none; }
+  .planned-badge { display: inline-block; padding: 2px 8px; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; border-radius: 4px; background: #fef3c7; color: #92400e; border: 1px dashed #d97706; }
+  .tbd { display: inline-block; padding: 1px 6px; font-size: 10px; border-radius: 4px; background: #f4f4f5; color: #71717a; border: 1px dashed #a1a1aa; font-style: italic; }
+  .planned-zone { border: 2px dashed #d4d4d8; border-radius: 16px; padding: 8px 24px 24px; margin-top: 48px; background: #fcfcfc; }
   h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
   h2 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin-top: 48px; margin-bottom: 12px; color: #18181b; }
   h3 { font-size: 14px; font-weight: 600; color: #71717a; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 32px; margin-bottom: 12px; }
@@ -648,6 +652,207 @@
       <p class="caption">The Pro shell's own nav. No Earnings: a team Pro's pay goes to their SP. The avatar opens the customer Profile, which has "Open Pro app" to come back.</p>
     </div>
 
+  </div>
+
+  <!-- =========================================================== -->
+  <div class="planned-zone">
+  <h2><span class="planned-badge">PLANNED</span> 6. Not built yet — open tickets (Tushar, Vipul)</h2>
+  <p class="caption" style="max-width: 820px;">Everything in this section is <strong>planned, not shipped</strong>. Each frame carries its ticket, owner and Jira status as of 2026-10-11. Frames draw only what the ticket text specifies; anything the ticket leaves open is marked <span class="tbd">TBD in ticket</span>. Dashed phones = planned.</p>
+  <div class="flex gap-8 items-start flex-wrap mt-4">
+
+    <!-- P1: SVC-355 admin profile -->
+    <div>
+      <p class="frame-title"><span class="planned-badge">PLANNED</span> SVC-355 · Tushar · To Do<br>6A · <code>/admin/profile</code></p>
+      <div class="phone planned">
+        <div class="phone-header flex items-center gap-3">
+          <span class="text-gray-500 text-sm">‹</span>
+          <div class="font-semibold">Profile</div>
+        </div>
+        <div class="phone-body p-4">
+          <div class="border border-gray-200 rounded-xl p-4">
+            <div class="font-semibold">Admin name</div>
+            <div class="text-sm text-gray-500">+91 phone</div>
+            <span class="tag badge-primary mt-2">Admin</span>
+          </div>
+          <button class="w-full mt-6 border border-red-300 text-red-600 rounded-lg py-2.5 font-medium">Log out</button>
+          <div class="mt-4 text-xs text-gray-500">Layout, copy <span class="tbd">TBD in ticket</span></div>
+        </div>
+      </div>
+      <p class="caption">Name, phone, an "Admin" badge, and Log out, which moves here off the admin menu. The menu gains a "Profile" entry.</p>
+    </div>
+
+    <!-- P1b: SVC-355 phone-width cards -->
+    <div>
+      <p class="frame-title"><span class="planned-badge">PLANNED</span> SVC-355 · Tushar · To Do<br>6B · Admin cards at phone width</p>
+      <div class="phone planned">
+        <div class="phone-body p-4 space-y-4">
+          <div>
+            <div class="text-xs uppercase font-semibold text-gray-500 mb-1">Bookings row → card</div>
+            <div class="border border-gray-200 rounded-xl p-3 text-sm">
+              <div class="flex justify-between"><span class="font-mono font-medium">#a2b3c4</span><span class="tag badge-muted">status</span></div>
+              <div class="text-xs text-gray-500 mt-1">service · consumer phone · total · time</div>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs uppercase font-semibold text-gray-500 mb-1">Team member card</div>
+            <div class="border border-gray-200 rounded-xl p-3 text-sm">
+              <div class="flex items-center gap-2"><span class="font-medium">Name</span><span class="tag badge-muted">badge</span></div>
+              <div class="text-xs text-gray-500 mt-1">phone · KYC · Online · active jobs</div>
+              <button class="w-full mt-3 border border-gray-300 rounded-lg py-2 text-sm font-medium">Reassign</button>
+              <button class="w-full mt-2 border border-red-300 text-red-600 rounded-lg py-2 text-sm font-medium">Force-remove</button>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs uppercase font-semibold text-gray-500 mb-1">Owner search card</div>
+            <div class="border border-gray-200 rounded-xl p-3 text-sm text-gray-500">Fields <span class="tbd">TBD in ticket</span></div>
+          </div>
+        </div>
+      </div>
+      <p class="caption">The SVC-329 admin tables re-laid as cards for a phone. Card contents as listed in the ticket; badge names, spacing and the owner card's fields are open.</p>
+    </div>
+
+    <!-- P2: SVC-346 dashboard -->
+    <div>
+      <p class="frame-title"><span class="planned-badge">PLANNED</span> SVC-346 · Vipul · To Do (FE PR #186 open)<br>6C · <code>/admin</code> dashboard</p>
+      <div class="phone planned">
+        <div class="phone-header"><div class="font-semibold">Admin</div></div>
+        <div class="phone-body p-4 space-y-3">
+          <div class="border border-gray-200 rounded-xl p-4 flex justify-between items-center"><div><div class="text-2xl font-bold">n</div><div class="text-xs text-gray-500">KYC pending</div></div><span class="text-xs text-purple-600">→ /admin/kyc</span></div>
+          <div class="border border-gray-200 rounded-xl p-4 flex justify-between items-center"><div><div class="text-2xl font-bold">n · ₹total</div><div class="text-xs text-gray-500">Payouts owed</div></div><span class="text-xs text-purple-600">→ /admin/payouts</span></div>
+          <div class="border border-gray-200 rounded-xl p-4 flex justify-between items-center"><div><div class="text-2xl font-bold">n</div><div class="text-xs text-gray-500">Bookings today</div></div><span class="text-xs text-purple-600">→ /admin/bookings</span></div>
+        </div>
+      </div>
+      <p class="caption">Three count cards, each opening its list. Admin login lands on <code>/admin</code>. The ticket's admin nav and logout parts <strong>already shipped</strong> with SVC-329 (frontend #199); only this dashboard remains.</p>
+    </div>
+
+    <!-- P3: SVC-328 SMS -->
+    <div>
+      <p class="frame-title"><span class="planned-badge">PLANNED</span> SVC-328 · Vipul · To Do (DLT approved, config pending)<br>6D · The invite SMS</p>
+      <div class="phone planned">
+        <div class="phone-header"><div class="font-semibold text-sm">Messages · EazyServ sender</div></div>
+        <div class="phone-body p-4">
+          <div class="bg-gray-100 rounded-2xl rounded-bl-sm p-3 text-sm max-w-[85%]">Sparkle Cleaners invited you to join their team on EazyServ. Open <span class="text-blue-600 underline">https://app.eazyserv.com/invite</span> and enter 482917. Expires in 7 days.</div>
+        </div>
+      </div>
+      <p class="caption">The approved template, word for word (it's also in <code>sms_client.send_team_invite</code>): <code>{var1}</code> = business name (truncated to 30 chars), <code>{var2}</code> = the code. The URL is static. Sending turns on when <code>MSG91_INVITE_TEMPLATE_ID</code> is set in SSM; no code change. Until then the backend logs <code>[MOCK INVITE]</code>, and the SP shares the code by hand (3B).</p>
+    </div>
+
+    <!-- P4: SVC-343 App Links -->
+    <div>
+      <p class="frame-title"><span class="planned-badge">PLANNED</span> SVC-343 · Vipul · To Do (code merged, #183)<br>6E · SMS link opens the app</p>
+      <div class="flex items-center gap-3" style="width: 390px;">
+        <div class="flex-1 border-2 border-dashed border-gray-400 rounded-xl p-3 text-xs bg-white">Tap <span class="text-blue-600 underline">app.eazyserv.com/invite</span> in the SMS (6D)</div>
+        <span class="text-gray-400 text-xl">→</span>
+        <div class="flex-1 border-2 border-dashed border-gray-400 rounded-xl p-3 text-xs bg-white">The app opens on <code>/invite</code> (2D), not the browser</div>
+      </div>
+      <p class="caption"><span class="planned-badge">CODE SHIPPED, UNVERIFIED ON DEVICE</span><br>Android App Links: the <code>autoVerify</code> intent filter and <code>/.well-known/assetlinks.json</code> are on frontend main. What's left is proving on a device that the link opens the app.</p>
+    </div>
+
+    <!-- P5: SVC-348 cancel push -->
+    <div>
+      <p class="frame-title"><span class="planned-badge">PLANNED</span> SVC-348 · Tushar · To Do<br>6F · Pro gets the cancellation push</p>
+      <div class="phone planned">
+        <div class="phone-body p-4 bg-gray-800">
+          <div class="bg-white rounded-xl p-3 text-sm shadow">
+            <div class="text-xs text-gray-500">EazyServ · now</div>
+            <div class="font-semibold mt-0.5">Title <span class="tbd">TBD in ticket</span></div>
+            <div class="text-gray-600">Body <span class="tbd">TBD in ticket</span></div>
+          </div>
+        </div>
+      </div>
+      <p class="caption">When the customer cancels, the assigned Pro gets a push. Today only the SP does. The ticket leaves the copy open, with one requirement: make it clear the Pro should not travel. (Today's generic "cancelled" push reads "Booking Cancelled / This booking has been cancelled. No further action is needed.")</p>
+    </div>
+  </div>
+
+  <!-- P6: SVC-354 proposal -->
+  <h3><span class="planned-badge">PROPOSAL — UNDECIDED, CONFLICTS WITH SHIPPED</span> SVC-354 · Tushar · To Do (Vipul's proposal)</h3>
+  <div class="flex gap-8 items-start flex-wrap">
+    <div>
+      <p class="frame-title">6G · <code>/invite</code>, signed out</p>
+      <div class="phone planned" style="height: 520px;">
+        <div class="phone-body p-6">
+          <div class="text-xl font-semibold">Join as a service provider</div>
+          <div class="mt-6 text-xs uppercase font-semibold text-gray-500">Phone number</div>
+          <div class="mt-1 flex gap-2"><div class="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-50">+91</div><div class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-400">98765 43210</div></div>
+          <button class="w-full mt-4 bg-purple-600 text-white rounded-lg py-2.5 font-semibold">Continue <span class="tbd">TBD in ticket</span></button>
+          <div class="mt-4 text-center text-sm text-gray-500 underline">Consumer-switch link (stays visible)</div>
+        </div>
+      </div>
+      <p class="caption">The shared sign-in (<code>AuthFlow</code>) opened with <code>initialRole='provider'</code>, under the heading "Join as a service provider". Signed in, <code>/invite</code> shows the 6-digit code step (as 2D).</p>
+    </div>
+    <div>
+      <p class="frame-title">6H · <code>/invite</code> code step — errors and success</p>
+      <div class="phone planned" style="height: 520px;">
+        <div class="phone-body p-4 space-y-3 text-sm">
+          <div class="flex justify-center gap-1.5"><div class="otp-box">4</div><div class="otp-box">8</div><div class="otp-box">2</div><div class="otp-box">9</div><div class="otp-box">1</div><div class="otp-box">7</div></div>
+          <div class="rounded-lg bg-red-50 p-3 text-red-700"><span class="font-mono text-xs">404</span> This invite isn't for you. Check with your Service Provider.</div>
+          <div class="rounded-lg bg-red-50 p-3 text-red-700"><span class="font-mono text-xs">403 INVITER_PAYOUT_KYC_INCOMPLETE</span><br>Your Service Provider needs to complete KYC first.</div>
+          <div class="rounded-lg bg-red-50 p-3 text-red-700"><span class="font-mono text-xs">429</span> Too many attempts. Try again in a few minutes.</div>
+          <div class="rounded-lg bg-gray-900 text-white p-3">Toast: You're now part of Sparkle Cleaners</div>
+        </div>
+      </div>
+      <p class="caption">Error copy per status, as the ticket lists it. On success the toast is followed by the Pro home.</p>
+    </div>
+    <div>
+      <p class="frame-title">6I · <code>/pros</code> — "Jobs for me"</p>
+      <div class="phone planned" style="height: 520px;">
+        <div class="phone-header"><div class="font-semibold">Jobs for me</div></div>
+        <div class="phone-body p-4 space-y-2 text-sm">
+          <div class="border border-gray-200 rounded-xl p-3"><div class="flex justify-between"><span class="font-medium">Bathroom deep cleaning</span><span class="tag badge-primary">assigned</span></div><div class="text-xs text-gray-500 mt-1">Aundh, Pune · Meera</div></div>
+          <div class="border border-gray-200 rounded-xl p-3"><div class="flex justify-between"><span class="font-medium">Kitchen cleaning</span><span class="tag badge-warning">en_route</span></div><div class="text-xs text-gray-500 mt-1">Baner, Pune · Arjun</div></div>
+        </div>
+      </div>
+      <p class="caption">List rows: service, address, the customer's first name, status. Each opens <code>/pros/jobs/$id</code>, whose actions follow the status: assigned → "Set off" + "Decline"; en_route → doorstep OTP → "Start"; in_progress → "Complete". Layout <span class="tbd">TBD in ticket</span>.</p>
+    </div>
+    <div>
+      <p class="frame-title">6J · <code>/pros/profile</code></p>
+      <div class="phone planned" style="height: 520px;">
+        <div class="phone-body p-4 text-sm">
+          <div class="border border-gray-200 rounded-xl p-4"><div class="text-xs text-gray-500">You're with</div><div class="font-semibold">Sparkle Cleaners</div></div>
+          <div class="mt-3 border border-dashed border-gray-300 rounded-xl p-3 flex items-center justify-between text-gray-500"><span>Self-off toggle (only if the backend supports it)</span><div class="switch"></div></div>
+        </div>
+      </div>
+      <p class="caption">Which SP the Pro is with, plus the self-off toggle only if the backend supports it. Copy <span class="tbd">TBD in ticket</span>.</p>
+    </div>
+    <div>
+      <p class="frame-title">6K · Post-login: customer home banner</p>
+      <div class="phone planned" style="height: 520px;">
+        <div class="phone-body p-4">
+          <div class="border border-purple-200 bg-purple-50 rounded-xl p-3 text-sm flex gap-2"><span class="flex-1">You also work with Sparkle Cleaners. <span class="text-purple-600 font-medium">Open worker view →</span></span><span class="text-gray-400">✕</span></div>
+          <div class="mt-3 text-xs text-gray-400">Rest of customer home</div>
+        </div>
+      </div>
+      <p class="caption">Post-login matrix: a customer with a Pro row who logs in from <code>/</code> lands on customer home with this dismissible banner. Entering from <code>/invite</code> goes straight to <code>/pros</code>.</p>
+    </div>
+  </div>
+  <p class="caption" style="max-width: 820px;">6G–6K follow the SVC-354 ticket text as read from Jira by the tracking session on 2026-10-11. Example names are illustrative.</p>
+  <div class="history mt-4">
+    <strong>Conflicts with what shipped</strong> (to settle before any of 6G–6K is built):
+    <ul class="list-disc ml-5 mt-2 space-y-1">
+      <li>Shipped <code>/invite</code> is customer-only. A provider account can't join a team: its own Pro-for-self counts, so accept-invite answers 400 <code>ALREADY_PRO_ELSEWHERE</code>.</li>
+      <li>A Pro <em>lands</em> on <code>/pro</code> once per sign-in (2A), rather than seeing a banner on customer home.</li>
+      <li>The shipped route is <code>/pro</code>, not <code>/pros</code> (the backend API is <code>/pros/me/*</code>).</li>
+      <li>The Pro KYC screen (<code>/pro/kyc</code>) exists because a team Pro can't be assigned until their own KYC is verified (<code>/assign</code> answers 409 <code>PRO_KYC_INCOMPLETE</code>, backend #196, 4ee8c10); a proposal without it leaves team Pros unassignable.</li>
+      <li>Shipped accept-invite has no 403 <code>INVITER_PAYOUT_KYC_INCOMPLETE</code>: that check runs when the SP <em>creates</em> the invite (3B), so a code is never issued by an unverified SP.</li>
+      <li>The shipped "I take jobs myself" switch (SVC-326) belongs to the SP, on My Team (3A). It isn't a toggle a team Pro has.</li>
+    </ul>
+  </div>
+
+  <h3>Open tickets with no new UI in this doc</h3>
+  <table class="text-sm bg-white border border-gray-200 rounded-xl overflow-hidden" style="max-width: 820px; width: 100%;">
+    <thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
+      <tr><th class="px-4 py-2">Ticket</th><th class="px-4 py-2">Owner</th><th class="px-4 py-2">What</th></tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      <tr><td class="px-4 py-2 font-mono">SVC-349</td><td class="px-4 py-2">Tushar</td><td class="px-4 py-2">Dispatch logs to CloudWatch</td></tr>
+      <tr><td class="px-4 py-2 font-mono">SVC-350</td><td class="px-4 py-2">Vipul</td><td class="px-4 py-2">Logout clears every user-scoped cache (FE PR #203 open)</td></tr>
+      <tr><td class="px-4 py-2 font-mono">SVC-353</td><td class="px-4 py-2">Vipul</td><td class="px-4 py-2">Multi-device push spike</td></tr>
+      <tr><td class="px-4 py-2 font-mono">SVC-335</td><td class="px-4 py-2">Tushar</td><td class="px-4 py-2">Tracking WebSocket auth</td></tr>
+      <tr><td class="px-4 py-2 font-mono">SVC-351</td><td class="px-4 py-2">Vipul</td><td class="px-4 py-2">Offline address-screen spinner (consumer app, outside this doc)</td></tr>
+      <tr><td class="px-4 py-2 font-mono">SVC-352</td><td class="px-4 py-2">Vipul</td><td class="px-4 py-2">Map-picker errors (consumer app, outside this doc)</td></tr>
+    </tbody>
+  </table>
+  <p class="caption" style="max-width: 820px;">Owners and statuses for this whole section as read from Jira on 2026-10-11. They will drift; Jira is the source of truth.</p>
   </div>
 
   <!-- =========================================================== -->
