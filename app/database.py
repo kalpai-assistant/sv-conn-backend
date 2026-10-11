@@ -1,4 +1,7 @@
-from sqlalchemy import create_engine
+import logging
+from collections.abc import Callable
+
+from sqlalchemy import create_engine, event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -7,6 +10,8 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -82,3 +87,40 @@ async def get_db() -> AsyncSession:  # type: ignore[override]
         except Exception:
             await session.rollback()
             raise
+
+
+# ---------------------------------------------------------------------------
+# Work that may only happen once the transaction is committed (SVC-348)
+# ---------------------------------------------------------------------------
+_AFTER_COMMIT = "after_commit_callbacks"
+
+
+def call_after_commit(db: AsyncSession, fn: Callable[[], None]) -> None:
+    """Run ``fn`` once ``db``'s transaction commits; drop it if it rolls back.
+
+    For a side effect a service decides on mid-transaction but must not do
+    until the change is real, such as enqueueing a push: a request that fails
+    after this call must send nothing. ``fn`` runs inside the commit, so it
+    must not touch the session; capture plain values, not ORM objects.
+    """
+    db.sync_session.info.setdefault(_AFTER_COMMIT, []).append(fn)
+
+
+@event.listens_for(Session, "after_commit")
+def _run_after_commit(session: Session) -> None:
+    for fn in session.info.pop(_AFTER_COMMIT, []):
+        try:
+            fn()
+        except Exception:
+            # The commit has happened; a failed side effect can't undo it, and
+            # raising here would turn a saved change into a 500.
+            logger.exception("after_commit callback failed")
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _drop_after_commit(session: Session, transaction) -> None:
+    # The outermost transaction is over: after a commit the list is already
+    # run and gone; after a rollback or a close it is dropped unrun. A
+    # savepoint ending (``parent`` set) leaves it alone.
+    if transaction.parent is None:
+        session.info.pop(_AFTER_COMMIT, None)

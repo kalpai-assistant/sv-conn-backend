@@ -195,6 +195,8 @@ POST  /pros/me/jobs/{id}/decline        → the assigned Pro turns it down, befo
 - **Offer window.** The expiry sweep, the offer poll and the card countdown all run from `offer_window_start = COALESCE(reopened_at, created_at)`. Without it a booking reopened minutes after creation would be swept on the next 30s pass.
 - **Re-broadcast** (`broadcast_recipients_stmt`): eligible SPs minus those who already answered this booking (the releasing SP, anyone who declined). The poll skips answered rows the same way. Eligibility to *accept* is unchanged.
 
+**Pro-facing loss pushes (SVC-348).** A team Pro is told when a job leaves them, so they don't travel to it. Two events, both `{booking_id, event}`, never sent to the Pro-for-self (the SP already gets or caused its push): `job_cancelled` rides along with every `cancelled` push (consumer or admin cancel; `professional_id` survives a cancel), and `unassigned` is enqueued by `record_assignment` for any event whose `from_professional_id` is a team Pro who isn't the actor (re-pick, release, provider give-back; never their own decline). `unassigned` carries the old Pro's id and is enqueued only after commit (`database.call_after_commit`). An admin force-cancel now pushes both the consumer and the SP.
+
 ### Pro-side app — shipped in SVC-320 PR 2 (decline) + PR 3 (the rest)
 
 ```
