@@ -540,7 +540,7 @@
         <div class="mt-1 text-gray-600">Your team member can't take it. Pick someone else, or the customer is left waiting.</div>
         <button class="w-full mt-3 bg-purple-600 text-white rounded-lg py-2 font-semibold">Assign someone</button>
       </div>
-      <p class="caption">Variant after a Pro declines: the booking stays accepted with nobody on it until the SP re-picks (the <code>pro_declined</code> push tells her to re-pick).</p>
+      <p class="caption">Variant after a Pro declines: the booking stays accepted with nobody on it until the SP re-picks (tapping the <code>pro_declined</code> push opens this job screen: <code>src/lib/notifications.ts</code> → <code>/provider/bookings/{id}</code>).</p>
     </div>
   </div>
 
