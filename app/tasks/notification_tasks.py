@@ -397,6 +397,40 @@ def _expire_unbroadcastable(db, booking, reason: str) -> None:
     db.commit()
 
 
+def _log_no_providers(db, booking, service_ids, address) -> None:
+    """Say which eligibility stage ruled everyone out (SVC-349).
+
+    The consumer sees "No partners found nearby" whatever the cause, and
+    ``broadcast.recipients count=0`` says only that nobody qualified. The funnel
+    names the stage, so "no SP has a service area set" and "everyone's offline"
+    stop looking alike.
+
+    Location is rounded to 2 decimals (~1 km), as SVC-302 requires; nothing
+    else about the consumer or any provider is logged.
+
+    Never in the way of the expiry that follows. The funnel runs in a
+    SAVEPOINT, so a failure in Postgres rolls back only that and leaves the
+    session usable for the EXPIRED commit; any failure is logged, not raised.
+    """
+    from app.services.provider_matching import broadcast_funnel, funnel_reason
+
+    try:
+        with db.begin_nested():
+            counts = broadcast_funnel(db, service_ids, address.location, booking.id)
+        logger.warning(
+            "dispatch.no_providers booking_id=%s service_ids=%s reason=%s lat=%.2f lng=%.2f "
+            "counts=%s",
+            booking.id,
+            [str(s) for s in service_ids],
+            funnel_reason(counts),
+            address.lat,
+            address.lng,
+            counts,
+        )
+    except Exception:
+        logger.exception("dispatch.no_providers_funnel_failed booking_id=%s", booking.id)
+
+
 def notify_reopened(booking_id) -> None:
     """After a booking reopens (SVC-320): tell the consumer, then broadcast it
     again. Enqueued by the router after the request's work is done, like every
@@ -529,6 +563,7 @@ def send_booking_notification(
                     # that can change inside two minutes — so that is the whole
                     # of the loss, and it is worth less than making every
                     # consumer sit out a dead window.
+                    _log_no_providers(db, booking, service_ids, address)
                     _expire_unbroadcastable(db, booking, "no-eligible-provider")
                     return
 

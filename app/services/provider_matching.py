@@ -17,7 +17,7 @@ intersect" that would run N queries and merge in Python).
 
 from collections.abc import Sequence
 
-from sqlalchemy import Select, exists, func, or_, select
+from sqlalchemy import Select, and_, exists, func, or_, select
 from sqlalchemy.orm import aliased
 
 from app.models.booking import ACTIVE_JOB_STATUSES, Booking
@@ -77,26 +77,46 @@ def has_someone_to_do_it():
     )
 
 
-def _base_conditions(address_location) -> list:
-    """Every eligibility condition except which services the SP covers.
+def _eligibility_stages(address_location) -> list[tuple[str, object]]:
+    """Every eligibility condition except which services the SP covers, named
+    and in the order ``broadcast_funnel`` reports them (SVC-349).
 
-    The one list behind the single-service and cart statements alike, so they
-    can't drift; before SVC-326 it was written out three times.
+    The one list behind the single-service and cart statements and the funnel
+    alike, so none of them can drift; before SVC-326 it was written out three
+    times. The order is only for the funnel's report: SQL doesn't care.
     """
     return [
-        ProviderProfile.is_online.is_(True),
-        ProviderProfile.kyc_status == KYCStatus.VERIFIED,
+        ("kyc_verified", ProviderProfile.kyc_status == KYCStatus.VERIFIED),
         # A deactivated owner can't log in to accept; their token may still be
         # set, so is_online and fcm_token alone don't exclude them (SVC-329).
-        User.is_active.is_(True),
-        User.fcm_token.is_not(None),
-        st_dwithin_column_radius(
-            ProviderProfile.service_area_center,
-            address_location,
-            ProviderProfile.service_area_radius_km,
+        ("account_active", User.is_active.is_(True)),
+        ("has_push_token", User.fcm_token.is_not(None)),
+        ("online", ProviderProfile.is_online.is_(True)),
+        (
+            "in_service_area",
+            st_dwithin_column_radius(
+                ProviderProfile.service_area_center,
+                address_location,
+                ProviderProfile.service_area_radius_km,
+            ),
         ),
-        has_someone_to_do_it(),
+        ("has_someone_to_do_it", has_someone_to_do_it()),
     ]
+
+
+def _base_conditions(address_location) -> list:
+    """``_eligibility_stages`` without the names: the WHERE list."""
+    return [condition for _, condition in _eligibility_stages(address_location)]
+
+
+def _not_already_answered(booking_id):
+    """The SP hasn't answered this booking's offer yet (SVC-320). Correlated
+    on ``User.id``."""
+    return ~exists().where(
+        BookingOffer.booking_id == booking_id,
+        BookingOffer.provider_id == User.id,
+        BookingOffer.response.is_not(None),
+    )
 
 
 def eligible_provider_conditions(service_id, address_location) -> list:
@@ -229,12 +249,75 @@ def broadcast_recipients_stmt(service_ids: Sequence, address_location, booking_i
     is pushed, not who is allowed.
     """
     return eligible_providers_multi_stmt(service_ids, address_location).where(
-        ~exists().where(
-            BookingOffer.booking_id == booking_id,
-            BookingOffer.provider_id == User.id,
-            BookingOffer.response.is_not(None),
-        )
+        _not_already_answered(booking_id)
     )
+
+
+# The funnel's stages in order, each paired with the reason logged when it is
+# the first to leave nobody.
+FUNNEL_REASONS = {
+    "covers_services": "no_provider_covers_services",
+    "kyc_verified": "none_kyc_verified",
+    "account_active": "none_account_active",
+    "has_push_token": "none_has_push_token",
+    "online": "none_online",
+    "in_service_area": "none_in_service_area",
+    "has_someone_to_do_it": "none_has_someone_to_do_it",
+    "not_already_answered": "all_already_answered",
+}
+
+
+def broadcast_funnel(db, service_ids: Sequence, address_location, booking_id) -> dict[str, int]:
+    """How many SPs are still in the running after each eligibility stage, for a
+    broadcast that found nobody (SVC-349). Only that path runs it.
+
+    Cumulative and in ``FUNNEL_REASONS`` order: ``counts["online"]`` is the SPs
+    covering the whole cart that are also KYC-verified, active, reachable and
+    online. The last stage is ``broadcast_recipients_stmt``'s own set, because
+    every stage is the same expression that statement uses.
+
+    One query. The cart test (IN + HAVING, as in
+    ``eligible_providers_multi_stmt``) is a subquery of provider ids, and
+    ``ProviderProfile`` stays un-aliased in the outer FROM: the
+    ``has_someone_to_do_it`` EXISTS clauses correlate on it by name, so an alias
+    there would silently bind them to the wrong table.
+
+    Takes the sync session: its only caller is the Celery broadcast.
+    """
+    service_ids = list(service_ids)
+    covers = (
+        select(ProviderServiceModel.provider_id)
+        .where(ProviderServiceModel.service_id.in_(service_ids))
+        .group_by(ProviderServiceModel.provider_id)
+        .having(func.count(func.distinct(ProviderServiceModel.service_id)) == len(service_ids))
+        .subquery()
+    )
+    stages = [
+        *_eligibility_stages(address_location),
+        ("not_already_answered", _not_already_answered(booking_id)),
+    ]
+    # One provider_profiles row per SP, so a plain COUNT is per SP.
+    columns = [func.count().label("covers_services")]
+    so_far: list = []
+    for name, condition in stages:
+        so_far.append(condition)
+        columns.append(func.count().filter(and_(*so_far)).label(name))
+    row = db.execute(
+        select(*columns)
+        .select_from(ProviderProfile)
+        .join(User, User.id == ProviderProfile.user_id)
+        .join(covers, covers.c.provider_id == ProviderProfile.user_id)
+    ).one()
+    return dict(row._mapping)
+
+
+def funnel_reason(counts: dict[str, int]) -> str:
+    """The first stage that left nobody, or ``unknown`` when none did (someone
+    became eligible between the broadcast query and the funnel)."""
+    for stage, reason in FUNNEL_REASONS.items():
+        if counts.get(stage) == 0:
+            return reason
+    return "unknown"
 
 
 def is_eligible_provider_multi_stmt(service_ids: Sequence, address_location, provider_id) -> Select:

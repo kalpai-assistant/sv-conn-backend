@@ -145,6 +145,13 @@ def _redact_secrets(_logger: Any, _name: str, event_dict: dict) -> dict:
 
 def configure_logging(*, level: str = "INFO", json_logs: bool = False) -> None:
     """Wire stdlib logging → structlog. Idempotent — safe to call twice."""
+    # The process's real stdout, not whatever ``sys.stdout`` is right now. A
+    # Celery prefork child runs this from ``worker_process_init``, after the
+    # worker has swapped ``sys.stdout`` for a ``LoggingProxy``; a handler on
+    # that proxy feeds each record back into logging, where the proxy's
+    # recursion guard drops it. Every worker log line was lost that way until
+    # SVC-349. Elsewhere the two are the same object.
+    stream = sys.__stdout__ or sys.stdout
     shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
@@ -163,7 +170,7 @@ def configure_logging(*, level: str = "INFO", json_logs: bool = False) -> None:
     renderer = (
         structlog.processors.JSONRenderer()
         if json_logs
-        else structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty())
+        else structlog.dev.ConsoleRenderer(colors=stream.isatty())
     )
 
     # structlog-native loggers.
@@ -186,7 +193,7 @@ def configure_logging(*, level: str = "INFO", json_logs: bool = False) -> None:
             renderer,
         ],
     )
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(stream)
     handler.setFormatter(formatter)
 
     root = logging.getLogger()

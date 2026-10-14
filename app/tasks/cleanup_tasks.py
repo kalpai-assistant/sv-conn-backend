@@ -5,7 +5,7 @@ Cleanup Celery tasks — periodic jobs run by Celery Beat.
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 
 from app.config import get_settings
 from app.models.booking import Booking, BookingStatus, PaymentMethod, PaymentStatus
@@ -42,13 +42,20 @@ def expire_stale_bookings():
     ]
 
     with SyncSessionLocal() as db:
-        result = db.execute(
-            update(Booking)
-            .where(*due, Booking.payment_status == PaymentStatus.PENDING)
-            .values(status=BookingStatus.EXPIRED)
+        expired_ids = (
+            db.execute(
+                update(Booking)
+                .where(*due, Booking.payment_status == PaymentStatus.PENDING)
+                .values(status=BookingStatus.EXPIRED)
+                .returning(Booking.id)
+            )
+            .scalars()
+            .all()
         )
         db.commit()
-        expired = result.rowcount
+        expired = len(expired_ids)
+        for booking_id, counts in _offer_counts(db, expired_ids).items():
+            _log_no_acceptance(booking_id, *counts, outcome="expired")
 
         paid_ids = (
             db.execute(
@@ -62,13 +69,68 @@ def expire_stale_bookings():
             .scalars()
             .all()
         )
+        # Counted before advancing: a second offer broadcasts again and adds
+        # offer rows of its own.
+        paid_counts = _offer_counts(db, paid_ids)
 
-    outcomes = [_advance_paid(booking_id) for booking_id in paid_ids]
+    outcomes = []
+    for booking_id in paid_ids:
+        outcome = _advance_paid(booking_id)
+        outcomes.append(outcome)
+        # "skipped": it no longer qualified (taken meanwhile), so not a no-taker.
+        if outcome != "skipped" and booking_id in paid_counts:
+            _log_no_acceptance(booking_id, *paid_counts[booking_id], outcome=outcome)
     return (
         f"Expired {expired} stale bookings; paid: "
         f"{outcomes.count('second_offer')} second offer, "
         f"{outcomes.count('refunded')} refunded, "
         f"{outcomes.count('failed')} failed"
+    )
+
+
+def _offer_counts(db, booking_ids) -> dict:
+    """``{booking_id: (offers_sent, declined, reopened)}`` for the
+    ``dispatch.no_acceptance`` lines (SVC-349). One query for the lot.
+
+    Never in the way of the sweep: it runs outside the expiry's transaction,
+    and a failure rolls back only its own read (so the session stays usable)
+    and comes back empty, so those bookings just go unlogged.
+    """
+    if not booking_ids:
+        return {}
+    from app.models.booking_offer import BookingOffer, OfferResponse
+
+    try:
+        rows = db.execute(
+            select(
+                Booking.id,
+                func.count(BookingOffer.id),
+                func.count(BookingOffer.id).filter(BookingOffer.response == OfferResponse.DECLINED),
+                Booking.reopened_at.is_not(None),
+            )
+            .outerjoin(BookingOffer, BookingOffer.booking_id == Booking.id)
+            .where(Booking.id.in_(booking_ids))
+            .group_by(Booking.id)
+        ).all()
+    except Exception:
+        db.rollback()
+        logger.exception("dispatch.no_acceptance_count_failed booking_ids=%s", list(booking_ids))
+        return {}
+    return {booking_id: tuple(counts) for booking_id, *counts in rows}
+
+
+def _log_no_acceptance(booking_id, offers_sent, declined, reopened, *, outcome: str) -> None:
+    """A booking's offer window ran out with nobody taking it (SVC-349): the
+    other way a consumer ends up at "No partners found nearby", beside
+    ``dispatch.no_providers``. ``outcome`` is ``expired`` for an unpaid booking,
+    else what ``_advance_paid`` did with it."""
+    logger.warning(
+        "dispatch.no_acceptance booking_id=%s offers_sent=%d declined=%d reopened=%s outcome=%s",
+        booking_id,
+        offers_sent,
+        declined,
+        reopened,
+        outcome,
     )
 
 
