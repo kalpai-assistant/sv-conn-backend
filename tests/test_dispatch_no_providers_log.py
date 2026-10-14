@@ -367,6 +367,37 @@ async def test_a_funnel_failing_in_postgres_still_expires(db_session, committed,
     assert len(_lines(caplog, "booking.unbroadcastable")) == 1
 
 
+@pytest.mark.asyncio
+async def test_a_failure_building_the_log_line_still_expires(db_session, committed, caplog):  # noqa: F811
+    """The funnel succeeds but reading the location for the line raises: the
+    warning is inside the same try, so the booking still expires."""
+    consumer = await UserFactory.create(db_session, role="consumer")
+    addr = await _address(db_session, consumer.id)
+    booking = await BookingFactory.create(
+        db_session,
+        consumer_id=consumer.id,
+        provider_id=None,
+        address_id=addr.id,
+        status=BookingStatus.REQUESTED,
+    )
+    committed.extend([booking, addr, consumer])
+    await db_session.commit()
+
+    def broken_lat(_self):
+        raise ValueError("unreadable point")
+
+    with (
+        patch.object(Address, "lat", property(broken_lat)),
+        caplog.at_level(logging.INFO, logger=NOTIFY),
+    ):
+        _run_broadcast(booking.id)
+
+    assert await _status_of(db_session, booking) == BookingStatus.EXPIRED
+    [failure] = _lines(caplog, "dispatch.no_providers_funnel_failed")
+    assert failure.exc_info[0] is ValueError
+    assert len(_lines(caplog, "booking.unbroadcastable")) == 1
+
+
 # ---------------------------------------------------------------------------
 # Offers went out, nobody took it: the sweep
 # ---------------------------------------------------------------------------

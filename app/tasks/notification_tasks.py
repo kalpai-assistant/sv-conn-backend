@@ -417,18 +417,18 @@ def _log_no_providers(db, booking, service_ids, address) -> None:
     try:
         with db.begin_nested():
             counts = broadcast_funnel(db, service_ids, address.location, booking.id)
+        logger.warning(
+            "dispatch.no_providers booking_id=%s service_ids=%s reason=%s lat=%.2f lng=%.2f "
+            "counts=%s",
+            booking.id,
+            [str(s) for s in service_ids],
+            funnel_reason(counts),
+            address.lat,
+            address.lng,
+            counts,
+        )
     except Exception:
         logger.exception("dispatch.no_providers_funnel_failed booking_id=%s", booking.id)
-        return
-    logger.warning(
-        "dispatch.no_providers booking_id=%s service_ids=%s reason=%s lat=%.2f lng=%.2f counts=%s",
-        booking.id,
-        [str(s) for s in service_ids],
-        funnel_reason(counts),
-        address.lat,
-        address.lng,
-        counts,
-    )
 
 
 def notify_reopened(booking_id) -> None:
