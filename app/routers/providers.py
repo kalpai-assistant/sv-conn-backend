@@ -444,11 +444,18 @@ async def revoke_team_invite(
 
 @router.get("/me/team", response_model=list[ProfessionalResponse])
 async def list_my_team(
+    booking_id: UUID | None = Query(
+        None, description="Re-pick list for this booking: leaves out Pros who declined it"
+    ),
     current_user: User = Depends(require_role("provider")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Active Pros under my SP, my own Pro-for-self (``is_self``) first."""
-    return await TeamService(db).list_team(current_user.id)
+    """Active Pros under my SP, my own Pro-for-self (``is_self``) first.
+
+    With ``booking_id``, Pros who declined that booking are left out (SVC-361).
+    A booking that isn't mine hides nobody: same list, no error.
+    """
+    return await TeamService(db).list_team(current_user.id, booking_id=booking_id)
 
 
 @router.delete("/me/team/{pro_id}", response_model=RemoveProResponse)
