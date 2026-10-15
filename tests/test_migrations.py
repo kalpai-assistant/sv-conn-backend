@@ -1,6 +1,6 @@
 """
 Migration round trips on a scratch database (SVC-319, SVC-339, SVC-340, SVC-320,
-SVC-344, SVC-333, SVC-329).
+SVC-344, SVC-333, SVC-329, SVC-366).
 
 The rest of the suite builds its schema with ``Base.metadata.create_all``, and CI
 only ever runs ``alembic upgrade head`` — so a migration's ``downgrade()`` is not
@@ -828,3 +828,64 @@ def test_svc_329_creates_the_admin_actions_table_and_downgrade_drops_it(scratch_
         )
         == []
     )
+
+
+# SVC-366 (ios app_versions row) and the revision it builds on (SVC-329).
+SVC_366 = "e721a87d86e1"
+BEFORE_SVC_366 = SVC_329
+
+
+def _app_versions(url: URL) -> dict:
+    """``{platform: row}`` for every app_versions row."""
+    rows = _query(url, "SELECT * FROM app_versions")
+    return {row["platform"]: dict(row) for row in rows}
+
+
+def test_svc_366_seeds_ios_from_pwa_and_downgrade_removes_it(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_366)
+    # A PWA bump before the deploy: ios must copy it, not the original seed.
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE app_versions SET version = '1.0.4', min_supported_version = '1.0.2', "
+                    "url = 'https://example.invalid/pwa', release_notes = 'pwa notes' "
+                    "WHERE platform = 'pwa'"
+                )
+            )
+    finally:
+        engine.dispose()
+    before = _app_versions(scratch_db)
+
+    # Runs the real env.py, so the ADD VALUE inside autocommit_block is exercised
+    # under the same outer transaction a deploy uses.
+    _alembic(scratch_db, "upgrade", SVC_366)
+    after = _app_versions(scratch_db)
+    assert set(after) == {"android", "pwa", "ios"}
+    ios = after["ios"]
+    assert (ios["version"], ios["min_supported_version"]) == ("1.0.4", "1.0.2")
+    assert ios["url"] is None
+    assert ios["release_notes"] is None
+    assert ios["released_at"] is not None
+    # android + pwa untouched.
+    assert {p: after[p] for p in ("android", "pwa")} == before
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_366)
+    assert _app_versions(scratch_db) == before
+    # Postgres can't drop an enum value, so 'ios' stays on the type.
+    labels = {
+        row["enumlabel"]
+        for row in _query(
+            scratch_db,
+            "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid "
+            "WHERE t.typname = 'appplatform'",
+        )
+    }
+    assert labels == {"android", "pwa", "ios"}
+
+    # Re-upgrade with the enum value already present: IF NOT EXISTS + the data step.
+    _alembic(scratch_db, "upgrade", SVC_366)
+    again = _app_versions(scratch_db)
+    assert set(again) == {"android", "pwa", "ios"}
+    assert (again["ios"]["version"], again["ios"]["min_supported_version"]) == ("1.0.4", "1.0.2")

@@ -2,7 +2,8 @@
 
 Powers the in-app version check → the mechanism that lets us force an
 upgrade after direct-APK / PWA distribution (no Play Store, no
-auto-update). One row per platform (currently ``android`` + ``pwa``).
+auto-update). One row per platform: ``android``, ``pwa`` and ``ios``
+(SVC-366, so iPhones stop being compared against the PWA row).
 
 Deliberately a table rather than env vars: `min_supported_version` is the
 emergency lever we flip during an incident. Env vars require a Fargate
@@ -24,6 +25,7 @@ from app.database import Base
 class AppPlatform(str, enum.Enum):
     ANDROID = "android"
     PWA = "pwa"
+    IOS = "ios"
 
 
 class AppVersion(Base):
@@ -55,7 +57,8 @@ class AppVersion(Base):
     version: Mapped[str] = mapped_column(String(32), nullable=False)
     min_supported_version: Mapped[str] = mapped_column(String(32), nullable=False)
 
-    # Android APK URL. NULL for PWA (updates come via service worker).
+    # Android APK URL. NULL for PWA (updates come via service worker) and for
+    # iOS until it has a release pipeline.
     url: Mapped[str | None] = mapped_column(String(500))
 
     # Short plain-text release notes. Rendered in the upgrade nudge toast.

@@ -102,7 +102,7 @@ async def get_latest_version(
     result = await db.execute(select(AppVersion))
     rows = {row.platform: row for row in result.scalars().all()}
 
-    if AppPlatform.ANDROID not in rows or AppPlatform.PWA not in rows:
+    if any(p not in rows for p in (AppPlatform.ANDROID, AppPlatform.PWA, AppPlatform.IOS)):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="App version metadata is missing. Alembic migration may not have run.",
@@ -112,4 +112,5 @@ async def get_latest_version(
     return LatestVersionResponse(
         android=PlatformVersion.model_validate(rows[AppPlatform.ANDROID]),
         pwa=PlatformVersion.model_validate(rows[AppPlatform.PWA]),
+        ios=PlatformVersion.model_validate(rows[AppPlatform.IOS]),
     )

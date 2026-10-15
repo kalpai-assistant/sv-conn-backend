@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class PlatformVersion(BaseModel):
-    """Version metadata for one platform (android / pwa).
+    """Version metadata for one platform (android / pwa / ios).
 
     ``version`` and ``min_supported_version`` are SemVer strings. Clients
     compare using SemVer semantics — a lex compare would treat 1.10 < 1.2.
@@ -25,9 +25,10 @@ class LatestVersionResponse(BaseModel):
     """The whole payload returned by GET /downloads/latest.json.
 
     Shape is stable — the frontend hook branches on the presence of each
-    platform key. Adding a new platform (post-beta iOS native) means
-    adding a new required key here + a matching row in ``app_versions``.
+    platform key. Adding a new platform means adding a new required key
+    here + a matching row in ``app_versions``, as ``ios`` did (SVC-366).
     """
 
     android: PlatformVersion
     pwa: PlatformVersion
+    ios: PlatformVersion
