@@ -1439,6 +1439,13 @@ class BookingService:
         if new_status == BookingStatus.CANCELLED:
             booking.cancellation_reason = cancellation_reason
 
+        if new_status in (
+            BookingStatus.EN_ROUTE,
+            BookingStatus.IN_PROGRESS,
+            BookingStatus.COMPLETED,
+        ):
+            await self._attach_self_pro_if_unassigned(booking, changed_by)
+
         old_status = booking.status
         booking.status = new_status
 
@@ -1947,6 +1954,38 @@ class BookingService:
             note=note,
         )
         self.db.add(log)
+
+    async def _attach_self_pro_if_unassigned(self, booking: Booking, changed_by: uuid.UUID) -> None:
+        """The SP owner moving a job that has no Pro is doing it themselves
+        (SVC-364): a team Pro declined and the owner went without re-picking.
+        Without this the job finishes with ``professional_id`` NULL, so its
+        earnings land in "Not assigned", the audit trail stops at the decline,
+        and the consumer is still told we're finding someone.
+
+        Only the owner, and only while nobody is on the job. A Pro can't get
+        here on a null-Pro booking: ``is_assigned_pro`` refuses them on the
+        provider routes and ``job_transition`` 404s on theirs.
+
+        Attached even when the owner has switched off taking jobs themselves
+        (``accepts_direct_jobs`` false, SVC-326). That switch governs who can
+        be assigned; this records who actually did the work, and that was the
+        owner.
+
+        Same transaction as the transition, so a failure rolls both back. No
+        Pro-for-self to attach (no SP profile) never blocks the job.
+        """
+        if changed_by != booking.provider_id or booking.professional_id is not None:
+            return
+        pro = await ProviderService(self.db).ensure_self_professional(booking.provider_id)
+        if pro is None:
+            logger.warning(
+                "booking.self_pro_attach_skipped booking_id=%s sp=%s; no Pro-for-self",
+                booking.id,
+                booking.provider_id,
+            )
+            return
+        booking.professional_id = pro.id
+        await self.record_assignment(booking, "claimed", None, pro.id, actor_id=changed_by)
 
     async def record_assignment(
         self,
