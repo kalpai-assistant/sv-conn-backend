@@ -186,7 +186,12 @@ class BookingService:
         The SP's profile isn't a relationship on ``Booking``: provider_profiles
         is keyed by ``user_id`` = ``booking.provider_id``. It is set as a plain,
         unmapped attribute, ``service_provider_profile``, which the unit of work
-        never sees. Two queries regardless of page size.
+        never sees.
+
+        Each Pro's ``user`` is loaded too, for the consumer's
+        ``BookingResponse.provider_phone`` (SVC-360). ``Professional.user`` is
+        lazy, so it gets the same explicit fetch. Three queries regardless of
+        page size.
         """
         bookings = list(bookings)
         if not bookings:
@@ -197,6 +202,14 @@ class BookingService:
         if pro_ids:
             rows = await self.db.execute(select(Professional).where(Professional.id.in_(pro_ids)))
             pros = {pro.id: pro for pro in rows.scalars()}
+
+        if pros:
+            rows = await self.db.execute(
+                select(User).where(User.id.in_({pro.user_id for pro in pros.values()}))
+            )
+            users = {user.id: user for user in rows.scalars()}
+            for pro in pros.values():
+                set_committed_value(pro, "user", users.get(pro.user_id))
 
         sp_ids = {b.provider_id for b in bookings if b.provider_id}
         profiles: dict[uuid.UUID, ProviderProfile] = {}
