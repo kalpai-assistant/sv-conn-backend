@@ -176,12 +176,20 @@ class BookingStatusLogResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# Statuses in which the consumer may call the assigned Pro (SVC-360). Strings,
+# compared against the normalised ``BookingResponse.status``, because
+# ``booking.status`` can reach ``for_viewer`` as the enum or as its value.
+_CALLABLE_STATUSES = frozenset({"accepted", "en_route", "in_progress"})
+
+
 class ProfessionalBrief(BaseModel):
     """Who is doing the job (SVC-324): the assigned Pro, as a booking shows them.
 
-    No phone, ever: the consumer must not get a Pro's number, and the SP doesn't
-    need it from here. ``is_self`` marks the SP's own Pro-for-self, so a client
-    can collapse "Rohan from Rohan" to one name on a solo job.
+    No phone here: the consumer gets the Pro's number only through
+    ``BookingResponse.provider_phone`` (SVC-360, interim until masked calling),
+    which is gated by viewer and status, and the SP doesn't need it from here.
+    ``is_self`` marks the SP's own Pro-for-self, so a client can collapse
+    "Rohan from Rohan" to one name on a solo job.
     """
 
     id: UUID
@@ -265,8 +273,9 @@ class BookingResponse(BaseModel):
     # Party display fields, populated only on admin routes (SVC-299). Every other
     # BookingResponse consumer leaves them as None: the consumer's own booking
     # list has one phone (theirs, already known) and rendering a provider name
-    # on a job card was never in scope. Kept as defaulted-None so this is a
-    # backward-compatible expansion — every existing route omits them from the
+    # on a job card was never in scope. The Pro's number reaches the consumer
+    # separately, as ``provider_phone`` below (SVC-360). Kept as defaulted-None
+    # so this is a backward-compatible expansion — every existing route omits them from the
     # payload and every existing client keeps working.
     consumer_phone: str | None = None
     provider_name: str | None = None
@@ -278,6 +287,14 @@ class BookingResponse(BaseModel):
     # ``BookingService.attach_professionals`` first.
     professional_id: UUID | None
     professional: ProfessionalBrief | None
+    # The assigned Pro's own login phone, for the consumer's Call button
+    # (SVC-360). Interim direct dial until masked calling lands. For a
+    # Pro-for-self that is the owner's phone; for a team Pro it is the Pro's,
+    # never the SP's. Only the consumer gets it, and only while the job is live
+    # (accepted / en_route / in_progress) with a Pro assigned; see
+    # ``for_viewer``. Defaulted, so it is additive for existing clients. Read
+    # from ``Booking.professional.user``, which ``attach_professionals`` loads.
+    provider_phone: str | None = None
     service_provider: ServiceProviderBrief | None
     scheduled_at: datetime | None
     created_at: datetime
@@ -320,6 +337,13 @@ class BookingResponse(BaseModel):
 
         Anyone who is not the consumer gets ``None``, including a ``viewer_id``
         of ``None`` (admin listings, which have no booking-party identity).
+
+        ``provider_phone`` (SVC-360) is the consumer's too, and narrower still:
+        only while a Pro is assigned and the job is live (accepted / en_route /
+        in_progress). The phone is read only once that gate has passed, so a
+        non-consumer view never touches the lazy ``Professional.user``. The
+        assigned Pro is rendered as ``booking.provider_id`` by ``viewer_for``
+        and admin as ``None``, so neither gets it.
 
         The blanking happens on this validated *copy*, deliberately. The
         assignment must never be made against the ORM object on a read path::
@@ -390,6 +414,8 @@ class BookingResponse(BaseModel):
         )
         if viewer_id is None or viewer_id != booking.consumer_id:
             response.doorstep_otp = None
+        elif booking.professional_id is not None and response.status in _CALLABLE_STATUSES:
+            response.provider_phone = booking.professional.user.phone
         if viewer_id is None or viewer_id not in (booking.consumer_id, booking.provider_id):
             response.address = None
         return response
