@@ -29,6 +29,7 @@ from app.models.provider_team_invite import (
 )
 from app.models.user import User
 from app.schemas.team import ProfessionalResponse
+from app.services.booking_service import BookingService
 from app.services.provider_matching import assignable_team_pro_exists
 from app.services.provider_service import (
     ProviderService,
@@ -257,8 +258,14 @@ class TeamService:
             await self.db.flush()
         return invites
 
-    async def list_team(self, sp_id: uuid.UUID) -> list[ProfessionalResponse]:
+    async def list_team(
+        self, sp_id: uuid.UUID, booking_id: uuid.UUID | None = None
+    ) -> list[ProfessionalResponse]:
         """Active Pros under this SP, Pro-for-self first, then by join date.
+
+        With ``booking_id`` (the re-pick list, SVC-361), Pros who declined that
+        booking are left out. Only this SP's Pros are looked up, so a booking
+        that isn't the caller's simply hides nobody.
 
         The Pro-for-self shows the SP's KYC (``effective_kyc_status``, SVC-329),
         set on the response only: changing the ORM row would be flushed into
@@ -278,11 +285,17 @@ class TeamService:
             )
             .order_by((Professional.user_id != sp_id), Professional.created_at, Professional.id)
         )
+        pros = result.scalars().all()
+        if booking_id is not None:
+            declined = await BookingService(self.db).declined_pro_ids(
+                booking_id, [pro.id for pro in pros]
+            )
+            pros = [pro for pro in pros if pro.id not in declined]
         return [
             ProfessionalResponse.model_validate(pro).model_copy(
                 update={"kyc_status": effective_kyc_status(pro, profile.kyc_status)}
             )
-            for pro in result.scalars().all()
+            for pro in pros
         ]
 
     async def remove_pro(self, sp_id: uuid.UUID, pro_id: uuid.UUID) -> bool:

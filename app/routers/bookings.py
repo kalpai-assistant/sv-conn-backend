@@ -206,7 +206,9 @@ async def accept_booking(
         403: {"description": "You were not offered this booking"},
         404: {"description": "No such booking, or that Pro isn't on your team"},
         409: {
-            "description": "PRO_BUSY: the Pro is on another unfinished job; "
+            "description": "PRO_DECLINED_THIS_BOOKING: the Pro already declined this "
+            "booking (the Pro-for-self too); "
+            "PRO_BUSY: the Pro is on another unfinished job; "
             "PRO_OFFLINE: a team Pro who is offline; PRO_KYC_INCOMPLETE: a team Pro "
             "whose own KYC isn't verified; SELF_NOT_TAKING_JOBS: the Pro-for-self, "
             "while the SP has switched off taking jobs itself; or (no code) the "

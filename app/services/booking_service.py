@@ -68,6 +68,8 @@ logger = logging.getLogger(__name__)
 # Stable codes for two-level dispatch (SVC-320 PR 2).
 PRO_NOT_FOUND = "PRO_NOT_FOUND"
 PRO_BUSY = "PRO_BUSY"
+# SVC-361: the Pro already turned this booking down.
+PRO_DECLINED_THIS_BOOKING = "PRO_DECLINED_THIS_BOOKING"
 PRO_OFFLINE = "PRO_OFFLINE"
 PRO_KYC_INCOMPLETE = "PRO_KYC_INCOMPLETE"
 JOB_NOT_FOUND = "JOB_NOT_FOUND"
@@ -1151,6 +1153,16 @@ class BookingService:
             await self.attach_professionals([booking])
             return booking, False, None
 
+        # SVC-361: no handing the job back to a Pro who declined it, the
+        # Pro-for-self included. After the same-Pro short-circuit, so a no-op
+        # re-assign stays a 200.
+        if await self.declined_pro_ids(booking.id, [pro.id]):
+            raise AppException(
+                "This Pro already declined this booking.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=PRO_DECLINED_THIS_BOOKING,
+            )
+
         if not holds_it and booking.status is not BookingStatus.REQUESTED:
             # Theirs, but past ACCEPTED: en route or later.
             raise InvalidStateTransition(
@@ -1202,6 +1214,25 @@ class BookingService:
 
         booking = await self._claim(booking, sp_id, pro)
         return booking, True, pro
+
+    async def declined_pro_ids(
+        self, booking_id: uuid.UUID, pro_ids: list[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        """Which of ``pro_ids`` declined this booking (SVC-361), read from the
+        SVC-333 audit trail. Callers pass only their own SP's Pros, so another
+        SP's declines can never come back."""
+        if not pro_ids:
+            return set()
+        rows = await self.db.scalars(
+            select(BookingAssignmentEvent.from_professional_id)
+            .where(
+                BookingAssignmentEvent.booking_id == booking_id,
+                BookingAssignmentEvent.kind == "declined",
+                BookingAssignmentEvent.from_professional_id.in_(pro_ids),
+            )
+            .distinct()
+        )
+        return set(rows.all())
 
     async def decline_job(self, booking_id: uuid.UUID, user_id: uuid.UUID) -> tuple[Booking, str]:
         """The assigned Pro turns the job down. Returns ``(booking, outcome)``.
