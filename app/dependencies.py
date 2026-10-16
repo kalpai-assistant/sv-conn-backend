@@ -15,7 +15,14 @@ from app.models.user import User
 from app.utils.security import decode_jwt
 
 settings = get_settings()
-security = HTTPBearer()
+# auto_error=False: FastAPI's default answers a missing (or non-Bearer)
+# Authorization header with 403, which is "you may not", not "who are you?".
+# The app signs out on a 401 only, so a client calling with no token was told
+# nothing it could act on and just retried. get_current_user raises the 401.
+security = HTTPBearer(auto_error=False)
+
+# RFC 6750: a 401 for a bearer-protected resource names the scheme.
+_BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
 
 # Redis connection pool — initialised in lifespan, shared across requests
 _redis_pool: AsyncRedis | None = None
@@ -29,7 +36,7 @@ async def get_redis() -> AsyncRedis:
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """Extract and validate JWT; return the active User object.
@@ -39,11 +46,18 @@ async def get_current_user(
     UI. `send_default_pii=False` is set at init time, so only the id +
     role make it into Sentry — never the phone number or email.
     """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers=_BEARER_CHALLENGE,
+        )
     payload = decode_jwt(credentials.credentials)
     if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
+            headers=_BEARER_CHALLENGE,
         )
 
     user = await db.get(User, UUID(payload["sub"]))
@@ -51,6 +65,7 @@ async def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
+            headers=_BEARER_CHALLENGE,
         )
     _tag_sentry_user(str(user.id), user.role.value)
     return user
