@@ -62,13 +62,14 @@ async def delete_me(
     a payout is owed. Nothing is changed on a 409.
 
     Otherwise the account is anonymised in place (see ``AccountService``) and
-    its photos and KYC images are deleted from S3 after the commit.
+    its photos and KYC images are deleted from S3 after the commit, including
+    old ones from earlier re-uploads.
     """
-    keys = await AccountService(db).delete_account(current_user.id)
+    cleanup = await AccountService(db).delete_account(current_user.id)
     await db.commit()
     if body is not None and body.refresh_token:
         await AuthService(db, redis).logout(body.refresh_token)
-    await asyncio.to_thread(delete_objects, current_user.id, keys)
+    await asyncio.to_thread(delete_objects, current_user.id, cleanup)
 
 
 @router.patch("/me/fcm-token", status_code=status.HTTP_204_NO_CONTENT)

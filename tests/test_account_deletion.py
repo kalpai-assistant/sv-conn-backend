@@ -42,11 +42,25 @@ BUCKET_URL = f"https://{storage.settings.S3_BUCKET_NAME}.s3.amazonaws.com/"
 pytestmark = pytest.mark.usefixtures("pushes")
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def deleted_keys(monkeypatch):
+    """Every test stubs S3; this records the named keys deleted."""
     keys: list[str] = []
     monkeypatch.setattr(storage, "delete_file", keys.append)
     return keys
+
+
+@pytest.fixture(autouse=True)
+def swept_prefixes(monkeypatch):
+    """The folders swept for objects the rows no longer name."""
+    prefixes: list[str] = []
+
+    def sweep(prefix):
+        prefixes.append(prefix)
+        return 0
+
+    monkeypatch.setattr(storage, "delete_prefix", sweep)
+    return prefixes
 
 
 async def _delete(client, auth_headers, user, role, **kwargs):
@@ -90,7 +104,7 @@ async def _assert_past_booking_serialises(client, auth_headers, db, booking, vie
 
 @pytest.mark.asyncio
 async def test_consumer_is_tombstoned_and_their_past_booking_still_reads(
-    client, db_session, auth_headers, redis_client, deleted_keys
+    client, db_session, auth_headers, redis_client, deleted_keys, swept_prefixes
 ):
     sp = await _eligible_provider(db_session, await _service(db_session))
     consumer, booking = await _completed_booking(db_session, sp)
@@ -117,6 +131,8 @@ async def test_consumer_is_tombstoned_and_their_past_booking_still_reads(
     assert (address.house_floor, address.contact_phone, address.location) == (None, None, None)
     assert address.deleted_at is not None
     assert deleted_keys == []
+    # A consumer has no S3 folders.
+    assert swept_prefixes == []
 
     # The refresh token is revoked, and the access token no longer works.
     assert await redis_client.exists(f"jwt:blacklist:{decode_jwt(refresh)['jti']}")
@@ -159,7 +175,7 @@ async def test_same_phone_signs_up_again_as_a_new_account(
 
 @pytest.mark.asyncio
 async def test_solo_sp_is_scrubbed_and_its_s3_objects_go(
-    client, db_session, auth_headers, deleted_keys
+    client, db_session, auth_headers, deleted_keys, swept_prefixes
 ):
     sp = await _eligible_provider(db_session, await _service(db_session))
     self_pro = await ProviderService(db_session).ensure_self_professional(sp.id)
@@ -210,6 +226,10 @@ async def test_solo_sp_is_scrubbed_and_its_s3_objects_go(
             f"kyc/{sp.id}/s.jpg",
         ]
     )
+    # Plus the folders, for photos replaced by a re-upload and a redone KYC.
+    assert sorted(swept_prefixes) == sorted(
+        [f"provider-photos/{sp.id}/", f"kyc/{sp.id}/", f"kyc/pros/{self_pro.id}/"]
+    )
 
     # The consumer still sees the past job, now under the placeholder name.
     consumer = await db_session.get(User, booking.consumer_id)
@@ -231,10 +251,60 @@ async def test_s3_failure_still_deletes_the_account(client, db_session, auth_hea
         raise RuntimeError("s3 down")
 
     monkeypatch.setattr(storage, "delete_file", boom)
+    monkeypatch.setattr(storage, "delete_prefix", boom)
 
     assert (await _delete(client, auth_headers, sp, "provider")).status_code == 204
     await db_session.refresh(sp)
     assert sp.is_active is False
+
+
+def test_a_sweep_failure_does_not_stop_the_named_deletes(monkeypatch, deleted_keys):
+    """No s3:ListBucket on the role: the named keys still go."""
+    from app.services.account_service import S3Cleanup, delete_objects
+
+    def denied(prefix):
+        raise RuntimeError("AccessDenied")
+
+    monkeypatch.setattr(storage, "delete_prefix", denied)
+    delete_objects(uuid.uuid4(), S3Cleanup(keys=["a", "b"], prefixes=["x/", "y/"]))
+    assert deleted_keys == ["a", "b"]
+
+
+class _FakeS3:
+    """Two pages under the prefix; records what delete_objects was sent."""
+
+    def __init__(self, pages):
+        self.pages, self.deleted, self.listed = pages, [], []
+
+    def get_paginator(self, name):
+        assert name == "list_objects_v2"
+        return self
+
+    def paginate(self, Bucket, Prefix):  # noqa: N803 (boto3's names)
+        self.listed.append(Prefix)
+        return [{"Contents": [{"Key": k} for k in page]} if page else {} for page in self.pages]
+
+    def delete_objects(self, Bucket, Delete):  # noqa: N803
+        self.deleted += [o["Key"] for o in Delete["Objects"]]
+        return {}
+
+
+def test_delete_prefix_removes_every_page(monkeypatch):
+    monkeypatch.undo()  # the real delete_prefix, not the autouse stub
+    fake = _FakeS3([["p/1.jpg", "p/2.jpg"], [], ["p/3.jpg"]])
+    monkeypatch.setattr(storage, "_get_client", lambda: fake)
+
+    assert storage.delete_prefix("p/") == 3
+    assert fake.listed == ["p/"]
+    assert fake.deleted == ["p/1.jpg", "p/2.jpg", "p/3.jpg"]
+
+
+@pytest.mark.parametrize("prefix", ["", "/", "provider-photos"])
+def test_delete_prefix_refuses_anything_but_a_folder(monkeypatch, prefix):
+    monkeypatch.undo()
+    monkeypatch.setattr(storage, "_get_client", lambda: pytest.fail("S3 was called"))
+    with pytest.raises(ValueError):
+        storage.delete_prefix(prefix)
 
 
 @pytest.mark.asyncio
@@ -287,7 +357,7 @@ async def test_sp_with_a_team_is_refused(client, db_session, auth_headers):
 
 @pytest.mark.asyncio
 async def test_team_pro_leaves_the_team_and_their_past_job_still_reads(
-    client, db_session, auth_headers, deleted_keys
+    client, db_session, auth_headers, deleted_keys, swept_prefixes
 ):
     sp, self_pro, member = await _team_sp(db_session, await _service(db_session))
     # The SP is off tools; losing its only team Pro must switch it back on (SVC-326).
@@ -309,6 +379,8 @@ async def test_team_pro_leaves_the_team_and_their_past_job_still_reads(
     assert accepted.invitee_phone == tombstone_phone(member_user.id)
     assert accepted.status == InviteStatus.ACCEPTED.value
     assert deleted_keys == [f"kyc/pros/{member.id}/s.jpg"]
+    # A team Pro has no SP folders; only their own KYC folder is swept.
+    assert swept_prefixes == [f"kyc/pros/{member.id}/"]
 
     await db_session.refresh(booking)
     assert booking.professional_id == member.id

@@ -15,6 +15,7 @@ hash of the old number is kept; that is the point.
 
 import logging
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from fastapi import status
@@ -51,6 +52,22 @@ DELETED_PROFESSIONAL = "Deleted professional"
 _KYC_KEY_FIELDS = ("aadhaar_front_key", "aadhaar_back_key", "selfie_key", "aadhaar_key")
 
 
+@dataclass
+class S3Cleanup:
+    """What to remove from S3 once the deletion has committed.
+
+    ``keys`` are the objects the rows name; deleting them needs only
+    ``s3:DeleteObject``. ``prefixes`` are the user's folders, swept for what the
+    rows no longer name: a photo replaced by a re-upload, or the images of a
+    KYC submission that was rejected and redone. Both folders are written per
+    user (``provider-photos/{user_id}/``, ``kyc/{user_id}/``,
+    ``kyc/pros/{pro_id}/``), so everything in them is this user's.
+    """
+
+    keys: list[str] = field(default_factory=list)
+    prefixes: list[str] = field(default_factory=list)
+
+
 def tombstone_phone(user_id: uuid.UUID) -> str:
     """15 chars (``users.phone`` is String(15)), unique because it is derived
     from the id, and never a valid ``+91…`` number, so no OTP can reach it."""
@@ -61,8 +78,8 @@ class AccountService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def delete_account(self, user_id: uuid.UUID) -> list[str]:
-        """Tombstone the caller's account. Returns the S3 keys to delete once
+    async def delete_account(self, user_id: uuid.UUID) -> S3Cleanup:
+        """Tombstone the caller's account. Returns what to delete from S3 once
         the transaction commits; the caller commits.
 
         Refused, with nothing written, while the user:
@@ -95,6 +112,7 @@ class AccountService:
         now = datetime.now(UTC)
         old_phone = user.phone
         keys: list[str] = []
+        prefixes: list[str] = []
 
         # A team Pro leaves the way an SP removing them would, so the other
         # SP's SVC-326 invariant (an SP off tools keeps another Pro) holds.
@@ -104,6 +122,7 @@ class AccountService:
                 await team.remove_pro(pro.service_provider_id, pro.id)
         for pro in pros:
             keys += _kyc_keys(pro.kyc_docs) + _photo_keys(pro.profile_photo_url)
+            prefixes.append(f"kyc/pros/{pro.id}/")
             pro.is_active = False
             pro.is_online = False
             pro.display_name = DELETED_PROFESSIONAL
@@ -116,6 +135,7 @@ class AccountService:
         if profile is not None:
             keys += _kyc_keys(profile.kyc_docs)
             keys += _photo_keys(profile.profile_photo_url, profile.business_image_url)
+            prefixes += [f"provider-photos/{user_id}/", f"kyc/{user_id}/"]
             _scrub_profile(profile)
             await self.db.execute(
                 update(ProviderTeamInvite)
@@ -170,7 +190,7 @@ class AccountService:
 
         logger.warning("account.deleted user_id=%s role=%s", user_id, user.role.value)
         # Pro-for-self and SP rows can name the same object; delete it once.
-        return list(dict.fromkeys(keys))
+        return S3Cleanup(keys=list(dict.fromkeys(keys)), prefixes=prefixes)
 
     async def _refuse_if_blocked(
         self,
@@ -288,13 +308,26 @@ def _photo_keys(*urls: str | None) -> list[str]:
     return keys
 
 
-def delete_objects(user_id: uuid.UUID, keys: list[str]) -> None:
+def delete_objects(user_id: uuid.UUID, cleanup: S3Cleanup) -> None:
     """Best-effort, after commit: the account is already gone, so a failed
-    S3 call is logged for a manual sweep, never surfaced to the user."""
-    for key in keys:
+    S3 call is logged for a manual sweep, never surfaced to the user.
+
+    The named keys go first, so they are removed even if the role lacks
+    ``s3:ListBucket`` and the folder sweep fails.
+    """
+    for key in cleanup.keys:
         try:
             storage.delete_file(key)
         except Exception:
             logger.warning(
                 "account.s3_delete_failed user_id=%s key=%s", user_id, key, exc_info=True
             )
+    for prefix in cleanup.prefixes:
+        try:
+            swept = storage.delete_prefix(prefix)
+        except Exception:
+            logger.warning(
+                "account.s3_sweep_failed user_id=%s prefix=%s", user_id, prefix, exc_info=True
+            )
+        else:
+            logger.info("account.s3_swept user_id=%s prefix=%s objects=%d", user_id, prefix, swept)

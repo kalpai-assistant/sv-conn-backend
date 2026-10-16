@@ -69,6 +69,33 @@ def delete_file(key: str) -> None:
     _get_client().delete_object(Bucket=settings.S3_BUCKET_NAME, Key=key)
 
 
+def delete_prefix(prefix: str) -> int:
+    """Delete every object under ``prefix``; returns how many (SVC-367).
+
+    For the objects nothing in the database names any more: a re-uploaded photo
+    or a resubmitted KYC leaves the old file behind. Needs ``s3:ListBucket`` on
+    the app's role. ``prefix`` must be a folder (``…/``), never empty, so a bad
+    call can't empty the bucket.
+    """
+    if not prefix or not prefix.endswith("/") or prefix == "/":
+        raise ValueError(f"refusing to delete under prefix {prefix!r}")
+    client = _get_client()
+    deleted = 0
+    for page in client.get_paginator("list_objects_v2").paginate(
+        Bucket=settings.S3_BUCKET_NAME, Prefix=prefix
+    ):
+        objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+        if not objects:
+            continue
+        resp = client.delete_objects(
+            Bucket=settings.S3_BUCKET_NAME, Delete={"Objects": objects, "Quiet": True}
+        )
+        if resp.get("Errors"):
+            raise RuntimeError(f"S3 refused {len(resp['Errors'])} deletes under {prefix}")
+        deleted += len(objects)
+    return deleted
+
+
 def key_from_url(url: str) -> str | None:
     """The S3 key behind a URL ``upload_file`` returned, or None for anything else.
 
