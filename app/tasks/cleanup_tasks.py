@@ -52,6 +52,23 @@ def expire_stale_bookings():
             .scalars()
             .all()
         )
+        # The system's own transition (changed_by NULL), one row per booking,
+        # so the admin timeline shows the expiry instead of stopping at
+        # "requested". Same commit as the UPDATE.
+        if expired_ids:
+            from app.models.booking_status_log import BookingStatusLog
+
+            db.add_all(
+                BookingStatusLog(
+                    booking_id=booking_id,
+                    from_status=BookingStatus.REQUESTED.value,
+                    to_status=BookingStatus.EXPIRED.value,
+                    changed_by=None,
+                    metadata_={"reason": "offer_window_elapsed"},
+                    note="offer window elapsed",
+                )
+                for booking_id in expired_ids
+            )
         db.commit()
         expired = len(expired_ids)
         for booking_id, counts in _offer_counts(db, expired_ids).items():
