@@ -210,9 +210,10 @@ async def test_transient_error_does_not_clear_the_token(db_session, committed):
     def _throttle(token, **_):
         raise fcm_messaging.QuotaExceededError("slow down")
 
-    # The task will re-raise via self.retry — the assertion we care about is
-    # the row: the token must survive a transient error unscathed.
-    with pytest.raises(Exception):  # noqa: B017 - Celery Retry, don't couple to its exact type
+    # The push is retried on its own (resend_booking_push), not by retrying
+    # the task. The assertion that matters is still the row: the token must
+    # survive a transient error unscathed.
+    with patch("app.tasks.notification_tasks.resend_booking_push.apply_async") as resend:
         _run_task(
             send_booking_notification,
             booking_id=str(booking.id),
@@ -222,6 +223,8 @@ async def test_transient_error_does_not_clear_the_token(db_session, committed):
         )
 
     assert await _current_token(db_session, provider.id) == "alive-token"
+    [call] = resend.call_args_list
+    assert call.kwargs["kwargs"]["user_id"] == str(provider.id)
 
 
 # ---------------------------------------------------------------------------

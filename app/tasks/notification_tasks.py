@@ -741,21 +741,8 @@ def send_booking_notification(
                 if not (recipient and getattr(recipient, "fcm_token", None)):
                     continue
                 try:
-                    send_push_notification(
-                        token=recipient.fcm_token,
-                        title=title,
-                        body=push_body,
-                        # Only the job request gets its own channel. Giving
-                        # every event one would leave a provider with a wall of
-                        # equally urgent sounds and nothing distinguishing the
-                        # one that pays them.
-                        android_channel_id=(
-                            JOB_REQUEST_CHANNEL_ID if push_event == "new_request" else None
-                        ),
-                        # Payload stays a bare pointer — the card fetches its data
-                        # from the offer endpoint, which can revoke access once the
-                        # booking is claimed. A push cannot be taken back.
-                        data={"booking_id": booking_id, "event": push_event},
+                    _send_booking_push(
+                        recipient.fcm_token, booking_id, push_event, title, push_body
                     )
                 except _DEAD_TOKEN_ERRORS as dead:
                     # SVC-301: FCM has confirmed this token can never succeed.
@@ -765,9 +752,139 @@ def send_booking_notification(
                     # abort the whole broadcast (which the pre-SVC-301
                     # outer-only try/except used to do).
                     _clear_dead_fcm_token(db, recipient, dead)
+                except Exception as err:
+                    # Retry this one recipient, not the task. A task retry
+                    # re-ran the whole body: everyone already pushed got the
+                    # job again, and (before SVC-373) a retry landing after an
+                    # accept expired the accepted booking.
+                    _schedule_resend(booking_id, recipient.id, push_event, title, push_body, err)
 
     except Exception as exc:
         self.retry(exc=exc)
+
+
+def _send_booking_push(token, booking_id, push_event, title, body) -> None:
+    send_push_notification(
+        token=token,
+        title=title,
+        body=body,
+        # Only the job request gets its own channel. Giving every event one
+        # would leave a provider with a wall of equally urgent sounds and
+        # nothing distinguishing the one that pays them.
+        android_channel_id=(JOB_REQUEST_CHANNEL_ID if push_event == "new_request" else None),
+        # Payload stays a bare pointer — the card fetches its data from the
+        # offer endpoint, which can revoke access once the booking is claimed.
+        # A push cannot be taken back.
+        data={"booking_id": str(booking_id), "event": push_event},
+    )
+
+
+def _schedule_resend(booking_id, user_id, push_event, title, body, err: Exception) -> None:
+    """Queue one recipient's push again. Never raises: a broker failure here
+    must not retry the broadcast, which is the duplicate-push problem this
+    exists to avoid."""
+    logger.warning(
+        "push.failed_will_retry booking_id=%s user_id=%s event=%s error_class=%s",
+        booking_id,
+        user_id,
+        push_event,
+        type(err).__name__,
+    )
+    try:
+        resend_booking_push.apply_async(
+            kwargs={
+                "booking_id": str(booking_id),
+                "user_id": str(user_id),
+                "event": push_event,
+                "title": title,
+                "body": body,
+            },
+            countdown=RESEND_DELAY_SECONDS,
+        )
+    except Exception:
+        logger.exception(
+            "push.resend_enqueue_failed booking_id=%s user_id=%s event=%s",
+            booking_id,
+            user_id,
+            push_event,
+        )
+
+
+RESEND_DELAY_SECONDS = 5
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=RESEND_DELAY_SECONDS,
+    name="app.tasks.notification_tasks.resend_booking_push",
+)
+def resend_booking_push(self, booking_id: str, user_id: str, event: str, title: str, body: str):
+    """Send one booking push that failed in the broadcast, on its own retry
+    budget (three tries, 5 s apart: what the whole task used to get).
+
+    The token is read now, not carried in the message, so a token the app
+    re-registered since is the one used. A job offer is re-checked first: no
+    push unless the booking is still REQUESTED and this SP's offer unanswered,
+    so a claimed job is never advertised. The check's lock is released before
+    the push (accept and assign lock the booking FOR UPDATE, and must never
+    wait on FCM); a claim landing in between is covered by the offer endpoint,
+    which stops serving the job once it's claimed.
+    """
+    from sqlalchemy import select
+
+    from app.database import SyncSessionLocal
+    from app.models.booking import Booking
+    from app.models.booking_offer import BookingOffer
+    from app.models.user import User
+
+    with SyncSessionLocal() as db:
+        if event == "new_request":
+            booking = db.execute(
+                select(Booking).where(Booking.id == booking_id).with_for_update(read=True)
+            ).scalar_one_or_none()
+            unanswered = (
+                db.execute(
+                    select(BookingOffer.id).where(
+                        BookingOffer.booking_id == booking_id,
+                        BookingOffer.provider_id == user_id,
+                        BookingOffer.response.is_(None),
+                    )
+                ).scalar_one_or_none()
+                is not None
+            )
+            still_open = booking is not None and booking.status is BookingStatus.REQUESTED
+            db.rollback()  # release the share lock before any network call
+            if not (still_open and unanswered):
+                logger.info(
+                    "push.resend_skipped booking_id=%s user_id=%s event=%s open=%s unanswered=%s",
+                    booking_id,
+                    user_id,
+                    event,
+                    still_open,
+                    unanswered,
+                )
+                return
+
+        user = db.get(User, user_id)
+        token = user.fcm_token if user is not None else None
+        if not token:
+            return
+        try:
+            _send_booking_push(token, booking_id, event, title, body)
+        except _DEAD_TOKEN_ERRORS as dead:
+            _clear_dead_fcm_token(db, user, dead)
+        except Exception as exc:
+            if self.request.retries >= self.max_retries:
+                logger.warning(
+                    "push.gave_up booking_id=%s user_id=%s event=%s error_class=%s",
+                    booking_id,
+                    user_id,
+                    event,
+                    type(exc).__name__,
+                )
+                return
+            raise self.retry(exc=exc) from exc
 
 
 @celery_app.task(
