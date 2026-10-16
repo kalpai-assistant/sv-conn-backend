@@ -388,13 +388,53 @@ def _expire_unbroadcastable(db, booking, reason: str) -> None:
             reason,
         )
         return
+
+    # SVC-373: only a booking still REQUESTED, guarded in the UPDATE itself. A
+    # Celery retry of the broadcast used to land after an SP had accepted, find
+    # nobody left to offer it to, and expire the accepted job.
+    from sqlalchemy import update
+
+    from app.models.booking import Booking
+    from app.models.booking_status_log import BookingStatusLog
+
+    expired = db.execute(
+        update(Booking)
+        .where(
+            Booking.id == booking.id,
+            Booking.status == BookingStatus.REQUESTED,
+            Booking.payment_status != PaymentStatus.PAID,
+        )
+        .values(status=BookingStatus.EXPIRED)
+        .returning(Booking.id)
+    ).scalar_one_or_none()
+    if expired is None:
+        db.rollback()
+        # Re-read after the rollback: the status that made the UPDATE miss.
+        logger.info(
+            "booking.unbroadcastable_skipped booking_id=%s reason=%s status=%s",
+            booking.id,
+            reason,
+            db.get(Booking, booking.id).status.value,
+        )
+        return
+    # The system's own transition (changed_by NULL), so the admin timeline
+    # shows the expiry instead of stopping at "requested".
+    db.add(
+        BookingStatusLog(
+            booking_id=booking.id,
+            from_status=BookingStatus.REQUESTED.value,
+            to_status=BookingStatus.EXPIRED.value,
+            changed_by=None,
+            metadata_={"reason": reason},
+            note=f"unbroadcastable: {reason}",
+        )
+    )
+    db.commit()
     logger.info(
         "booking.unbroadcastable booking_id=%s reason=%s",
         booking.id,
         reason,
     )
-    booking.status = BookingStatus.EXPIRED
-    db.commit()
 
 
 def _log_no_providers(db, booking, service_ids, address) -> None:
@@ -487,6 +527,23 @@ def send_booking_notification(
                 from app.models.booking_item import BookingItem
                 from app.services.booking_service import _summarise_service_names
                 from app.services.provider_matching import broadcast_recipients_stmt
+
+                # SVC-373: broadcast only a booking still waiting for someone.
+                # This task retries the whole body on a push error, and
+                # notify_reopened queues it behind a reopen, so by the time it
+                # runs an SP may have taken the job. Locked the way accept and
+                # assign lock it, so the two take turns; the offer insert
+                # below commits before any push, so the lock is never held
+                # across FCM.
+                booking = db.get(Booking, booking.id, with_for_update=True, populate_existing=True)
+                if booking.status is not BookingStatus.REQUESTED:
+                    logger.info(
+                        "broadcast.skipped_not_requested booking_id=%s status=%s",
+                        booking.id,
+                        booking.status.value,
+                    )
+                    db.rollback()
+                    return
 
                 # Get the booking address location directly
                 address = db.get(Address, booking.consumer_address_id)
