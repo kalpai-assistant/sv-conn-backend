@@ -28,6 +28,11 @@ class User(Base):
     # SVC-240: stamped on every successful verify-otp. NULL for users who
     # signed up before the column existed and haven't signed in since.
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # SVC-367: set when the user deleted their account. The row is a tombstone,
+    # not deleted, because ~20 FKs (bookings, reviews, ledger, payouts) point at
+    # it; ``phone`` then holds a non-phone placeholder, so the number is free to
+    # sign up again as a new account. See ``AccountService.delete_account``.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -120,6 +120,10 @@ requested → accepted → en_route → in_progress → completed
 
 Doorstep OTP (4-digit, stored in Redis) is required to transition from `en_route` → `in_progress`.
 
+### Account deletion (SVC-367)
+
+`DELETE /users/me` (Play + App Store requirement) tombstones the `users` row in `AccountService.delete_account`; it is never deleted, because ~20 non-cascading FKs (bookings, reviews, ledger, settlements, payouts, professionals) point at it. `phone` becomes `D` + 14 hex of the id (never a valid number), name/email/fcm_token go NULL, `is_active=false`, `deleted_at` is set. The same number can sign up again and gets a **fresh account** (no phone hash kept; this also resets per-user coupon limits, accepted). Addresses are scrubbed to `"Deleted address"` but keep their ids for past bookings. An SP's profile becomes `"Deleted provider"` with every `*_encrypted`, payout and KYC field NULL; every Pro row of the user goes inactive as `"Deleted professional"` (a team Pro via `TeamService.remove_pro`). Invites to their phone get the tombstone phone, and pending ones are revoked. Photo and KYC S3 objects are deleted after commit, best-effort. Refused with 409 and nothing written: `ACTIVE_BOOKINGS` (any requested/accepted/en_route/in_progress booking as consumer, SP or Pro), `TEAM_HAS_PROS` (an SP with an active team Pro), `UNPAID_BALANCE` (an SP's ledger sums to > 0, counting unsettled credits). No admin delete and no data export.
+
 ### Auth Flow
 
 1. `POST /send-otp` — generates 6-digit OTP, stores in Redis with 10-min TTL, sends via SMS

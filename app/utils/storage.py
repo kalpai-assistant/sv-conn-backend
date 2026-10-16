@@ -69,6 +69,21 @@ def delete_file(key: str) -> None:
     _get_client().delete_object(Bucket=settings.S3_BUCKET_NAME, Key=key)
 
 
+def key_from_url(url: str) -> str | None:
+    """The S3 key behind a URL ``upload_file`` returned, or None for anything else.
+
+    Photo columns store the URL, not the key (SVC-367 needs the key to delete
+    the object). Mirrors the two shapes ``upload_file`` builds.
+    """
+    prefixes = [f"https://{settings.S3_BUCKET_NAME}.s3.amazonaws.com/"]
+    if settings.S3_ENDPOINT_URL:
+        prefixes.append(f"{settings.S3_ENDPOINT_URL}/{settings.S3_BUCKET_NAME}/")
+    for prefix in prefixes:
+        if url.startswith(prefix) and len(url) > len(prefix):
+            return url[len(prefix) :]
+    return None
+
+
 def get_presigned_url(key: str, expires_in: int = 3600) -> str:
     """
     Generate a presigned GET URL for a private S3 object.

@@ -1,21 +1,26 @@
+import asyncio
 import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_redis
 from app.models.user import User
 from app.schemas.user import (
     AddressResponse,
     CreateAddressRequest,
+    DeleteAccountRequest,
     PushCapabilityReport,
     UpdateAddressRequest,
     UpdateFCMTokenRequest,
     UpdateProfileRequest,
     UserResponse,
 )
+from app.services.account_service import AccountService, delete_objects
+from app.services.auth_service import AuthService
 from app.services.user_service import AddressDetails, UserService
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -39,6 +44,31 @@ async def update_me(
         name=request.name,
         email=request.email,
     )
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_me(
+    body: DeleteAccountRequest | None = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    """Delete the caller's account (SVC-367). No undo.
+
+    409 ``ACTIVE_BOOKINGS`` (``details.booking_ids``) while any booking they are
+    on is requested/accepted/en route/in progress; for an SP, 409
+    ``TEAM_HAS_PROS`` (``details.professional_ids``) while a team member is
+    still active, and 409 ``UNPAID_BALANCE`` (``details.balance_paise``) while
+    a payout is owed. Nothing is changed on a 409.
+
+    Otherwise the account is anonymised in place (see ``AccountService``) and
+    its photos and KYC images are deleted from S3 after the commit.
+    """
+    keys = await AccountService(db).delete_account(current_user.id)
+    await db.commit()
+    if body is not None and body.refresh_token:
+        await AuthService(db, redis).logout(body.refresh_token)
+    await asyncio.to_thread(delete_objects, current_user.id, keys)
 
 
 @router.patch("/me/fcm-token", status_code=status.HTTP_204_NO_CONTENT)
