@@ -70,6 +70,17 @@ class UpdateFCMTokenRequest(BaseModel):
     fcm_token: str | None = Field(..., max_length=255)
 
 
+class DeleteAccountRequest(BaseModel):
+    """Optional body for ``DELETE /users/me`` (SVC-367).
+
+    The refresh token, when sent, is revoked like ``/auth/logout`` does. It is
+    optional because the account going inactive already makes every refresh
+    token for it fail; this just puts the caller's on the blacklist too.
+    """
+
+    refresh_token: str | None = None
+
+
 # Six digits, nothing else. Indian PIN codes are fixed-width, so a length check
 # is a real check rather than a formality — it catches the common paste of a
 # phone number or a partial code.

@@ -311,8 +311,13 @@ async def test_invalid_coupon_code_refuses_the_whole_booking(db_session):
         )
     await db_session.rollback()
 
-    # No orphan booking.
-    count = (await db_session.execute(select(func.count(Booking.id)))).scalar_one()
+    # No orphan booking. Scoped to this consumer: handlers that commit for real
+    # (e.g. DELETE /users/me) leave other tests' bookings in the shared DB.
+    count = (
+        await db_session.execute(
+            select(func.count(Booking.id)).where(Booking.consumer_id == consumer.id)
+        )
+    ).scalar_one()
     assert count == 0
 
 
