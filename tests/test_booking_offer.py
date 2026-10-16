@@ -452,8 +452,13 @@ def _fake_session(booking, address, service, recipients):
     from app.models.address import Address as AddressModel
     from app.models.booking import Booking as BookingModel
 
+    # SVC-373: the broadcast only runs for a REQUESTED booking, and re-reads
+    # it FOR UPDATE (hence **_ on db.get).
+    if not isinstance(getattr(booking, "status", None), BookingStatus):
+        booking.status = BookingStatus.REQUESTED
+
     db = MagicMock()
-    db.get.side_effect = lambda model, _id: {
+    db.get.side_effect = lambda model, _id, **_: {
         BookingModel: booking,
         AddressModel: address,
     }.get(model)

@@ -18,6 +18,7 @@ apparently in place. That is what these tests are for.
 
 from unittest.mock import MagicMock, patch
 
+from app.models.booking import BookingStatus
 from app.tasks.notification_tasks import JOB_REQUEST_CHANNEL_ID
 from app.utils.fcm_client import _android_config
 
@@ -84,6 +85,7 @@ def _push_channel_for(event: str) -> str | None:
     import app.tasks.notification_tasks as nt
 
     booking = MagicMock()
+    booking.status = BookingStatus.REQUESTED
     booking.consumer_address_id = "addr"
     booking.provider_id = "p1"
     booking.consumer_id = "c1"
@@ -97,7 +99,10 @@ def _push_channel_for(event: str) -> str | None:
     address.location = "POINT(73.8567 18.5204)"
 
     db = MagicMock()
-    db.get.side_effect = lambda model, _id: booking if model.__name__ == "Booking" else address
+    # **_: the broadcast re-reads the booking FOR UPDATE (SVC-373).
+    db.get.side_effect = lambda model, _id, **_: (
+        booking if model.__name__ == "Booking" else address
+    )
     item = MagicMock()
     item.service_id = "svc-1"
     db.execute.return_value.scalars.return_value.all.side_effect = [[item], [party]]
@@ -133,6 +138,7 @@ def test_the_broadcast_names_the_channel_when_it_pushes():
     import app.tasks.notification_tasks as nt
 
     booking = MagicMock()
+    booking.status = BookingStatus.REQUESTED
     booking.consumer_address_id = "addr"
     provider = MagicMock()
     provider.fcm_token = "provider-token"
@@ -141,7 +147,10 @@ def test_the_broadcast_names_the_channel_when_it_pushes():
     address.location = "POINT(73.8567 18.5204)"
 
     db = MagicMock()
-    db.get.side_effect = lambda model, _id: booking if model.__name__ == "Booking" else address
+    # **_: the broadcast re-reads the booking FOR UPDATE (SVC-373).
+    db.get.side_effect = lambda model, _id, **_: (
+        booking if model.__name__ == "Booking" else address
+    )
 
     item = MagicMock()
     item.service_id = "svc-1"

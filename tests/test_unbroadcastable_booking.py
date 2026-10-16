@@ -50,6 +50,7 @@ async def committed(db_session):
     from app.models.booking import Booking
     from app.models.booking_item import BookingItem
     from app.models.booking_offer import BookingOffer
+    from app.models.booking_status_log import BookingStatusLog
     from app.models.provider_profile import ProviderProfile
     from app.models.provider_service import ProviderService
     from app.models.user import User
@@ -66,6 +67,10 @@ async def committed(db_session):
             delete(BookingOffer).where(BookingOffer.booking_id.in_(booking_ids))
         )
         await db_session.execute(delete(BookingItem).where(BookingItem.booking_id.in_(booking_ids)))
+        # SVC-373: an unbroadcastable expiry now writes a status row.
+        await db_session.execute(
+            delete(BookingStatusLog).where(BookingStatusLog.booking_id.in_(booking_ids))
+        )
         await db_session.execute(delete(Booking).where(Booking.id.in_(booking_ids)))
     if user_ids:
         await db_session.execute(
