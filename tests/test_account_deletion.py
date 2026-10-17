@@ -110,6 +110,7 @@ async def test_consumer_is_tombstoned_and_their_past_booking_still_reads(
     consumer, booking = await _completed_booking(db_session, sp)
     consumer.email = "a@example.com"
     consumer.fcm_token = "tok"
+    consumer.fcm_platform = "android"
     address = await db_session.get(Address, booking.consumer_address_id)
     address.house_floor, address.contact_phone = "Flat 3", "+919800000000"
     await db_session.flush()
@@ -125,6 +126,7 @@ async def test_consumer_is_tombstoned_and_their_past_booking_still_reads(
     assert consumer.phone == tombstone_phone(consumer.id) != old_phone
     assert len(consumer.phone) <= 15
     assert (consumer.name, consumer.email, consumer.fcm_token) == (None, None, None)
+    assert consumer.fcm_platform is None
     assert consumer.is_active is False and consumer.deleted_at is not None
     await db_session.refresh(address)
     assert address.full_address == "Deleted address"

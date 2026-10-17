@@ -50,6 +50,7 @@ def _clear_dead_fcm_token(db, user, error: Exception) -> None:
         type(error).__name__,
     )
     user.fcm_token = None
+    user.fcm_platform = None
     db.commit()
 
 
@@ -945,6 +946,11 @@ def send_payout_notification(
         self.retry(exc=exc)
 
 
+# SVC-371: a release's ``app_versions.platform`` → the ``users.fcm_platform``
+# whose tokens should hear about it. The PWA registers its token as ``web``.
+RELEASE_TOKEN_PLATFORM: dict[str, str] = {"android": "android", "ios": "ios", "pwa": "web"}
+
+
 @celery_app.task(
     bind=True,
     max_retries=1,
@@ -961,6 +967,12 @@ def broadcast_update_available(self, version: str, platform: str = "android"):
     it brings the app to foreground where ``useAppVersionCheck`` re-runs
     and renders the nudge/block modal SVC-162 already implements.
 
+    Platform targeting (SVC-371): only tokens registered by the released
+    platform's app get it (``RELEASE_TOKEN_PLATFORM``), plus tokens whose
+    platform is NULL — registered by a client older than SVC-371 — which
+    keeps their pre-SVC-371 behaviour until they re-register. An unknown
+    release platform sends nothing rather than falling back to everyone.
+
     No per-user targeting today — every consumer with an FCM token on the
     given platform gets it. A user already on the latest version will get
     the push and their in-app check will silently show nothing (state:
@@ -972,10 +984,15 @@ def broadcast_update_available(self, version: str, platform: str = "android"):
     FCM already retries transient failures internally and a stale token
     is a soft failure the next FCM registration will fix.
     """
-    from sqlalchemy import and_, select
+    from sqlalchemy import and_, or_, select
 
     from app.database import SyncSessionLocal
     from app.models.user import User, UserRole
+
+    token_platform = RELEASE_TOKEN_PLATFORM.get(platform)
+    if token_platform is None:
+        logger.warning("update_available_unknown_platform platform=%s", platform)
+        return {"success_count": 0, "failure_count": 0, "recipient_count": 0}
 
     try:
         with SyncSessionLocal() as db:
@@ -987,6 +1004,10 @@ def broadcast_update_available(self, version: str, platform: str = "android"):
                     and_(
                         User.fcm_token.is_not(None),
                         User.role == UserRole.CONSUMER,
+                        or_(
+                            User.fcm_platform == token_platform,
+                            User.fcm_platform.is_(None),
+                        ),
                     )
                 )
             ).all()

@@ -339,6 +339,7 @@ async def test_payout_notification_clears_dead_token(db_session, committed):
     time an eligible batch settles for the same provider.
     """
     provider = await UserFactory.create(db_session, role="provider", fcm_token="dead-token")
+    provider.fcm_platform = "android"
     committed.append(provider)
     await db_session.commit()
 
@@ -354,3 +355,10 @@ async def test_payout_notification_clears_dead_token(db_session, committed):
     )
 
     assert await _current_token(db_session, provider.id) is None
+    # SVC-371: the platform goes with the token it described.
+    from sqlalchemy import select
+
+    from app.models.user import User
+
+    platform = await db_session.execute(select(User.fcm_platform).where(User.id == provider.id))
+    assert platform.scalar_one() is None

@@ -189,3 +189,97 @@ async def test_clear_only_affects_the_caller(client, auth_headers, db_session):
     assert response.status_code == 204, response.text
     assert await _stored_token(db_session, caller.id) is None
     assert await _stored_token(db_session, other.id) == "other-token"
+
+
+# ---------------------------------------------------------------------------
+# Token platform (SVC-371)
+# ---------------------------------------------------------------------------
+
+
+async def _stored_pair(db, user_id) -> tuple[str | None, str | None]:
+    result = await db.execute(select(User.fcm_token, User.fcm_platform).where(User.id == user_id))
+    return tuple(result.one())
+
+
+@pytest.mark.parametrize("platform", ["android", "ios", "web"])
+@pytest.mark.asyncio
+async def test_platform_stored_with_token(client, auth_headers, db_session, platform):
+    """Each value the release push filters on is accepted and stored."""
+    user = await UserFactory.create(db_session)
+
+    response = await client.patch(
+        ENDPOINT,
+        json={"fcm_token": "tok", "platform": platform},
+        headers=auth_headers(str(user.id)),
+    )
+
+    assert response.status_code == 204, response.text
+    assert await _stored_pair(db_session, user.id) == ("tok", platform)
+
+
+@pytest.mark.asyncio
+async def test_no_platform_still_204_and_stores_null(client, auth_headers, db_session):
+    """Installed APKs predate the field: omitting it must not 422 (that kills
+    their push), and must not keep a platform left by another app's token."""
+    user = await UserFactory.create(db_session)
+    user.fcm_token = "old-token"
+    user.fcm_platform = "web"
+    await db_session.flush()
+
+    response = await client.patch(
+        ENDPOINT,
+        json={"fcm_token": "apk-token"},
+        headers=auth_headers(str(user.id)),
+    )
+
+    assert response.status_code == 204, response.text
+    assert await _stored_pair(db_session, user.id) == ("apk-token", None)
+
+
+@pytest.mark.parametrize("platform", ["pwa", "ANDROID", "macos", ""])
+@pytest.mark.asyncio
+async def test_unknown_platform_rejected(client, auth_headers, db_session, platform):
+    """Only the three filterable values; ``pwa`` is a release name, not a token's."""
+    user = await UserFactory.create(db_session)
+    user.fcm_token = "live-token"
+    user.fcm_platform = "android"
+    await db_session.flush()
+
+    response = await client.patch(
+        ENDPOINT,
+        json={"fcm_token": "tok", "platform": platform},
+        headers=auth_headers(str(user.id)),
+    )
+
+    assert response.status_code == 422
+    assert await _stored_pair(db_session, user.id) == ("live-token", "android")
+
+
+@pytest.mark.parametrize("body", [{"fcm_token": None}, {"fcm_token": None, "platform": "android"}])
+@pytest.mark.asyncio
+async def test_clear_also_clears_platform(client, auth_headers, db_session, body):
+    """The platform never outlives its token, even when the clear names one."""
+    user = await UserFactory.create(db_session)
+    user.fcm_token = "live-token"
+    user.fcm_platform = "android"
+    await db_session.flush()
+
+    response = await client.patch(ENDPOINT, json=body, headers=auth_headers(str(user.id)))
+
+    assert response.status_code == 204, response.text
+    assert await _stored_pair(db_session, user.id) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_blank_token_with_platform_stores_null_platform(client, auth_headers, db_session):
+    """A blank token normalises to NULL, so its platform does too."""
+    user = await UserFactory.create(db_session)
+
+    response = await client.patch(
+        ENDPOINT,
+        json={"fcm_token": "  ", "platform": "ios"},
+        headers=auth_headers(str(user.id)),
+    )
+
+    assert response.status_code == 204, response.text
+    assert await _stored_pair(db_session, user.id) == (None, None)

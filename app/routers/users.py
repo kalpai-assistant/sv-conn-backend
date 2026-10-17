@@ -81,8 +81,9 @@ async def update_fcm_token(
     """Register the caller's FCM token, or clear it by sending `null` on sign-out.
 
     The field is required, so an empty body is rejected — clearing must be explicit.
+    `platform` is optional (SVC-371); without it the token gets every release push.
     """
-    await UserService(db).update_fcm_token(current_user.id, request.fcm_token)
+    await UserService(db).update_fcm_token(current_user.id, request.fcm_token, request.platform)
 
 
 @router.post("/me/push-capability", status_code=status.HTTP_204_NO_CONTENT)

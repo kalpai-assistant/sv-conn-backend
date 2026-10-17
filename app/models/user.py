@@ -25,6 +25,11 @@ class User(Base):
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     fcm_token: Mapped[str | None] = mapped_column(String(255))
+    # SVC-371: which app registered ``fcm_token`` (``android`` | ``ios`` | ``web``),
+    # so the release push reaches only the platform being released. NULL = not
+    # reported (a client older than SVC-371); such tokens still get every release
+    # push. Cleared whenever ``fcm_token`` is. Plain string, not a PG enum.
+    fcm_platform: Mapped[str | None] = mapped_column(String(10))
     # SVC-240: stamped on every successful verify-otp. NULL for users who
     # signed up before the column existed and haven't signed in since.
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

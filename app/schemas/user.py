@@ -65,9 +65,16 @@ class UpdateFCMTokenRequest(BaseModel):
     `fcm_token` is nullable but *required* — `null` clears the stored token
     (sign-out), while an omitted field is a 422. Without that distinction an
     empty body would silently wipe push for the user.
+
+    `platform` (SVC-371) says which app the token belongs to, so the release
+    push can skip other platforms. It is optional, unlike the ticket's wording:
+    installed APKs predate it and a required field would 422 their
+    registration, losing them push entirely. Omitted means stored as NULL,
+    which still gets every release push.
     """
 
     fcm_token: str | None = Field(..., max_length=255)
+    platform: Literal["android", "ios", "web"] | None = None
 
 
 class DeleteAccountRequest(BaseModel):
