@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, String, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -15,8 +15,20 @@ class UserRole(str, enum.Enum):
     ADMIN = "admin"
 
 
+# SVC-374: the languages a user can pick for the provider/Pro app and its push
+# copy. Order is the picker's. Adding one means a migration for the CHECK below.
+SUPPORTED_LANGUAGES: tuple[str, ...] = ("en", "hi", "mr")
+
+
 class User(Base):
     __tablename__ = "users"
+
+    __table_args__ = (
+        CheckConstraint(
+            "preferred_language IN (" + ", ".join(f"'{c}'" for c in SUPPORTED_LANGUAGES) + ")",
+            name="ck_users_preferred_language",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     phone: Mapped[str] = mapped_column(String(15), unique=True, nullable=False, index=True)
@@ -30,6 +42,11 @@ class User(Base):
     # reported (a client older than SVC-371); such tokens still get every release
     # push. Cleared whenever ``fcm_token`` is. Plain string, not a PG enum.
     fcm_platform: Mapped[str | None] = mapped_column(String(10))
+    # SVC-374: the language the user picked (``en`` | ``hi`` | ``mr``). NULL means
+    # never chosen, which is not ``en``: the app asks once, only while it is NULL,
+    # so there is no default. Provider/Pro pushes use it; customer pushes are
+    # always English. See ``template_for`` in ``notification_tasks``.
+    preferred_language: Mapped[str | None] = mapped_column(String(2))
     # SVC-240: stamped on every successful verify-otp. NULL for users who
     # signed up before the column existed and haven't signed in since.
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -576,7 +576,9 @@ class BookingService:
         if user_id not in (booking.consumer_id, booking.provider_id) and not (
             await self.is_assigned_pro(booking, user_id)
         ):
-            raise UnauthorizedAction("You do not have access to this booking")
+            raise UnauthorizedAction(
+                "You do not have access to this booking", code="NO_BOOKING_ACCESS"
+            )
         # After the access check, not before: a caller who is refused never
         # causes a lookup of the address (or items) they were refused.
         await self.attach_addresses([booking])
@@ -617,14 +619,14 @@ class BookingService:
         if address is None or address.location is None:
             # The broadcast bails out on the same condition, so nobody was ever
             # offered this booking — answer as we would to any non-recipient.
-            raise UnauthorizedAction("You were not offered this booking")
+            raise UnauthorizedAction("You were not offered this booking", code="NOT_OFFERED")
 
         service_ids = [item.service_id for item in booking.items]
         eligible = await self.db.execute(
             is_eligible_provider_multi_stmt(service_ids, address.location, provider_id)
         )
         if eligible.scalar_one_or_none() is None:
-            raise UnauthorizedAction("You were not offered this booking")
+            raise UnauthorizedAction("You were not offered this booking", code="NOT_OFFERED")
 
         # Open means REQUESTED — the only state a booking can be accepted from.
         # Anything else (claimed, cancelled, expired) ends the offer.
@@ -821,7 +823,7 @@ class BookingService:
         ).scalar_one_or_none()
 
         if row is None:
-            raise UnauthorizedAction("You were not offered this booking")
+            raise UnauthorizedAction("You were not offered this booking", code="NOT_OFFERED")
 
         if row.response is not None:
             return
@@ -957,7 +959,7 @@ class BookingService:
             if address is None or address.location is None:
                 # Address gone / never geocoded → the broadcast bailed too, so
                 # nobody was ever offered this. Refuse like any non-recipient.
-                raise UnauthorizedAction("You were not offered this booking")
+                raise UnauthorizedAction("You were not offered this booking", code="NOT_OFFERED")
             # Load items — the eligibility check needs the full set.
             await self.attach_items([booking])
             service_ids = [item.service_id for item in booking.items]
@@ -969,7 +971,7 @@ class BookingService:
                 # to do this" (SVC-168), which is different from "you lost the
                 # race" (410, below) or "the booking's over" (also 410). All
                 # three are distinguishable by status code alone.
-                raise UnauthorizedAction("You were not offered this booking")
+                raise UnauthorizedAction("You were not offered this booking", code="NOT_OFFERED")
 
         if booking.status in (BookingStatus.CANCELLED, BookingStatus.EXPIRED):
             raise BookingOfferClosed()
@@ -1166,7 +1168,8 @@ class BookingService:
         if not holds_it and booking.status is not BookingStatus.REQUESTED:
             # Theirs, but past ACCEPTED: en route or later.
             raise InvalidStateTransition(
-                f"A booking that is {booking.status.value} can't be reassigned"
+                f"A booking that is {booking.status.value} can't be reassigned",
+                code="BOOKING_NOT_REASSIGNABLE",
             )
 
         self._refuse_if_not_taking_jobs(pro)
@@ -1261,7 +1264,10 @@ class BookingService:
                 "Job not found.", status_code=status.HTTP_404_NOT_FOUND, code=JOB_NOT_FOUND
             )
         if booking.status is not BookingStatus.ACCEPTED:
-            raise InvalidStateTransition(f"A job that is {booking.status.value} can't be declined")
+            raise InvalidStateTransition(
+                f"A job that is {booking.status.value} can't be declined",
+                code="JOB_NOT_DECLINABLE",
+            )
 
         others = [p for p in await self._active_pros(booking.provider_id) if p.id != pro.id]
         await self.record_assignment(booking, "declined", pro.id, None, actor_id=user_id)
@@ -1290,10 +1296,11 @@ class BookingService:
         if not booking:
             raise BookingNotFound(booking_id)
         if booking.provider_id != sp_id:
-            raise UnauthorizedAction("You do not hold this booking")
+            raise UnauthorizedAction("You do not hold this booking", code="NOT_BOOKING_HOLDER")
         if booking.status is not BookingStatus.ACCEPTED:
             raise InvalidStateTransition(
-                f"A booking that is {booking.status.value} can't be released"
+                f"A booking that is {booking.status.value} can't be released",
+                code="BOOKING_NOT_RELEASABLE",
             )
         # Before ``reopen``, which clears the Pro.
         await self.record_assignment(
@@ -1397,7 +1404,8 @@ class BookingService:
         if new_status not in allowed:
             raise InvalidStateTransition(
                 f"Cannot move from {booking.status.value} to {new_status.value}. "
-                f"Allowed: {[s.value for s in allowed]}"
+                f"Allowed: {[s.value for s in allowed]}",
+                code="INVALID_TRANSITION",
             )
 
         # Broadcasting logic: The first provider to accept claims the booking globally
@@ -1406,7 +1414,8 @@ class BookingService:
                 booking.provider_id = changed_by
             elif booking.provider_id != changed_by:
                 raise UnauthorizedAction(
-                    "This booking has already been claimed by another provider"
+                    "This booking has already been claimed by another provider",
+                    code="BOOKING_CLAIMED_BY_OTHER",
                 )
         elif new_status in (
             BookingStatus.EN_ROUTE,
@@ -1422,19 +1431,23 @@ class BookingService:
             if changed_by != booking.provider_id and not (
                 await self.is_assigned_pro(booking, changed_by)
             ):
-                raise UnauthorizedAction("Only the assigned provider can perform this action")
+                raise UnauthorizedAction(
+                    "Only the assigned provider can perform this action",
+                    code="NOT_ASSIGNED_PROVIDER",
+                )
         elif changed_by not in (booking.provider_id, booking.consumer_id):
             # Cancel: either party, as always (who pays what is
             # _apply_cancellation_policy's business, and cancel() handles a
             # provider backing out of an ACCEPTED job before this).
             raise UnauthorizedAction(
-                "Only the assigned provider or consumer can perform this action"
+                "Only the assigned provider or consumer can perform this action",
+                code="NOT_ASSIGNED_PROVIDER",
             )
 
         # OTP gate for doorstep service start
         if new_status == BookingStatus.IN_PROGRESS:
             if not otp or otp != booking.doorstep_otp:
-                raise InvalidOTP("Doorstep OTP does not match")
+                raise InvalidOTP("Doorstep OTP does not match", code="DOORSTEP_OTP_MISMATCH")
 
         if new_status == BookingStatus.CANCELLED:
             booking.cancellation_reason = cancellation_reason

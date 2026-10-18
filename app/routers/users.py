@@ -16,6 +16,7 @@ from app.schemas.user import (
     PushCapabilityReport,
     UpdateAddressRequest,
     UpdateFCMTokenRequest,
+    UpdateLanguageRequest,
     UpdateProfileRequest,
     UserResponse,
 )
@@ -84,6 +85,21 @@ async def update_fcm_token(
     `platform` is optional (SVC-371); without it the token gets every release push.
     """
     await UserService(db).update_fcm_token(current_user.id, request.fcm_token, request.platform)
+
+
+@router.patch("/me/language", status_code=status.HTTP_204_NO_CONTENT)
+async def update_language(
+    request: UpdateLanguageRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save the caller's language: ``en``, ``hi`` or ``mr`` (SVC-374).
+
+    Open to every role: a Pro's account is a consumer account. It changes the
+    language of provider/Pro pushes only; customer pushes stay English. Read
+    it back as ``preferred_language`` on ``GET /users/me``.
+    """
+    await UserService(db).update_language(current_user.id, request.language)
 
 
 @router.post("/me/push-capability", status_code=status.HTTP_204_NO_CONTENT)

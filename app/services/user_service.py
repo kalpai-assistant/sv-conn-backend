@@ -113,6 +113,12 @@ class UserService:
         user.fcm_platform = platform if user.fcm_token else None
         await self.db.flush()
 
+    async def update_language(self, user_id: uuid.UUID, language: str) -> None:
+        """Store the user's picked language (SVC-374). Validated by the schema."""
+        user = await self.get_profile(user_id)
+        user.preferred_language = language
+        await self.db.flush()
+
     # ------------------------------------------------------------------
     # Addresses
     # ------------------------------------------------------------------

@@ -277,6 +277,7 @@ class ProviderService:
             raise AppException(
                 f"Profile photo upload failed: {exc}",
                 status_code=502,
+                code="PHOTO_UPLOAD_FAILED",
             ) from exc
 
         profile.profile_photo_url = url
@@ -313,6 +314,7 @@ class ProviderService:
             raise AppException(
                 f"Business image upload failed: {exc}",
                 status_code=502,
+                code="BUSINESS_IMAGE_UPLOAD_FAILED",
             ) from exc
 
         profile.business_image_url = url
@@ -333,6 +335,7 @@ class ProviderService:
             raise AppException(
                 f"{reason} Current KYC status: {profile.kyc_status.value}.",
                 status_code=400,
+                code="KYC_NOT_VERIFIED",
             )
 
     @staticmethod
@@ -484,9 +487,14 @@ class ProviderService:
     ) -> ProviderServiceModel:
         profile = await self.get_profile(provider_user_id)
         if profile is None:
-            raise UnauthorizedAction("Provider profile not found")
+            raise UnauthorizedAction(
+                "Provider profile not found", code="PROVIDER_PROFILE_NOT_FOUND"
+            )
         if profile.kyc_status != KYCStatus.VERIFIED:
-            raise UnauthorizedAction("Only verified providers can subscribe to services")
+            raise UnauthorizedAction(
+                "Only verified providers can subscribe to services",
+                code="PROVIDER_NOT_VERIFIED",
+            )
 
         service = await self.db.get(Service, service_id)
         if service is None or not service.is_active:
@@ -607,7 +615,8 @@ class ProviderService:
         if row.kyc_status in (KYCStatus.SUBMITTED, KYCStatus.VERIFIED):
             raise UnauthorizedAction(
                 "Cannot re-submit KYC while it is pending review or verified. "
-                "Contact support to reset."
+                "Contact support to reset.",
+                code="KYC_RESUBMIT_NOT_ALLOWED",
             )
 
         aadhaar_front_bytes, aadhaar_front_content_type, aadhaar_front_ext = aadhaar_front
@@ -644,6 +653,7 @@ class ProviderService:
             raise AppException(
                 f"KYC document upload failed: {exc}",
                 status_code=502,
+                code="KYC_UPLOAD_FAILED",
             ) from exc
 
         row.kyc_docs = {

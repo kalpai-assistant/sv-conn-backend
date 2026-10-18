@@ -6,6 +6,10 @@ from pydantic import BaseModel, Field
 
 from app.models.user import UserRole
 
+# SVC-374: the values of ``users.preferred_language``. Kept in step with
+# ``SUPPORTED_LANGUAGES`` in the model, which the DB's CHECK mirrors.
+Language = Literal["en", "hi", "mr"]
+
 
 class UserResponse(BaseModel):
     id: UUID
@@ -14,6 +18,9 @@ class UserResponse(BaseModel):
     email: str | None
     role: UserRole
     is_active: bool
+    # SVC-374. No default, so it stays in OpenAPI ``required``: the app reads
+    # null as "never chosen" and shows its one-time language prompt.
+    preferred_language: Language | None
     created_at: datetime
     updated_at: datetime
 
@@ -75,6 +82,17 @@ class UpdateFCMTokenRequest(BaseModel):
 
     fcm_token: str | None = Field(..., max_length=255)
     platform: Literal["android", "ios", "web"] | None = None
+
+
+class UpdateLanguageRequest(BaseModel):
+    """Body for ``PATCH /users/me/language`` (SVC-374).
+
+    Required and never null: there is no way back to "never chosen", which
+    would re-show the app's one-time prompt. Anything but the three codes is
+    a 422.
+    """
+
+    language: Language
 
 
 class DeleteAccountRequest(BaseModel):
