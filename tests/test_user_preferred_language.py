@@ -13,6 +13,9 @@ Covers, in order:
   NULL users in English.
 - Account deletion nulls it.
 - Provider/Pro errors carry a stable ``code``.
+- The ``I18N_MODE`` kill switch: ``i18n_enabled`` on ``/users/me`` and English
+  pushes while it is off for the user. Every other test here runs with it
+  ``on`` (the ``i18n_on`` fixture), so they test the copy, not the switch.
 
 The migration's up/down is checked by CI (``alembic upgrade head`` + ``alembic
 check``) and by hand on this ticket; here the CHECK is exercised on the
@@ -26,6 +29,7 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
+from app.config import get_settings
 from app.models.booking import BookingStatus
 from app.models.user import SUPPORTED_LANGUAGES, User
 from app.services.account_service import AccountService
@@ -46,6 +50,13 @@ from tests.test_push_copy_pro_brand import _job
 
 ME = "/api/v1/users/me"
 LANGUAGE = "/api/v1/users/me/language"
+
+
+@pytest.fixture(autouse=True)
+def i18n_on(monkeypatch):
+    """Languages apply to everyone unless a test sets the mode itself."""
+    monkeypatch.setattr(get_settings(), "I18N_MODE", "on")
+    monkeypatch.setattr(get_settings(), "I18N_TESTER_PHONES", "")
 
 
 async def _stored_language(db, user_id) -> str | None:
@@ -546,3 +557,151 @@ async def test_an_empty_upload_carries_a_code(client, auth_headers, db_session):
 
     assert response.status_code == 400, response.text
     assert response.json()["code"] == "EMPTY_FILE"
+
+
+# ---------------------------------------------------------------------------
+# The I18N_MODE kill switch
+# ---------------------------------------------------------------------------
+
+TESTER = "+919800000374"
+
+
+def _set_mode(monkeypatch, mode, testers=""):
+    monkeypatch.setattr(get_settings(), "I18N_MODE", mode)
+    monkeypatch.setattr(get_settings(), "I18N_TESTER_PHONES", testers)
+
+
+def _user(phone, language="mr"):
+    user = MagicMock()
+    user.phone = phone
+    user.preferred_language = language
+    return user
+
+
+def test_the_default_mode_is_off():
+    from app.config import Settings
+
+    assert Settings.model_fields["I18N_MODE"].default == "off"
+
+
+@pytest.mark.parametrize(
+    ("mode", "phone", "expected"),
+    [
+        ("off", TESTER, False),
+        ("on", "+919800000999", True),
+        ("testers", TESTER, True),
+        ("testers", "+919800000999", False),
+    ],
+)
+def test_i18n_enabled_by_mode(monkeypatch, mode, phone, expected):
+    from app.utils.i18n import i18n_enabled
+
+    _set_mode(monkeypatch, mode, testers=f" {TESTER} , +919800000001")
+    assert i18n_enabled(_user(phone)) is expected
+
+
+def test_a_tombstone_with_no_phone_is_not_a_tester(monkeypatch):
+    """Testers mode reads the phone; a missing one is False, not an error."""
+    from app.utils.i18n import i18n_enabled
+
+    _set_mode(monkeypatch, "testers", testers=TESTER)
+    assert i18n_enabled(_user(None)) is False
+
+
+@pytest.mark.parametrize(
+    ("mode", "phone", "expected"),
+    [
+        ("off", TESTER, "en"),
+        ("on", "+919800000999", "mr"),
+        ("testers", TESTER, "mr"),
+        ("testers", "+919800000999", "en"),
+    ],
+)
+def test_push_language_follows_the_switch(monkeypatch, mode, phone, expected):
+    _set_mode(monkeypatch, mode, testers=TESTER)
+    assert push_language(_user(phone, "mr")) == expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [("off", False), ("on", True), ("testers", True)],
+)
+@pytest.mark.asyncio
+async def test_get_me_reports_the_switch(
+    client, auth_headers, db_session, monkeypatch, mode, expected
+):
+    user = await UserFactory.create(db_session)
+    _set_mode(monkeypatch, mode, testers=user.phone)
+
+    response = await client.get(ME, headers=auth_headers(str(user.id)))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["i18n_enabled"] is expected
+
+
+@pytest.mark.asyncio
+async def test_get_me_is_false_for_a_non_tester_in_testers_mode(
+    client, auth_headers, db_session, monkeypatch
+):
+    user = await UserFactory.create(db_session)
+    _set_mode(monkeypatch, "testers", testers=TESTER)
+
+    response = await client.get(ME, headers=auth_headers(str(user.id)))
+
+    assert response.json()["i18n_enabled"] is False
+
+
+def test_i18n_enabled_is_required_in_the_openapi_user_response():
+    from app.main import app
+
+    schema = app.openapi()["components"]["schemas"]["UserResponse"]
+    assert "i18n_enabled" in schema["required"]
+    assert schema["properties"]["i18n_enabled"]["type"] == "boolean"
+
+
+@pytest.mark.asyncio
+async def test_patch_language_still_saves_while_off(client, auth_headers, db_session, monkeypatch):
+    """The switch gates display, not storage."""
+    user = await UserFactory.create(db_session)
+    _set_mode(monkeypatch, "off")
+
+    response = await client.patch(
+        LANGUAGE, json={"language": "mr"}, headers=auth_headers(str(user.id))
+    )
+
+    assert response.status_code == 204, response.text
+    assert await _stored_language(db_session, user.id) == "mr"
+
+
+@pytest.mark.asyncio
+async def test_flag_off_and_marathi_saved_means_an_english_push(db_session, committed, monkeypatch):
+    booking, _, member = await _job(db_session, committed, brand="Sparkle", team=True)
+    await _set_language(db_session, member, "mr")
+    _set_mode(monkeypatch, "off")
+
+    assert _sent(booking.id, "assigned") == [
+        (
+            "pro-token",
+            NOTIFICATION_TEMPLATES["assigned"]["title"],
+            NOTIFICATION_TEMPLATES["assigned"]["body"],
+        )
+    ]
+
+
+def test_flag_off_means_an_english_payout_push(monkeypatch):
+    _set_mode(monkeypatch, "off")
+    provider = _user("+919800000999", "hi")
+    provider.fcm_token = "provider-token"
+    db = MagicMock()
+    db.get.return_value = provider
+    session_cm = MagicMock()
+    session_cm.__enter__.return_value = db
+
+    calls = []
+    with (
+        patch("app.database.SyncSessionLocal", return_value=session_cm),
+        patch.object(nt, "send_push_notification", side_effect=lambda **kw: calls.append(kw)),
+    ):
+        send_payout_notification(provider_id="p1", event="completed", amount_paise=125000)
+
+    assert [c["title"] for c in calls] == ["Payout Received"]

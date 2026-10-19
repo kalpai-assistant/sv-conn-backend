@@ -6,8 +6,10 @@ ios→ios, pwa→web) and sends to matching tokens plus NULL ones (registered by
 client older than SVC-371, which keep their old behaviour until they
 re-register). An unknown release platform sends nothing.
 
-SVC-374: the push is in each recipient's ``preferred_language``, so one
-multicast goes out per language present; NULL and ``en`` share the English one.
+SVC-374: the push is in each recipient's ``preferred_language`` (while the
+``I18N_MODE`` kill switch lets them have it), so one multicast goes out per
+language present; NULL and ``en`` share the English one. Provider-role SP
+owners get it too now; admins never do.
 
 The task opens its own ``SyncSessionLocal``, so rows are committed and cleaned
 up afterwards. ``sc_test`` may hold other suites' leftovers, so assertions only
@@ -19,6 +21,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import delete
 
+from app.config import get_settings
 from app.models.user import User
 from app.tasks.notification_tasks import broadcast_update_available
 from tests.conftest import TEST_DATABASE_URL
@@ -33,8 +36,9 @@ async def recipients(db_session):
         "ios": ("consumer", "tok-ios", "ios"),
         "web": ("consumer", "tok-web", "web"),
         "null": ("consumer", "tok-null", None),
-        # Providers are excluded whatever their platform (unchanged behaviour).
+        # SVC-374: SP owners get it like consumers; admins never do.
         "provider": ("provider", "tok-provider-android", "android"),
+        "admin": ("admin", "tok-admin-android", "android"),
     }
     users = []
     tokens = {}
@@ -88,7 +92,7 @@ def _run(platform: str) -> list[str] | None:
 @pytest.mark.parametrize(
     ("release", "expected"),
     [
-        ("android", {"android", "null"}),
+        ("android", {"android", "null", "provider"}),
         ("pwa", {"web", "null"}),
         ("ios", {"ios", "null"}),
     ],
@@ -116,11 +120,19 @@ async def test_unknown_release_platform_sends_nothing(recipients):
 
 
 @pytest.fixture
-async def multilingual(db_session):
-    """Android consumers (Pros are consumer accounts) with each language state."""
+async def multilingual(db_session, monkeypatch):
+    """Android consumers (Pros are consumer accounts) with each language state,
+    plus a Hindi SP owner, with i18n switched on for everyone."""
+    monkeypatch.setattr(get_settings(), "I18N_MODE", "on")
     users = {}
-    for key, language in {"null": None, "en": "en", "hi": "hi", "mr": "mr"}.items():
-        user = await UserFactory.create(db_session, role="consumer", fcm_token=f"tok-lang-{key}")
+    for key, role, language in [
+        ("null", "consumer", None),
+        ("en", "consumer", "en"),
+        ("hi", "consumer", "hi"),
+        ("mr", "consumer", "mr"),
+        ("sp_hi", "provider", "hi"),
+    ]:
+        user = await UserFactory.create(db_session, role=role, fcm_token=f"tok-lang-{key}")
         user.fcm_platform = "android"
         user.preferred_language = language
         users[key] = user
@@ -147,6 +159,7 @@ async def test_release_push_goes_out_in_each_recipients_language(multilingual):
         "EazyServ v9.9.9 is ready. Tap to update.",
     )
     hindi = call_with(multilingual["hi"])
+    assert hindi is call_with(multilingual["sp_hi"])
     assert (hindi["title"], hindi["body"]) == (
         "अपडेट उपलब्ध है",
         "EazyServ v9.9.9 तैयार है। अपडेट करने के लिए टैप करें।",
@@ -160,3 +173,16 @@ async def test_release_push_goes_out_in_each_recipients_language(multilingual):
     assert len({c["title"] for c in sent}) == len(sent)
     tokens = [t for c in sent for t in c["tokens"]]
     assert len(tokens) == len(set(tokens))
+
+
+@pytest.mark.asyncio
+async def test_release_push_is_english_for_everyone_while_i18n_is_off(multilingual, monkeypatch):
+    """The kill switch: saved languages are ignored, one English multicast."""
+    monkeypatch.setattr(get_settings(), "I18N_MODE", "off")
+
+    sent = _run_all("android")
+
+    ours = [c for c in sent if set(c["tokens"]) & set(multilingual.values())]
+    assert len(ours) == 1
+    assert ours[0]["title"] == "Update available"
+    assert set(multilingual.values()) <= set(ours[0]["tokens"])

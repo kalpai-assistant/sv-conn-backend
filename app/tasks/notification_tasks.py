@@ -333,7 +333,15 @@ def push_language_code(preferred_language: str | None) -> str:
 
 
 def push_language(user) -> str:
-    """The language for a provider/Pro push to ``user``: their pick, else ``en``."""
+    """The language for a provider/Pro push to ``user``: their pick, else ``en``.
+
+    Always ``en`` while the ``I18N_MODE`` kill switch is off for them, even
+    with a language saved.
+    """
+    from app.utils.i18n import i18n_enabled
+
+    if not i18n_enabled(user):
+        return "en"
     return push_language_code(getattr(user, "preferred_language", None))
 
 
@@ -1194,8 +1202,8 @@ def broadcast_update_available(self, version: str, platform: str = "android"):
     keeps their pre-SVC-371 behaviour until they re-register. An unknown
     release platform sends nothing rather than falling back to everyone.
 
-    No per-user targeting today — every consumer with an FCM token on the
-    given platform gets it. A user already on the latest version will get
+    No per-user targeting today — every consumer and provider (not admin)
+    with an FCM token on the given platform gets it. A user already on the latest version will get
     the push and their in-app check will silently show nothing (state:
     ok), which is a tiny UX blemish that saves us tracking installed
     version per token. Worth revisiting when the user base grows past
@@ -1220,14 +1228,14 @@ def broadcast_update_available(self, version: str, platform: str = "android"):
 
     try:
         with SyncSessionLocal() as db:
-            # Consumers only for now — providers get their own comms via
-            # booking/payout pushes. Widening to providers is a one-line
-            # change if we want it.
+            # Consumers (Pros included: they are consumer accounts) and, since
+            # SVC-374, provider-role SP owners, whose app this release is too.
+            # Admins never.
             rows = db.execute(
-                select(User.fcm_token, User.preferred_language).where(
+                select(User.fcm_token, User.preferred_language, User.phone).where(
                     and_(
                         User.fcm_token.is_not(None),
-                        User.role == UserRole.CONSUMER,
+                        User.role.in_([UserRole.CONSUMER, UserRole.PROVIDER]),
                         or_(
                             User.fcm_platform == token_platform,
                             User.fcm_platform.is_(None),
@@ -1237,10 +1245,10 @@ def broadcast_update_available(self, version: str, platform: str = "android"):
             ).all()
             # SVC-374: one multicast per language, each in its own words.
             by_language: dict[str, list[str]] = {}
-            for token, preferred_language in rows:
-                if token:
-                    lang = push_language_code(preferred_language)
-                    by_language.setdefault(lang, []).append(token)
+            # The row carries ``phone``, which is all the kill switch reads.
+            for row in rows:
+                if row.fcm_token:
+                    by_language.setdefault(push_language(row), []).append(row.fcm_token)
 
             summary = {"success_count": 0, "failure_count": 0, "recipient_count": 0}
             for lang, tokens in by_language.items():

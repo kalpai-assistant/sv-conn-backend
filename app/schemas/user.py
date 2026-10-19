@@ -2,9 +2,10 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from app.models.user import UserRole
+from app.utils.i18n import i18n_enabled as _i18n_enabled_for
 
 # SVC-374: the values of ``users.preferred_language``. Kept in step with
 # ``SUPPORTED_LANGUAGES`` in the model, which the DB's CHECK mirrors.
@@ -25,6 +26,14 @@ class UserResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    # SVC-374 kill switch (``I18N_MODE``): the app shows the language picker
+    # and applies ``preferred_language`` only while this is true. Computed,
+    # so it is always present and required in the response schema.
+    @computed_field
+    @property
+    def i18n_enabled(self) -> bool:
+        return _i18n_enabled_for(self)
 
 
 class UpdateProfileRequest(BaseModel):
