@@ -38,6 +38,7 @@ class BookingNotFound(AppException):
         super().__init__(
             f"Booking {booking_id} not found",
             status_code=status.HTTP_404_NOT_FOUND,
+            code="BOOKING_NOT_FOUND",
         )
 
 
@@ -46,6 +47,7 @@ class ServiceNotFound(AppException):
         super().__init__(
             f"Service {service_id} not found",
             status_code=status.HTTP_404_NOT_FOUND,
+            code="SERVICE_NOT_FOUND",
         )
 
 
@@ -57,14 +59,16 @@ class UserNotFound(AppException):
         )
 
 
+# SVC-374: ``code`` is optional on these two so provider/Pro call sites can give
+# the app a stable id to translate; the English message stays the fallback.
 class InvalidStateTransition(AppException):
-    def __init__(self, message: str):
-        super().__init__(message, status_code=status.HTTP_409_CONFLICT)
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message, status_code=status.HTTP_409_CONFLICT, code=code)
 
 
 class UnauthorizedAction(AppException):
-    def __init__(self, message: str):
-        super().__init__(message, status_code=status.HTTP_403_FORBIDDEN)
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message, status_code=status.HTTP_403_FORBIDDEN, code=code)
 
 
 class BookingOfferClosed(AppException):
@@ -77,7 +81,7 @@ class BookingOfferClosed(AppException):
     """
 
     def __init__(self, message: str = "This booking is no longer available"):
-        super().__init__(message, status_code=status.HTTP_410_GONE)
+        super().__init__(message, status_code=status.HTTP_410_GONE, code="OFFER_CLOSED")
 
 
 class RoleMismatch(AppException):
@@ -102,8 +106,8 @@ class RoleMismatch(AppException):
 
 
 class InvalidOTP(AppException):
-    def __init__(self, message: str = "Invalid OTP"):
-        super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST)
+    def __init__(self, message: str = "Invalid OTP", code: str | None = None):
+        super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST, code=code)
 
 
 class AdminNotFound(AppException):
@@ -135,7 +139,9 @@ class InvalidPayoutMethod(AppException):
     """
 
     def __init__(self, message: str):
-        super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST)
+        super().__init__(
+            message, status_code=status.HTTP_400_BAD_REQUEST, code="PAYOUT_METHOD_NOT_ON_FILE"
+        )
 
 
 class ServiceAreaMissing(AppException):
@@ -224,6 +230,7 @@ class DuplicateSubscription(AppException):
         super().__init__(
             f"Provider is already subscribed to service {service_id}",
             status_code=status.HTTP_409_CONFLICT,
+            code="ALREADY_SUBSCRIBED",
         )
 
 
@@ -232,6 +239,7 @@ class SubscriptionNotFound(AppException):
         super().__init__(
             f"Subscription to service {service_id} not found",
             status_code=status.HTTP_404_NOT_FOUND,
+            code="SUBSCRIPTION_NOT_FOUND",
         )
 
 

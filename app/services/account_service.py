@@ -185,6 +185,7 @@ class AccountService:
         user.email = None
         user.fcm_token = None
         user.fcm_platform = None
+        user.preferred_language = None
         user.is_active = False
         user.deleted_at = now
         await self.db.flush()

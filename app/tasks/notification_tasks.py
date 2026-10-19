@@ -185,6 +185,202 @@ PAYOUT_NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
 }
 
 
+# SVC-374: the "Update available" release push, in English. Hindi and Marathi
+# are under "update_available" in PROVIDER_PUSH_TRANSLATIONS.
+UPDATE_AVAILABLE_TEMPLATE: dict[str, str] = {
+    "title": "Update available",
+    "body": "EazyServ v{version} is ready. Tap to update.",
+}
+
+# SVC-374: the events whose push goes out in the recipient's language. They
+# are the provider/Pro ones only: customer copy is always English, so a Pro
+# booking a service for themselves reads "Booking Confirmed" in English
+# whatever they picked. Decided by event, never by role (every Pro is a
+# consumer-role account). "cancelled" is in both camps, so it is localised
+# only when it goes to the booking's SP; see send_booking_notification.
+PROVIDER_PUSH_EVENTS: frozenset[str] = frozenset(
+    {"new_request", "assigned", "pro_declined", "cancelled", "job_cancelled", "unassigned"}
+)
+
+# English for every key PROVIDER_PUSH_TRANSLATIONS covers, read off the
+# templates above so the English copy keeps a single home. Besides "title" and
+# "body" some entries carry the words a placeholder falls back to, or, for
+# "new_request", how a cart of several services reads.
+_PROVIDER_PUSH_ENGLISH: dict[str, dict[str, str]] = {
+    **{event: dict(NOTIFICATION_TEMPLATES[event]) for event in PROVIDER_PUSH_EVENTS},
+    **{f"payout.{status}": dict(t) for status, t in PAYOUT_NOTIFICATION_TEMPLATES.items()},
+    "update_available": dict(UPDATE_AVAILABLE_TEMPLATE),
+}
+_PROVIDER_PUSH_ENGLISH["new_request"]["service_fallback"] = "A new service request"
+_PROVIDER_PUSH_ENGLISH["new_request"]["more_services"] = "{service} + {count} more"
+_PROVIDER_PUSH_ENGLISH["pro_declined"]["pro_fallback"] = "Your professional"
+
+# Hindi and Marathi for the same keys, same fields, same placeholders (a test
+# holds each language to that, so a missing string fails CI instead of quietly
+# sending English). Brand terms, service names and ₹ amounts are filled in
+# untranslated, and digits stay Latin. Reviewed by Tushar (SVC-374 PR).
+PROVIDER_PUSH_TRANSLATIONS: dict[str, dict[str, dict[str, str]]] = {
+    "hi": {
+        "new_request": {
+            "title": "नई बुकिंग रिक्वेस्ट!",
+            "body": "{service} — 2 मिनट के अंदर स्वीकार करें।",
+            "service_fallback": "नई सर्विस रिक्वेस्ट",
+            "more_services": "{service} + {count} और",
+        },
+        "assigned": {
+            "title": "जॉब मिला",
+            "body": "आपको एक नया जॉब दिया गया है।",
+        },
+        "pro_declined": {
+            "title": "दूसरा प्रोफेशनल चुनें",
+            "body": "{pro} यह जॉब नहीं ले सकते। किसी और को असाइन करें।",
+            "pro_fallback": "आपके प्रोफेशनल",
+        },
+        "cancelled": {
+            "title": "बुकिंग रद्द हुई",
+            "body": "यह बुकिंग रद्द कर दी गई है। आपको कुछ करने की ज़रूरत नहीं है।",
+        },
+        "job_cancelled": {
+            "title": "जॉब रद्द हुआ",
+            "body": "यह जॉब रद्द कर दिया गया है। कृपया वहाँ न जाएँ।",
+        },
+        "unassigned": {
+            "title": "जॉब हटाया गया",
+            "body": "यह जॉब अब आपको असाइन नहीं है। कृपया वहाँ न जाएँ।",
+        },
+        "payout.processing": {
+            "title": "पेआउट भेजा जा रहा है",
+            "body": "आपका {amount} का पेआउट शुरू हो गया है और जल्द ही आपके अकाउंट में पहुँच जाएगा।",
+        },
+        "payout.completed": {
+            "title": "पेआउट मिल गया",
+            "body": "{amount} आपके अकाउंट में जमा हो गए हैं।",
+        },
+        "payout.failed": {
+            "title": "पेआउट अपडेट",
+            "body": "आपके {amount} के पेआउट पर अभी काम चल रहा है। हम जल्द ही आपको बताएँगे।",
+        },
+        "payout.reversed": {
+            "title": "पेआउट अपडेट",
+            "body": (
+                "आपका {amount} का पेआउट हमें वापस आ गया है। "
+                "हम इसकी जाँच कर रहे हैं और जल्द ही आपको बताएँगे।"
+            ),
+        },
+        "update_available": {
+            "title": "अपडेट उपलब्ध है",
+            "body": "EazyServ v{version} तैयार है। अपडेट करने के लिए टैप करें।",
+        },
+    },
+    "mr": {
+        "new_request": {
+            "title": "नवीन बुकिंग रिक्वेस्ट!",
+            "body": "{service} — 2 मिनिटांत स्वीकारा.",
+            "service_fallback": "नवीन सर्विस रिक्वेस्ट",
+            "more_services": "{service} + आणखी {count}",
+        },
+        "assigned": {
+            "title": "जॉब मिळाला",
+            "body": "तुम्हाला एक नवीन जॉब देण्यात आला आहे.",
+        },
+        "pro_declined": {
+            "title": "दुसरा प्रोफेशनल निवडा",
+            "body": "{pro} हा जॉब घेऊ शकत नाहीत. दुसऱ्या कोणाला असाइन करा.",
+            "pro_fallback": "तुमचे प्रोफेशनल",
+        },
+        "cancelled": {
+            "title": "बुकिंग रद्द झाली",
+            "body": "ही बुकिंग रद्द करण्यात आली आहे. तुम्हाला काहीही करण्याची गरज नाही.",
+        },
+        "job_cancelled": {
+            "title": "जॉब रद्द झाला",
+            "body": "हा जॉब रद्द करण्यात आला आहे. कृपया तिथे जाऊ नका.",
+        },
+        "unassigned": {
+            "title": "जॉब काढून टाकला",
+            "body": "हा जॉब आता तुम्हाला असाइन केलेला नाही. कृपया तिथे जाऊ नका.",
+        },
+        "payout.processing": {
+            "title": "पेआउट पाठवले जात आहे",
+            "body": "तुमचे {amount} चे पेआउट सुरू झाले आहे आणि लवकरच तुमच्या खात्यात जमा होईल.",
+        },
+        "payout.completed": {
+            "title": "पेआउट मिळाले",
+            "body": "{amount} तुमच्या खात्यात जमा झाले आहेत.",
+        },
+        "payout.failed": {
+            "title": "पेआउट अपडेट",
+            "body": "तुमच्या {amount} च्या पेआउटवर अजून काम सुरू आहे. आम्ही लवकरच तुम्हाला कळवू.",
+        },
+        "payout.reversed": {
+            "title": "पेआउट अपडेट",
+            "body": (
+                "तुमचे {amount} चे पेआउट आम्हाला परत आले आहे. " "आम्ही ते तपासत आहोत आणि लवकरच तुम्हाला कळवू."
+            ),
+        },
+        "update_available": {
+            "title": "अपडेट उपलब्ध आहे",
+            "body": "EazyServ v{version} तयार आहे. अपडेट करण्यासाठी टॅप करा.",
+        },
+    },
+}
+
+
+def push_language_code(preferred_language: str | None) -> str:
+    """``preferred_language`` as a push language: NULL (never chosen), ``en``
+    and anything unknown all mean English."""
+    return preferred_language if preferred_language in PROVIDER_PUSH_TRANSLATIONS else "en"
+
+
+def push_language(user) -> str:
+    """The language for a provider/Pro push to ``user``: their pick, else ``en``.
+
+    Always ``en`` while the ``I18N_MODE`` kill switch is off for them, even
+    with a language saved.
+    """
+    from app.utils.i18n import i18n_enabled
+
+    if not i18n_enabled(user):
+        return "en"
+    return push_language_code(getattr(user, "preferred_language", None))
+
+
+def provider_push_template(key: str, lang: str) -> dict[str, str]:
+    """The copy for a provider/Pro push ``key`` (an event, ``payout.<status>`` or
+    ``update_available``) in ``lang``, English for ``en`` or an unknown code."""
+    return PROVIDER_PUSH_TRANSLATIONS.get(lang, {}).get(key) or _PROVIDER_PUSH_ENGLISH[key]
+
+
+def provider_push_copy(key: str, lang: str, **fields) -> tuple[str, str]:
+    """``(title, body)`` for a provider/Pro push in ``lang``.
+
+    A field left None takes the template's ``<field>_fallback``, so a push
+    never shows a literal "{pro}".
+    """
+    template = provider_push_template(key, lang)
+    values = {
+        name: value if value is not None else template[f"{name}_fallback"]
+        for name, value in fields.items()
+    }
+    return template["title"], template["body"].format(**values)
+
+
+def _cart_summary(items, lang: str) -> str | None:
+    """The cart as the job push names it: the first service, plus how many more.
+
+    The service name is the DB's, never translated; only the "+ N more" is.
+    None for an empty cart, which takes the "new request" fallback.
+    """
+    items = list(items)
+    if not items:
+        return None
+    first = items[0].service.name
+    if len(items) == 1:
+        return first
+    template = provider_push_template("new_request", lang)
+    return template["more_services"].format(service=first, count=len(items) - 1)
+
+
 def _format_rupees(amount_paise: int) -> str:
     """Format a paise amount as rupees for notification copy, Indian-style.
 
@@ -211,7 +407,7 @@ def _format_rupees(amount_paise: int) -> str:
     return f"₹{grouped}" if paise == 0 else f"₹{grouped}.{paise:02d}"
 
 
-def build_new_request_body(service_name: str | None) -> str:
+def build_new_request_body(service_name: str | None, lang: str = "en") -> str:
     """Body for the broadcast push: what the job is, and nothing more (SVC-153).
 
     Naming the service lets a provider decide whether the notification is worth
@@ -231,10 +427,10 @@ def build_new_request_body(service_name: str | None) -> str:
     Falls back to generic copy when the service is missing — an FK makes that
     unreachable today, but a push that renders "{service}" literally would be
     worse than a vague one.
+
+    ``lang`` (SVC-374) picks the language of the words around the service name.
     """
-    return NOTIFICATION_TEMPLATES["new_request"]["body"].format(
-        service=service_name or "A new service request",
-    )
+    return provider_push_copy("new_request", lang, service=service_name or None)[1]
 
 
 # SVC-330: a notification shade shows roughly this much before cutting the body
@@ -520,6 +716,9 @@ def send_booking_notification(
             # (user, event) pushes in a Pro-facing template of their own,
             # sent after the main recipients (SVC-348).
             pro_pushes: list[tuple] = []
+            # SVC-374: the copy for a provider/Pro recipient, by language. Set
+            # by the branches below whose event needs more than the template.
+            provider_copy = None
 
             if event == "new_request":
                 from sqlalchemy.orm import selectinload
@@ -568,6 +767,12 @@ def send_booking_notification(
                     .all()
                 )
                 body = build_new_request_body(_summarise_service_names(items))
+
+                def provider_copy(lang, items=items):
+                    return (
+                        provider_push_template("new_request", lang)["title"],
+                        build_new_request_body(_cart_summary(items, lang), lang),
+                    )
 
                 # Matching-policy (i): a provider must cover every service in
                 # the cart to receive the push. Same predicate the async
@@ -705,7 +910,12 @@ def send_booking_notification(
                             Professional.service_provider_id == booking.provider_id,
                         )
                     ).scalar_one_or_none()
-                body = template["body"].format(pro=pro.display_name if pro else "Your professional")
+                pro_name = pro.display_name if pro else None
+                body = provider_push_copy("pro_declined", "en", pro=pro_name)[1]
+
+                def provider_copy(lang, pro_name=pro_name):
+                    return provider_push_copy("pro_declined", lang, pro=pro_name)
+
                 recipients = [booking.provider]
             elif event == "no_taker_refunded":
                 # Consumer only: no provider is attached by now. The amount is
@@ -728,14 +938,26 @@ def send_booking_notification(
                 if "body_named" in template:
                     body = build_consumer_body(template, _assigned_pro_who_parts(db, booking))
 
-            sends = [(recipient, event, template["title"], body) for recipient in recipients]
+            def copy_for(recipient) -> tuple[str, str]:
+                # SVC-374: a provider/Pro event goes out in the recipient's
+                # language; "cancelled" only when the recipient is the SP, as
+                # the consumer's copy is always English.
+                if event not in PROVIDER_PUSH_EVENTS or (
+                    event == "cancelled" and recipient.id != booking.provider_id
+                ):
+                    return template["title"], body
+                lang = push_language(recipient)
+                if provider_copy is not None:
+                    return provider_copy(lang)
+                return provider_push_copy(event, lang)
+
+            sends = [
+                (recipient, event, *copy_for(recipient))
+                for recipient in recipients
+                if recipient is not None
+            ]
             sends += [
-                (
-                    user,
-                    pro_event,
-                    NOTIFICATION_TEMPLATES[pro_event]["title"],
-                    NOTIFICATION_TEMPLATES[pro_event]["body"],
-                )
+                (user, pro_event, *provider_push_copy(pro_event, push_language(user)))
                 for user, pro_event in pro_pushes
             ]
             for recipient, push_event, title, push_body in sends:
@@ -929,11 +1151,18 @@ def send_payout_notification(
             if payout_id:
                 data["payout_id"] = payout_id
 
+            # SVC-374: in the provider's language; the amount is formatted
+            # the same in all of them.
+            title, body = provider_push_copy(
+                f"payout.{event}",
+                push_language(provider),
+                amount=_format_rupees(amount_paise),
+            )
             try:
                 send_push_notification(
                     token=provider.fcm_token,
-                    title=template["title"],
-                    body=template["body"].format(amount=_format_rupees(amount_paise)),
+                    title=title,
+                    body=body,
                     data=data,
                 )
             except _DEAD_TOKEN_ERRORS as dead:
@@ -973,12 +1202,15 @@ def broadcast_update_available(self, version: str, platform: str = "android"):
     keeps their pre-SVC-371 behaviour until they re-register. An unknown
     release platform sends nothing rather than falling back to everyone.
 
-    No per-user targeting today — every consumer with an FCM token on the
-    given platform gets it. A user already on the latest version will get
+    No per-user targeting today — every consumer and provider (not admin)
+    with an FCM token on the given platform gets it. A user already on the latest version will get
     the push and their in-app check will silently show nothing (state:
     ok), which is a tiny UX blemish that saves us tracking installed
     version per token. Worth revisiting when the user base grows past
     "we can afford to notify everyone."
+
+    Language (SVC-374): one multicast per ``preferred_language`` present, each
+    in its own words; NULL and ``en`` share the English one.
 
     Failed sends are logged but not retried at the per-token level —
     FCM already retries transient failures internally and a stale token
@@ -996,14 +1228,14 @@ def broadcast_update_available(self, version: str, platform: str = "android"):
 
     try:
         with SyncSessionLocal() as db:
-            # Consumers only for now — providers get their own comms via
-            # booking/payout pushes. Widening to providers is a one-line
-            # change if we want it.
+            # Consumers (Pros included: they are consumer accounts) and, since
+            # SVC-374, provider-role SP owners, whose app this release is too.
+            # Admins never.
             rows = db.execute(
-                select(User.fcm_token).where(
+                select(User.fcm_token, User.preferred_language, User.phone).where(
                     and_(
                         User.fcm_token.is_not(None),
-                        User.role == UserRole.CONSUMER,
+                        User.role.in_([UserRole.CONSUMER, UserRole.PROVIDER]),
                         or_(
                             User.fcm_platform == token_platform,
                             User.fcm_platform.is_(None),
@@ -1011,22 +1243,30 @@ def broadcast_update_available(self, version: str, platform: str = "android"):
                     )
                 )
             ).all()
-            tokens = [t[0] for t in rows if t[0]]
-            if not tokens:
-                return {"success_count": 0, "failure_count": 0, "recipient_count": 0}
+            # SVC-374: one multicast per language, each in its own words.
+            by_language: dict[str, list[str]] = {}
+            # The row carries ``phone``, which is all the kill switch reads.
+            for row in rows:
+                if row.fcm_token:
+                    by_language.setdefault(push_language(row), []).append(row.fcm_token)
 
-            summary = send_multicast(
-                tokens=tokens,
-                title="Update available",
-                body=f"EazyServ v{version} is ready. Tap to update.",
-                # The app doesn't need the version in the payload — tapping
-                # opens the app and the existing version-check hook fetches
-                # /downloads/latest.json for itself. `type` lets a future
-                # in-app handler branch (e.g. deep-link to a release-notes
-                # screen) without a schema change.
-                data={"type": "update_available", "version": version, "platform": platform},
-            )
-            summary["recipient_count"] = len(tokens)
+            summary = {"success_count": 0, "failure_count": 0, "recipient_count": 0}
+            for lang, tokens in by_language.items():
+                title, body = provider_push_copy("update_available", lang, version=version)
+                sent = send_multicast(
+                    tokens=tokens,
+                    title=title,
+                    body=body,
+                    # The app doesn't need the version in the payload — tapping
+                    # opens the app and the existing version-check hook fetches
+                    # /downloads/latest.json for itself. `type` lets a future
+                    # in-app handler branch (e.g. deep-link to a release-notes
+                    # screen) without a schema change.
+                    data={"type": "update_available", "version": version, "platform": platform},
+                )
+                summary["success_count"] += sent["success_count"]
+                summary["failure_count"] += sent["failure_count"]
+                summary["recipient_count"] += len(tokens)
             return summary
     except Exception as exc:
         # One retry (default_retry_delay=30s) — the DB was probably

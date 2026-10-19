@@ -1,5 +1,6 @@
 from decimal import Decimal
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
@@ -223,6 +224,14 @@ class Settings(BaseSettings):
     # is approved (submit form → 1-3 business days). While off, the endpoint
     # returns 501 and the /download page falls back to QR-code-only.
     SMS_DOWNLOAD_LINK_ENABLED: bool = False
+
+    # SVC-374: kill switch for Hindi/Marathi. "off": nobody sees them, every
+    # push is English and /users/me says i18n_enabled=false, so the app hides
+    # the picker. "testers": only the phones in I18N_TESTER_PHONES. "on":
+    # everyone. Gates display only: PATCH /users/me/language always saves.
+    # See app/utils/i18n.py.
+    I18N_MODE: Literal["off", "testers", "on"] = "off"
+    I18N_TESTER_PHONES: str = ""  # comma-separated E.164 numbers
 
     # SVC-307: AI-based Aadhaar KYC verifier
     # ---------------------------------------------------------------------

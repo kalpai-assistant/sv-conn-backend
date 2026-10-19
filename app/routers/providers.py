@@ -1,11 +1,12 @@
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user, require_role
+from app.exceptions import AppException
 from app.models.user import User
 from app.schemas.booking import BookingOfferResponse
 from app.schemas.provider import (
@@ -54,22 +55,30 @@ _IMAGE_ALLOWED_CONTENT_TYPES = {
 
 
 async def read_image_upload(upload: UploadFile, field_name: str) -> tuple[bytes, str, str]:
-    """Validate + read an image upload. Returns (bytes, content_type, ext)."""
+    """Validate + read an image upload. Returns (bytes, content_type, ext).
+
+    SVC-374: ``AppException`` with a ``code``, not ``HTTPException``, so the app
+    can translate the error; the body is ``{"error", "message", "code"}`` now
+    instead of ``{"detail"}``, with the same status codes.
+    """
     if upload.content_type not in _IMAGE_ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
+        raise AppException(
+            f"{field_name}: unsupported file type {upload.content_type!r}",
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"{field_name}: unsupported file type {upload.content_type!r}",
+            code="UNSUPPORTED_FILE_TYPE",
         )
     data = await upload.read()
     if len(data) == 0:
-        raise HTTPException(
+        raise AppException(
+            f"{field_name}: empty file",
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"{field_name}: empty file",
+            code="EMPTY_FILE",
         )
     if len(data) > _IMAGE_MAX_BYTES:
-        raise HTTPException(
+        raise AppException(
+            f"{field_name}: file exceeds {_IMAGE_MAX_BYTES // (1024 * 1024)} MB limit",
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"{field_name}: file exceeds {_IMAGE_MAX_BYTES // (1024 * 1024)} MB limit",
+            code="FILE_TOO_LARGE",
         )
     return data, upload.content_type, _IMAGE_ALLOWED_CONTENT_TYPES[upload.content_type]
 

@@ -6,6 +6,11 @@ ios→ios, pwa→web) and sends to matching tokens plus NULL ones (registered by
 client older than SVC-371, which keep their old behaviour until they
 re-register). An unknown release platform sends nothing.
 
+SVC-374: the push is in each recipient's ``preferred_language`` (while the
+``I18N_MODE`` kill switch lets them have it), so one multicast goes out per
+language present; NULL and ``en`` share the English one. Provider-role SP
+owners get it too now; admins never do.
+
 The task opens its own ``SyncSessionLocal``, so rows are committed and cleaned
 up afterwards. ``sc_test`` may hold other suites' leftovers, so assertions only
 look at this test's own tokens.
@@ -16,6 +21,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import delete
 
+from app.config import get_settings
 from app.models.user import User
 from app.tasks.notification_tasks import broadcast_update_available
 from tests.conftest import TEST_DATABASE_URL
@@ -30,8 +36,9 @@ async def recipients(db_session):
         "ios": ("consumer", "tok-ios", "ios"),
         "web": ("consumer", "tok-web", "web"),
         "null": ("consumer", "tok-null", None),
-        # Providers are excluded whatever their platform (unchanged behaviour).
+        # SVC-374: SP owners get it like consumers; admins never do.
         "provider": ("provider", "tok-provider-android", "android"),
+        "admin": ("admin", "tok-admin-android", "android"),
     }
     users = []
     tokens = {}
@@ -50,18 +57,18 @@ async def recipients(db_session):
     await db_session.commit()
 
 
-def _run(platform: str) -> list[str] | None:
-    """Run the task against sc_test; return the multicast's tokens, or None if not sent."""
+def _run_all(platform: str) -> list[dict]:
+    """Run the task against sc_test; return every multicast as ``{tokens, title, body}``."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
     engine = create_engine(
         TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
     )
-    sent: list[list[str]] = []
+    sent: list[dict] = []
 
-    def _multicast(tokens, **_):
-        sent.append(list(tokens))
+    def _multicast(tokens, title, body, **_):
+        sent.append({"tokens": list(tokens), "title": title, "body": body})
         return {"success_count": len(tokens), "failure_count": 0}
 
     with (
@@ -72,15 +79,20 @@ def _run(platform: str) -> list[str] | None:
             broadcast_update_available(version="9.9.9", platform=platform)
         finally:
             engine.dispose()
-    assert len(sent) <= 1
-    return sent[0] if sent else None
+    return sent
+
+
+def _run(platform: str) -> list[str] | None:
+    """Every token the release reached, or None if nothing was sent."""
+    sent = _run_all(platform)
+    return [t for call in sent for t in call["tokens"]] if sent else None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("release", "expected"),
     [
-        ("android", {"android", "null"}),
+        ("android", {"android", "null", "provider"}),
         ("pwa", {"web", "null"}),
         ("ios", {"ios", "null"}),
     ],
@@ -100,3 +112,77 @@ async def test_unknown_release_platform_sends_nothing(recipients):
         broadcast_update_available(version="9.9.9", platform="windows")
 
     multicast.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# SVC-374: in each recipient's language
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def multilingual(db_session, monkeypatch):
+    """Android consumers (Pros are consumer accounts) with each language state,
+    plus a Hindi SP owner, with i18n switched on for everyone."""
+    monkeypatch.setattr(get_settings(), "I18N_MODE", "on")
+    users = {}
+    for key, role, language in [
+        ("null", "consumer", None),
+        ("en", "consumer", "en"),
+        ("hi", "consumer", "hi"),
+        ("mr", "consumer", "mr"),
+        ("sp_hi", "provider", "hi"),
+    ]:
+        user = await UserFactory.create(db_session, role=role, fcm_token=f"tok-lang-{key}")
+        user.fcm_platform = "android"
+        user.preferred_language = language
+        users[key] = user
+    await db_session.commit()
+
+    yield {key: user.fcm_token for key, user in users.items()}
+
+    await db_session.execute(delete(User).where(User.id.in_([u.id for u in users.values()])))
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_release_push_goes_out_in_each_recipients_language(multilingual):
+    sent = _run_all("android")
+
+    def call_with(token):
+        (call,) = [c for c in sent if token in c["tokens"]]
+        return call
+
+    english = call_with(multilingual["en"])
+    assert english is call_with(multilingual["null"])
+    assert (english["title"], english["body"]) == (
+        "Update available",
+        "EazyServ v9.9.9 is ready. Tap to update.",
+    )
+    hindi = call_with(multilingual["hi"])
+    assert hindi is call_with(multilingual["sp_hi"])
+    assert (hindi["title"], hindi["body"]) == (
+        "अपडेट उपलब्ध है",
+        "EazyServ v9.9.9 तैयार है। अपडेट करने के लिए टैप करें।",
+    )
+    marathi = call_with(multilingual["mr"])
+    assert (marathi["title"], marathi["body"]) == (
+        "अपडेट उपलब्ध आहे",
+        "EazyServ v9.9.9 तयार आहे. अपडेट करण्यासाठी टॅप करा.",
+    )
+    # One multicast per language, and no token twice.
+    assert len({c["title"] for c in sent}) == len(sent)
+    tokens = [t for c in sent for t in c["tokens"]]
+    assert len(tokens) == len(set(tokens))
+
+
+@pytest.mark.asyncio
+async def test_release_push_is_english_for_everyone_while_i18n_is_off(multilingual, monkeypatch):
+    """The kill switch: saved languages are ignored, one English multicast."""
+    monkeypatch.setattr(get_settings(), "I18N_MODE", "off")
+
+    sent = _run_all("android")
+
+    ours = [c for c in sent if set(c["tokens"]) & set(multilingual.values())]
+    assert len(ours) == 1
+    assert ours[0]["title"] == "Update available"
+    assert set(multilingual.values()) <= set(ours[0]["tokens"])
