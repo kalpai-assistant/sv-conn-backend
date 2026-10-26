@@ -82,6 +82,10 @@ async def test_both_parties_see_the_assigned_pro_and_the_business(
                 "display_name": "Rohan",
                 "profile_photo_url": None,
                 "is_self": False,
+                "rating_average": None,
+                "rating_count": 0,
+                "bookings_completed_count": 0,
+                "is_background_verified": True,
             }
             assert body["service_provider"] == {
                 "user_id": str(sp.id),

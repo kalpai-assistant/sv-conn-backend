@@ -41,11 +41,13 @@ class Review(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
     )
     # SVC-339: the Pro being rated, so an SP's rating can later be derived from
-    # its Pros'. The design docs call this table ``booking_ratings``. Nothing
-    # writes it yet and the migration does not backfill it; ``reviewee_id``
-    # still names the provider.
+    # its Pros'. The design docs call this table ``booking_ratings``.
+    # ``reviewee_id`` still names the provider. SVC-396: written from
+    # ``booking.professional_id`` on every new review, and backfilled for old
+    # ones, so the Pro's trust card can aggregate by it. NULL only for a
+    # booking that never had a Pro.
     professional_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("professionals.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("professionals.id"), nullable=True, index=True
     )
     rating: Mapped[int] = mapped_column(Integer, nullable=False)
     comment: Mapped[str | None] = mapped_column(Text)
