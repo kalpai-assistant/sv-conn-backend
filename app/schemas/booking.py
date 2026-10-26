@@ -190,12 +190,23 @@ class ProfessionalBrief(BaseModel):
     which is gated by viewer and status, and the SP doesn't need it from here.
     ``is_self`` marks the SP's own Pro-for-self, so a client can collapse
     "Rohan from Rohan" to one name on a solo job.
+
+    The trust fields (SVC-396) are this Pro's own record, not the SP's: reviews
+    and completed bookings whose ``professional_id`` is this Pro. They are set
+    by ``BookingService.attach_professionals`` in one grouped query per page,
+    and defaulted so the brief stays additive. ``rating_average`` is null until
+    the first review. ``is_background_verified`` is the Pro's effective KYC
+    (a Pro-for-self's is its SP's), verified or not.
     """
 
     id: UUID
     display_name: str
     profile_photo_url: str | None
     is_self: bool
+    rating_average: float | None = None
+    rating_count: int = 0
+    bookings_completed_count: int = 0
+    is_background_verified: bool = False
 
     model_config = {"from_attributes": True}
 

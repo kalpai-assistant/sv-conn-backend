@@ -53,6 +53,8 @@ class ReviewService:
             booking_id=booking_id,
             reviewer_id=consumer_id,
             reviewee_id=booking.provider_id,
+            # SVC-396: the Pro who did the job, for their per-Pro rating.
+            professional_id=booking.professional_id,
             rating=rating,
             comment=comment,
         )

@@ -42,6 +42,7 @@ from app.models.booking_offer import BookingOffer, OfferResponse
 from app.models.booking_status_log import BookingStatusLog
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
+from app.models.review import Review
 from app.models.service import Service
 from app.models.service_variant import ServiceVariant
 from app.models.user import User, UserRole
@@ -58,7 +59,7 @@ from app.schemas.booking import (
 from app.services.provider_matching import (
     is_eligible_provider_multi_stmt,
 )
-from app.services.provider_service import ProviderService
+from app.services.provider_service import ProviderService, effective_kyc_status
 from app.utils.geo import distance_km_to_point
 from app.utils.money import to_decimal
 
@@ -192,8 +193,13 @@ class BookingService:
 
         Each Pro's ``user`` is loaded too, for the consumer's
         ``BookingResponse.provider_phone`` (SVC-360). ``Professional.user`` is
-        lazy, so it gets the same explicit fetch. Three queries regardless of
-        page size.
+        lazy, so it gets the same explicit fetch.
+
+        Each Pro also gets its trust fields for ``ProfessionalBrief`` (SVC-396)
+        as plain attributes: ``rating_average`` / ``rating_count`` from reviews
+        and ``bookings_completed_count``, both keyed by ``professional_id``, in
+        one grouped query; and ``is_background_verified`` from the KYC already
+        loaded here. Four queries regardless of page size.
         """
         bookings = list(bookings)
         if not bookings:
@@ -213,13 +219,54 @@ class BookingService:
             for pro in pros.values():
                 set_committed_value(pro, "user", users.get(pro.user_id))
 
+            ratings = (
+                select(
+                    Review.professional_id.label("pro_id"),
+                    func.avg(Review.rating).label("avg"),
+                    func.count().label("n"),
+                )
+                .where(Review.professional_id.in_(pros))
+                .group_by(Review.professional_id)
+                .subquery()
+            )
+            completed = (
+                select(Booking.professional_id.label("pro_id"), func.count().label("n"))
+                .where(
+                    Booking.professional_id.in_(pros),
+                    Booking.status == BookingStatus.COMPLETED,
+                )
+                .group_by(Booking.professional_id)
+                .subquery()
+            )
+            rows = await self.db.execute(
+                select(Professional.id, ratings.c.avg, ratings.c.n, completed.c.n)
+                .outerjoin(ratings, ratings.c.pro_id == Professional.id)
+                .outerjoin(completed, completed.c.pro_id == Professional.id)
+                .where(Professional.id.in_(pros))
+            )
+            for pro_id, avg, rating_count, completed_count in rows:
+                pro = pros[pro_id]
+                pro.rating_average = round(float(avg), 1) if avg is not None else None
+                pro.rating_count = rating_count or 0
+                pro.bookings_completed_count = completed_count or 0
+
+        # The Pros' own SPs too, for a Pro-for-self's KYC; the same rows as the
+        # bookings' SPs in practice.
         sp_ids = {b.provider_id for b in bookings if b.provider_id}
+        sp_ids |= {pro.service_provider_id for pro in pros.values()}
         profiles: dict[uuid.UUID, ProviderProfile] = {}
         if sp_ids:
             rows = await self.db.execute(
                 select(ProviderProfile).where(ProviderProfile.user_id.in_(sp_ids))
             )
             profiles = {profile.user_id: profile for profile in rows.scalars()}
+
+        for pro in pros.values():
+            sp = profiles.get(pro.service_provider_id)
+            pro.is_background_verified = (
+                effective_kyc_status(pro, sp.kyc_status if sp is not None else None)
+                is KYCStatus.VERIFIED
+            )
 
         for booking in bookings:
             set_committed_value(booking, "professional", pros.get(booking.professional_id))
