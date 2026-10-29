@@ -9,6 +9,8 @@ The seed text lives in ``app.seed_data.service_details``; the seed scripts apply
 it after creating services, and the workbook must still name every seeded service.
 """
 
+import json
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -16,8 +18,15 @@ from sqlalchemy import select, text
 
 from app.models.category import Category
 from app.models.service import Service
+from app.schemas.service import ServiceDetailResponse, ServiceStep
 from app.seed_data import service_details
-from app.seed_data.service_details import SERVICE_DETAILS, apply_service_details
+from app.seed_data.service_details import (
+    COMMON_FAQS,
+    SERVICE_DETAILS,
+    apply_service_details,
+    service_details_params,
+    svc_340_details_params,
+)
 from scripts.seed_pricing_from_xlsx import DEFAULT_XLSX, _slug, parse_workbook
 
 
@@ -90,10 +99,78 @@ async def test_list_services_leaves_out_steps_and_exclusions(client, db_session)
 def test_seed_data_is_ten_services_in_ticket_shape():
     assert len(SERVICE_DETAILS) == 10
     assert len({slug for slug, _ in SERVICE_DETAILS}) == 10, "one service per sub-category"
-    for key, (steps, exclusions) in SERVICE_DETAILS.items():
-        assert 4 <= len(steps) <= 6, key
-        assert 2 <= len(exclusions) <= 4, key
-        assert all(isinstance(s, str) and s.strip() for s in steps + exclusions), key
+    for key, details in SERVICE_DETAILS.items():
+        assert set(details) == {"steps", "exclusions", "included_items", "faqs"}, key
+        assert 4 <= len(details["steps"]) <= 6, key
+        assert 2 <= len(details["exclusions"]) <= 4, key
+        titles = [step["title"] for step in details["steps"]]
+        texts = titles + details["exclusions"] + details["included_items"]
+        assert all(isinstance(s, str) and s.strip() for s in texts), key
+
+
+def test_every_seeded_service_validates_as_a_detail_response():
+    """What the UPDATE writes must parse as ServiceDetailResponse, or GET
+    /services/{id} 500s for that service — e.g. a mixed string/object steps
+    list, a step without a title, or a FAQ missing its answer."""
+    base = {
+        "id": uuid4(),
+        "category_id": uuid4(),
+        "name": "x",
+        "description": None,
+        "base_price": 1.0,
+        "duration_minutes": 60,
+        "is_active": True,
+        "created_at": datetime.now(UTC),
+    }
+    for params in service_details_params():
+        content = {
+            col: json.loads(params[col])
+            for col in ("steps", "exclusions", "included_items", "faqs")
+        }
+        parsed = ServiceDetailResponse.model_validate({**base, **content})
+        key = (params["category_slug"], params["name"])
+        assert all(isinstance(step, ServiceStep) for step in parsed.steps), key
+        assert parsed.included_items and parsed.faqs, key
+        assert parsed.hero_image_url is None and parsed.before_after_photos is None, key
+
+
+def test_steps_have_one_shape_per_service_and_known_icons():
+    """Durations are all-or-nothing per service (the four untimed services
+    carry none), and icons stay within the keywords the frontend maps."""
+    known_icons = {
+        "search", "inspect", "wind", "dust", "bath", "bathroom", "kitchen",
+        "degrease", "sparkles", "mop", "finish", "review",
+    }  # fmt: skip
+    untimed = {"ac", "pest-control", "appliances", "painting"}
+    for (slug, name), details in SERVICE_DETAILS.items():
+        steps = details["steps"]
+        assert all(set(step) <= {"title", "duration_minutes", "icon"} for step in steps), name
+        assert all(step["icon"] in known_icons for step in steps), name
+        timed = ["duration_minutes" in step for step in steps]
+        assert all(timed) or not any(timed), name
+        assert any(timed) == (slug not in untimed), name
+
+
+def test_common_faqs_are_appended_once_after_each_services_own():
+    for params in service_details_params():
+        faqs = json.loads(params["faqs"])
+        own = SERVICE_DETAILS[(params["category_slug"], params["name"])]["faqs"]
+        assert faqs == own + COMMON_FAQS, params["name"]
+        for common in COMMON_FAQS:
+            assert faqs.count(common) == 1, (params["name"], common["question"])
+    # Written once: no service lists a shared question among its own.
+    common_questions = {faq["question"] for faq in COMMON_FAQS}
+    for details in SERVICE_DETAILS.values():
+        assert not common_questions & {faq["question"] for faq in details["faqs"]}
+
+
+def test_svc_340_params_keep_the_step_titles_as_strings():
+    """The frozen SVC-340 statement (and the SVC-400 content downgrade) writes
+    the titles as plain strings, the shape SVC-340 shipped."""
+    for params in svc_340_details_params():
+        details = SERVICE_DETAILS[(params["category_slug"], params["name"])]
+        assert json.loads(params["steps"]) == [step["title"] for step in details["steps"]]
+        assert set(params) == {"category_slug", "name", "steps", "exclusions"}
 
 
 @pytest.mark.skipif(not DEFAULT_XLSX.exists(), reason="pricing workbook not checked out")
@@ -126,7 +203,15 @@ async def test_apply_service_details_fills_new_services_and_reports_unmatched_ke
     monkeypatch.setattr(
         service_details,
         "SERVICE_DETAILS",
-        {**SERVICE_DETAILS, missing_key: (["Step one"], ["Not this"])},
+        {
+            **SERVICE_DETAILS,
+            missing_key: {
+                "steps": [{"title": "Step one"}],
+                "exclusions": ["Not this"],
+                "included_items": ["This"],
+                "faqs": [],
+            },
+        },
     )
     plumber = await _get_or_make_category(db_session, "plumber")
     salon_men = await _get_or_make_category(db_session, "salon-men")
@@ -145,10 +230,18 @@ async def test_apply_service_details_fills_new_services_and_reports_unmatched_ke
     assert ("plumber", "Drain blockage removal") not in unmatched
     assert ("salon-men", "Men's haircut") not in unmatched
     rows = await db_session.execute(
-        text("SELECT id, steps, exclusions FROM services WHERE id IN (:a, :b, :c)"),
+        text(
+            "SELECT id, steps, exclusions, included_items, faqs FROM services "
+            "WHERE id IN (:a, :b, :c)"
+        ),
         {"a": drain.id, "b": haircut.id, "c": other.id},
     )
-    details = {row.id: (row.steps, row.exclusions) for row in rows}
-    assert details[drain.id] == SERVICE_DETAILS[("plumber", "Drain blockage removal")]
-    assert details[haircut.id] == SERVICE_DETAILS[("salon-men", "Men's haircut")]
-    assert details[other.id] == (None, None)
+    details = {row.id: (row.steps, row.exclusions, row.included_items, row.faqs) for row in rows}
+
+    def expected(key):
+        d = SERVICE_DETAILS[key]
+        return d["steps"], d["exclusions"], d["included_items"], d["faqs"] + COMMON_FAQS
+
+    assert details[drain.id] == expected(("plumber", "Drain blockage removal"))
+    assert details[haircut.id] == expected(("salon-men", "Men's haircut"))
+    assert details[other.id] == (None, None, None, None)

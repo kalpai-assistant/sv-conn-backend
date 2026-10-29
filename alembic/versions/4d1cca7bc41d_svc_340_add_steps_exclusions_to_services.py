@@ -38,7 +38,12 @@ from sqlalchemy.dialects import postgresql
 # scripts/seed_pricing_from_xlsx.py, so a DB seeded by the scripts lands on the
 # same text as one this migration ran on (same single-source pattern as
 # SVC-312's l1_hierarchy). The migration's own behaviour is unchanged.
-from app.seed_data.service_details import UPDATE_SERVICE_DETAILS, service_details_params
+# SVC-400: the frozen SVC-340 pair, not UPDATE_SERVICE_DETAILS, which now also
+# sets columns added after this revision.
+from app.seed_data.service_details import (
+    UPDATE_SERVICE_DETAILS_SVC_340,
+    svc_340_details_params,
+)
 
 # revision identifiers, used by Alembic.
 revision: str = '4d1cca7bc41d'
@@ -52,8 +57,8 @@ def upgrade() -> None:
     op.add_column('services', sa.Column('exclusions', postgresql.JSONB(astext_type=sa.Text()), nullable=True))
 
     bind = op.get_bind()
-    for params in service_details_params():
-        bind.execute(sa.text(UPDATE_SERVICE_DETAILS), params)
+    for params in svc_340_details_params():
+        bind.execute(sa.text(UPDATE_SERVICE_DETAILS_SVC_340), params)
 
 
 def downgrade() -> None:
