@@ -42,8 +42,8 @@ COMMON_FAQS: list[dict[str, str]] = [
     {
         "question": "What if I'm not happy with the service?",
         "answer": (
-            "Contact our support team and we'll look into it. Refunds are reviewed case by "
-            "case under our Refund & Cancellation Policy."
+            "Contact our support team at contact@eazyserv.com and we'll look into it. "
+            "Refunds are reviewed case by case under our Refund & Cancellation Policy."
         ),
     },
 ]
