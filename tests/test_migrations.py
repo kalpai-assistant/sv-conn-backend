@@ -28,9 +28,10 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import URL, make_url
 
 from app.seed_data.service_details import (
+    COMMON_FAQS,
     SERVICE_DETAILS,
-    UPDATE_SERVICE_DETAILS,
-    service_details_params,
+    UPDATE_SERVICE_DETAILS_SVC_340,
+    svc_340_details_params,
 )
 from tests.conftest import TEST_DATABASE_URL
 
@@ -47,7 +48,8 @@ SVC_339_FILE = (
     REPO_ROOT / "alembic" / "versions" / "b000e0a06330_svc_339_add_professionals_table_booking_.py"
 )
 # SVC-340 (service steps + exclusions) and the revision it builds on. Its text
-# and UPDATE live in app.seed_data.service_details, which the migration imports.
+# and frozen UPDATE live in app.seed_data.service_details, which the migration
+# imports.
 SVC_340 = "4d1cca7bc41d"
 BEFORE_SVC_340 = SVC_339
 # SVC-320 PR 1 (team invites + professionals.is_active + catch-up backfill).
@@ -486,6 +488,12 @@ def test_svc_340_adds_nullable_jsonb_columns_and_downgrade_restores_services(scr
     assert _shape(scratch_db, "services") == before
 
 
+def _svc_340_text(key: tuple[str, str]) -> tuple[list[str], list[str]]:
+    """What SVC-340 wrote for a service: string steps (the titles) and exclusions."""
+    details = SERVICE_DETAILS[key]
+    return [step["title"] for step in details["steps"]], details["exclusions"]
+
+
 def test_svc_340_seeds_matching_services_only_and_is_idempotent(scratch_db):
     _alembic(scratch_db, "upgrade", BEFORE_SVC_340)
     ids = _seed_before_svc_340(scratch_db)
@@ -493,8 +501,8 @@ def test_svc_340_seeds_matching_services_only_and_is_idempotent(scratch_db):
     _alembic(scratch_db, "upgrade", SVC_340)
 
     details = _service_details(scratch_db)
-    assert details[ids["drain"]] == SERVICE_DETAILS[("plumber", "Drain blockage removal")]
-    assert details[ids["haircut"]] == SERVICE_DETAILS[("salon-men", "Men's haircut")]
+    assert details[ids["drain"]] == _svc_340_text(("plumber", "Drain blockage removal"))
+    assert details[ids["haircut"]] == _svc_340_text(("salon-men", "Men's haircut"))
     assert details[ids["beard"]] == (None, None), "name not in the seed"
     assert details[ids["decoy"]] == (None, None), "seeded name, but in another category"
 
@@ -503,8 +511,8 @@ def test_svc_340_seeds_matching_services_only_and_is_idempotent(scratch_db):
     try:
         with engine.begin() as conn:
             matched = sum(
-                conn.execute(text(UPDATE_SERVICE_DETAILS), params).rowcount
-                for params in service_details_params()
+                conn.execute(text(UPDATE_SERVICE_DETAILS_SVC_340), params).rowcount
+                for params in svc_340_details_params()
             )
     finally:
         engine.dispose()
@@ -917,3 +925,60 @@ def test_svc_400_adds_four_nullable_columns_and_downgrade_restores_services(scra
 
     _alembic(scratch_db, "downgrade", BEFORE_SVC_400)
     assert _shape(scratch_db, "services") == before
+
+
+# --- SVC-400: service content seed (steps, included items, FAQs) -----------------
+
+
+SVC_400_CONTENT = "9486c2fc98b3"
+BEFORE_SVC_400_CONTENT = SVC_400
+
+
+def _service_content(url: URL) -> dict:
+    """``{service_id: (steps, exclusions, included_items, faqs)}``."""
+    rows = _query(url, "SELECT id, steps, exclusions, included_items, faqs FROM services")
+    return {
+        row["id"]: (row["steps"], row["exclusions"], row["included_items"], row["faqs"])
+        for row in rows
+    }
+
+
+def test_svc_400_content_seeds_matching_services_and_downgrade_restores_svc_340(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_340)
+    ids = _seed_before_svc_340(scratch_db)
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_400_CONTENT)
+    before = _service_content(scratch_db)
+    before_shape = _shape(scratch_db, "services")
+
+    _alembic(scratch_db, "upgrade", SVC_400_CONTENT)
+
+    content = _service_content(scratch_db)
+    drain = SERVICE_DETAILS[("plumber", "Drain blockage removal")]
+    assert content[ids["drain"]] == (
+        drain["steps"],
+        drain["exclusions"],
+        drain["included_items"],
+        drain["faqs"] + COMMON_FAQS,
+    )
+    assert content[ids["haircut"]][0][0] == {
+        "title": "Professional arrives with sanitised tools and a fresh cape",
+        "duration_minutes": 5,
+        "icon": "sparkles",
+    }
+    assert content[ids["beard"]] == (None, None, None, None), "name not in the seed"
+    assert content[ids["decoy"]] == (None, None, None, None), "another category"
+    hero = _query(scratch_db, "SELECT hero_image_url, before_after_photos FROM services")
+    assert all(r["hero_image_url"] is None and r["before_after_photos"] is None for r in hero)
+    assert _shape(scratch_db, "services") == before_shape, "data only, no DDL"
+
+    # Downgrade puts the SVC-340 text back exactly; upgrading again lands on
+    # the same content.
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_400_CONTENT)
+    assert _service_content(scratch_db) == before
+    _alembic(scratch_db, "upgrade", SVC_400_CONTENT)
+    assert _service_content(scratch_db) == content
+    assert before[ids["drain"]] == (
+        *_svc_340_text(("plumber", "Drain blockage removal")),
+        None,
+        None,
+    )

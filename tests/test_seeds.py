@@ -22,6 +22,7 @@ checked in.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -37,7 +38,7 @@ from app.seed_data.l1_hierarchy import (
     L2_TO_L1,
     MISCELLANEOUS_L1_SLUG,
 )
-from app.seed_data.service_details import SERVICE_DETAILS
+from app.seed_data.service_details import service_details_params
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 WORKBOOK = BACKEND_DIR / "EazyServ_Pune_Pricing_List.xlsx"
@@ -244,16 +245,22 @@ def test_no_duplicate_categories(seeded_db) -> None:
 
 
 def test_service_details_survive_the_seed_ritual(seeded_db) -> None:
-    """SVC-340: the migration runs before any service exists, and the second
-    pricing pass deletes and recreates every service — so the steps +
-    exclusions only exist here if the seed script re-applies them."""
+    """SVC-340/SVC-400: the migrations run before any service exists, and the
+    second pricing pass deletes and recreates every service — so the content
+    only exists here if the seed script re-applies it."""
     with _seed_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT c.slug, s.name, s.steps, s.exclusions
+            SELECT c.slug, s.name, s.steps, s.exclusions, s.included_items, s.faqs
             FROM services s JOIN categories c ON c.id = s.category_id
             WHERE s.steps IS NOT NULL OR s.exclusions IS NOT NULL
+               OR s.included_items IS NOT NULL OR s.faqs IS NOT NULL
             """
         )
-        actual = {(slug, name): (steps, exclusions) for slug, name, steps, exclusions in cur}
-    assert actual == SERVICE_DETAILS
+        actual = {(slug, name): tuple(rest) for slug, name, *rest in cur}
+    assert actual == {
+        (p["category_slug"], p["name"]): tuple(
+            json.loads(p[col]) for col in ("steps", "exclusions", "included_items", "faqs")
+        )
+        for p in service_details_params()
+    }
