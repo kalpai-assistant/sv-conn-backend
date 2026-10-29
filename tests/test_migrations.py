@@ -889,3 +889,31 @@ def test_svc_366_seeds_ios_from_pwa_and_downgrade_removes_it(scratch_db):
     again = _app_versions(scratch_db)
     assert set(again) == {"android", "pwa", "ios"}
     assert (again["ios"]["version"], again["ios"]["min_supported_version"]) == ("1.0.4", "1.0.2")
+
+
+# --- SVC-400: services catalogue fields ------------------------------------------
+
+
+SVC_400 = "314fe1318dfa"
+BEFORE_SVC_400 = "1c0b3408bdb6"
+
+
+def test_svc_400_adds_four_nullable_columns_and_downgrade_restores_services(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_400)
+    before = _shape(scratch_db, "services")
+
+    _alembic(scratch_db, "upgrade", SVC_400)
+    upgraded = _shape(scratch_db, "services")
+    # Only the four columns changed: no index, constraint or key.
+    assert {k: v for k, v in upgraded.items() if k != "columns"} == {
+        k: v for k, v in before.items() if k != "columns"
+    }
+    assert set(upgraded["columns"]) - set(before["columns"]) == {
+        ("hero_image_url", "VARCHAR(512)", True),
+        ("included_items", "JSONB", True),
+        ("faqs", "JSONB", True),
+        ("before_after_photos", "JSONB", True),
+    }
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_400)
+    assert _shape(scratch_db, "services") == before

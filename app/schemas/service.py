@@ -102,6 +102,25 @@ class RelatedServicesBucket(BaseModel):
     related: list[RelatedServiceEntry] = []
 
 
+class ServiceStep(BaseModel):
+    """SVC-400: the richer step shape. ``icon`` is a free-form keyword the
+    frontend maps to a Lucide icon."""
+
+    title: str
+    duration_minutes: int | None = None
+    icon: str | None = None
+
+
+class ServiceFaq(BaseModel):
+    question: str
+    answer: str
+
+
+class BeforeAfterPhoto(BaseModel):
+    before_url: str
+    after_url: str
+
+
 class ServiceDetailResponse(ServiceResponse):
     """``GET /services/{id}`` response — the ServiceResponse shape plus the
     three related-services buckets from SVC-291.
@@ -114,9 +133,24 @@ class ServiceDetailResponse(ServiceResponse):
     related: RelatedServicesBucket = RelatedServicesBucket()
     # SVC-340: what the Pro does (ordered) and what the service doesn't cover.
     # Detail-only — the list stays lean. None means no data; the frontend
-    # hides the section, as it does for an empty list.
-    steps: list[str] | None = None
+    # hides the section, as it does for an empty list. SVC-400: steps is
+    # either the SVC-340 string list or the SVC-392 object list.
+    steps: list[str] | list[ServiceStep] | None = None
     exclusions: list[str] | None = None
+    # SVC-400: SVC-392 catalogue content. None until written; the frontend
+    # hides the section or shows its fallback copy.
+    hero_image_url: str | None = None
+    included_items: list[str] | None = None
+    faqs: list[ServiceFaq] | None = None
+    before_after_photos: list[BeforeAfterPhoto] | None = None
+    # SVC-400: computed from real data on every read. rating_* count only
+    # consumer reviews of single-service bookings, and stay None/0 below
+    # MIN_REVIEWS_FOR_RATING so a handful of reviews can't show as "1.0 ⭐".
+    rating_average: float | None = None
+    rating_count: int | None = None
+    # Distinct non-cancelled, non-expired bookings with this service, created
+    # in the last 7 days.
+    bookings_this_week: int | None = None
 
 
 class CategoryResponse(BaseModel):
