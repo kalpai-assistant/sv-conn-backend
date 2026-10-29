@@ -3,14 +3,18 @@ Catalog service: admin-managed global service catalog.
 """
 
 import uuid
+from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.exceptions import ServiceNotFound
+from app.models.booking import Booking, BookingStatus
+from app.models.booking_item import BookingItem
 from app.models.category import Category
+from app.models.review import Review
 from app.models.service import Service
 from app.models.service_relationship import RelationshipType, ServiceRelationship
 from app.models.service_variant import ServiceVariant
@@ -20,6 +24,13 @@ from app.schemas.service import (
     ServiceDetailResponse,
     ServiceVariantResponse,
 )
+
+# SVC-400 (Vipul, 2026-10-29): below this many qualifying reviews a service
+# shows no rating at all (None + 0) — the frontend renders "New" rather than
+# an average a single unhappy customer could drag to 1 star.
+MIN_REVIEWS_FOR_RATING = 10
+# SVC-400: the rolling window behind bookings_this_week.
+BOOKINGS_THIS_WEEK_WINDOW = timedelta(days=7)
 
 
 class CatalogService:
@@ -144,6 +155,8 @@ class CatalogService:
             raise ServiceNotFound(service_id)
 
         related = await self._load_related(service_id)
+        rating_average, rating_count = await self._load_rating(service_id)
+        bookings_this_week = await self._count_bookings_this_week(service_id)
         return ServiceDetailResponse(
             id=service.id,
             category_id=service.category_id,
@@ -159,7 +172,70 @@ class CatalogService:
             banner_video_url=service.banner_video_url,
             steps=service.steps,
             exclusions=service.exclusions,
+            hero_image_url=service.hero_image_url,
+            included_items=service.included_items,
+            faqs=service.faqs,
+            before_after_photos=service.before_after_photos,
+            rating_average=rating_average,
+            rating_count=rating_count,
+            bookings_this_week=bookings_this_week,
         )
+
+    async def _load_rating(self, service_id: uuid.UUID) -> tuple[float | None, int]:
+        """Average + count of the consumer's reviews on bookings whose only
+        service is this one.
+
+        A multi-service booking gets one review for the whole visit, so it
+        can't be attributed to any single service; it is left out rather than
+        counted against each (Vipul: an honest signal over volume). Quantity
+        doesn't matter — two of the same service is still single-service.
+        ``reviewer_id = consumer_id`` keeps any non-consumer review out.
+        Below ``MIN_REVIEWS_FOR_RATING`` the answer is ``(None, 0)``.
+        """
+        other_item = aliased(BookingItem)
+        row = (
+            await self.db.execute(
+                select(func.avg(Review.rating), func.count(Review.id))
+                .join(Booking, Booking.id == Review.booking_id)
+                .join(
+                    BookingItem,
+                    and_(
+                        BookingItem.booking_id == Booking.id,
+                        BookingItem.service_id == service_id,
+                    ),
+                )
+                .where(
+                    Review.reviewer_id == Booking.consumer_id,
+                    ~exists().where(
+                        other_item.booking_id == Booking.id,
+                        other_item.service_id != service_id,
+                    ),
+                )
+            )
+        ).one()
+        average, count = row
+        if count < MIN_REVIEWS_FOR_RATING:
+            return None, 0
+        return round(float(average), 1), count
+
+    async def _count_bookings_this_week(self, service_id: uuid.UUID) -> int:
+        """Distinct bookings carrying this service, created in the last
+        ``BOOKINGS_THIS_WEEK_WINDOW``, that weren't cancelled or expired.
+
+        By ``created_at``, so a reopened booking counts once. Multi-service
+        bookings do count — the customer did book this service.
+        """
+        return (
+            await self.db.execute(
+                select(func.count(func.distinct(Booking.id)))
+                .join(BookingItem, BookingItem.booking_id == Booking.id)
+                .where(
+                    BookingItem.service_id == service_id,
+                    Booking.created_at >= func.now() - BOOKINGS_THIS_WEEK_WINDOW,
+                    Booking.status.notin_([BookingStatus.CANCELLED, BookingStatus.EXPIRED]),
+                )
+            )
+        ).scalar_one()
 
     async def _load_related(self, service_id: uuid.UUID) -> RelatedServicesBucket:
         """Fetch every edge out of `service_id` and bucket by relationship_type.

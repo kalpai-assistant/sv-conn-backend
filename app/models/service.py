@@ -49,8 +49,18 @@ class Service(Base):
     # SVC-340: what the Pro does (ordered) and what the service doesn't cover,
     # shown on the service detail page. NULL means "no data" and the frontend
     # hides the section. Edited by SQL only — there is no admin UI.
-    steps: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # SVC-400: ``steps`` may also hold the richer SVC-392 shape,
+    # ``[{title, duration_minutes?, icon?}]``; the frontend accepts both.
+    steps: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     exclusions: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # SVC-400: catalogue content for the SVC-392 detail page. All NULL until the
+    # content lands; the frontend hides each section (or falls back) on NULL.
+    hero_image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    included_items: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # [{question, answer}]
+    faqs: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    # [{before_url, after_url}]; stays empty until SVC-401.
+    before_after_photos: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
