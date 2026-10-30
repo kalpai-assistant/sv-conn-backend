@@ -5,7 +5,7 @@ Catalog service: admin-managed global service catalog.
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -55,7 +55,8 @@ def _qualifying_reviews(*columns):
     matter — two of the same service is one booking_item. ``reviewer_id =
     consumer_id`` keeps any non-consumer review out. The caller narrows
     ``BookingItem.service_id`` to the service(s) it wants; the rule lives
-    only here, shared by the rating (SVC-400) and the snippet (SVC-388).
+    only here, shared by the rating (SVC-400) and the snippet's stored stats
+    (SVC-388, ``review_stats_update``).
     """
     other_item = aliased(BookingItem)
     return (
@@ -70,6 +71,57 @@ def _qualifying_reviews(*columns):
                 other_item.service_id != BookingItem.service_id,
             ),
         )
+    )
+
+
+def review_stats_update(service_ids: list[uuid.UUID] | None = None):
+    """SVC-388: ``UPDATE services`` recomputing ``qualifying_review_count`` and
+    ``latest_snippet_review_id`` from the reviews, for ``service_ids`` or, with
+    None, every service.
+
+    Count: every qualifying review, whatever its rating or comment. Pointer:
+    the newest qualifying review with at least ``SNIPPET_MIN_RATING`` stars and
+    a trimmed comment longer than ``SNIPPET_MIN_CHARS`` (``id`` breaks a
+    created_at tie), or NULL. Used by the write path and by the migration's
+    backfill, so both apply the one rule. ``updated_at`` is kept: this is
+    derived data, not an edit to the service.
+    """
+    count = (
+        _qualifying_reviews(func.count(Review.id))
+        .where(BookingItem.service_id == Service.id)
+        .scalar_subquery()
+    )
+    latest = (
+        _qualifying_reviews(Review.id)
+        .where(
+            BookingItem.service_id == Service.id,
+            Review.rating >= SNIPPET_MIN_RATING,
+            func.length(func.btrim(Review.comment, _WHITESPACE)) > SNIPPET_MIN_CHARS,
+        )
+        .order_by(Review.created_at.desc(), Review.id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    stmt = update(Service).values(
+        qualifying_review_count=count,
+        latest_snippet_review_id=latest,
+        updated_at=Service.updated_at,
+    )
+    if service_ids is not None:
+        stmt = stmt.where(Service.id.in_(service_ids))
+    return stmt
+
+
+def _snippet(review_count, comment, created_at, name, deleted_at) -> ReviewSnippet | None:
+    """The card's snippet from the stored pointer's row, or None below the
+    ``MIN_REVIEWS_FOR_RATING`` gate or with no eligible review. No content
+    filter: moderation is later (Vipul)."""
+    if review_count < MIN_REVIEWS_FOR_RATING or comment is None:
+        return None
+    return ReviewSnippet(
+        text=_snippet_text(comment),
+        reviewer_first_name=_first_name(name, deleted_at),
+        created_at=created_at,
     )
 
 
@@ -124,86 +176,47 @@ class CatalogService:
         # fire one query per service (N+1) on a listing that can return
         # dozens of rows. `.options(selectinload(...))` fetches all variants
         # in one round-trip keyed by service_id.
+        #
+        # SVC-388: the review snippet rides the same query through the stored
+        # pointer (see Service.latest_snippet_review_id), so its text and the
+        # reviewer's name are always live. The gate reads the stored count
+        # here, so changing MIN_REVIEWS_FOR_RATING needs no backfill.
         stmt = (
-            select(Service)
+            select(Service, Review.comment, Review.created_at, User.name, User.deleted_at)
+            .outerjoin(Review, Review.id == Service.latest_snippet_review_id)
+            .outerjoin(User, User.id == Review.reviewer_id)
             .where(Service.is_active.is_(True))
             .options(selectinload(Service.variants.and_(ServiceVariant.is_active.is_(True))))
         )
         if category_id:
             stmt = stmt.where(Service.category_id == category_id)
-        services = list((await self.db.execute(stmt)).scalars().all())
-        snippets = await self._load_review_snippets([s.id for s in services])
+        rows = (await self.db.execute(stmt)).all()
         return [
-            ServiceResponse.model_validate(s).model_copy(
-                update={"latest_review_snippet": snippets.get(s.id)}
+            ServiceResponse.model_validate(service).model_copy(
+                update={
+                    "latest_review_snippet": _snippet(
+                        service.qualifying_review_count, comment, created_at, name, deleted_at
+                    )
+                }
             )
-            for s in services
+            for service, comment, created_at, name, deleted_at in rows
         ]
 
-    async def _load_review_snippets(
-        self, service_ids: list[uuid.UUID]
-    ) -> dict[uuid.UUID, ReviewSnippet]:
-        """SVC-388: the newest eligible review per service, in one query for
-        the whole listing.
+    async def refresh_review_stats(self, service_id: uuid.UUID) -> None:
+        """SVC-388: recompute one service's stored review count and snippet
+        pointer. Called in the transaction that creates the review.
 
-        Gated like the rating: a service with fewer than
-        ``MIN_REVIEWS_FOR_RATING`` qualifying reviews (any rating, any
-        comment) gets no snippet. Of the rest, eligible means at least
-        ``SNIPPET_MIN_RATING`` stars and a trimmed comment longer than
-        ``SNIPPET_MIN_CHARS``. ``DISTINCT ON`` keeps the newest per service,
-        ``id`` breaking a created_at tie. Deleted reviewers stay in (Vipul)
-        with no name. No content filter: moderation is later.
+        Takes the services row lock first so two reviews landing at once for
+        the same service serialise: under READ COMMITTED the second UPDATE's
+        subqueries then see the first review once it has committed. A recompute
+        rather than an increment, so the stored values can't drift from the
+        rule.
         """
-        if not service_ids:
-            return {}
-        qualifying = (
-            _qualifying_reviews(
-                BookingItem.service_id.label("service_id"),
-                Review.id.label("review_id"),
-                Review.rating,
-                Review.comment,
-                Review.created_at,
-                Review.reviewer_id,
-            )
-            .where(BookingItem.service_id.in_(service_ids))
-            .cte("qualifying")
+        await self.db.execute(select(Service.id).where(Service.id == service_id).with_for_update())
+        await self.db.execute(
+            review_stats_update([service_id]),
+            execution_options={"synchronize_session": "fetch"},
         )
-        gated = (
-            select(qualifying.c.service_id)
-            .group_by(qualifying.c.service_id)
-            .having(func.count() >= MIN_REVIEWS_FOR_RATING)
-            .cte("gated")
-        )
-        rows = await self.db.execute(
-            select(
-                qualifying.c.service_id,
-                qualifying.c.comment,
-                qualifying.c.created_at,
-                User.name,
-                User.deleted_at,
-            )
-            .select_from(qualifying)
-            .join(gated, gated.c.service_id == qualifying.c.service_id)
-            .join(User, User.id == qualifying.c.reviewer_id)
-            .where(
-                qualifying.c.rating >= SNIPPET_MIN_RATING,
-                func.length(func.btrim(qualifying.c.comment, _WHITESPACE)) > SNIPPET_MIN_CHARS,
-            )
-            .distinct(qualifying.c.service_id)
-            .order_by(
-                qualifying.c.service_id,
-                qualifying.c.created_at.desc(),
-                qualifying.c.review_id.desc(),
-            )
-        )
-        return {
-            row.service_id: ReviewSnippet(
-                text=_snippet_text(row.comment),
-                reviewer_first_name=_first_name(row.name, row.deleted_at),
-                created_at=row.created_at,
-            )
-            for row in rows
-        }
 
     async def create_service(
         self,

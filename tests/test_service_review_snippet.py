@@ -9,24 +9,40 @@ Vipul's rules (Slack, 2026-10-30):
 - Text cut to 80 chars on a word boundary, "…" included in the 80.
 - A deleted or nameless reviewer stays in with ``reviewer_first_name`` null.
 - One query for the whole listing, never one per service.
+
+The inputs are stored on ``services`` (count + pointer) and recomputed when a
+review is created. Most tests insert reviews directly, to control
+``created_at`` and the reviewer, then run ``review_stats_update`` for the
+booking's services, the statement both the write path and the backfill use.
+The write-path tests go through ``ReviewService.create_review``, and the
+backfill is checked against the old live query, kept here as the oracle.
 """
 
+import random
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, func, select
 from sqlalchemy.engine import Engine
 
 from app.models.address import Address
 from app.models.booking import BookingStatus
+from app.models.booking_item import BookingItem
 from app.models.category import Category
 from app.models.review import Review
 from app.models.service import Service
+from app.models.user import User
 from app.services.catalog_service import (
+    _WHITESPACE,
     MIN_REVIEWS_FOR_RATING,
     SNIPPET_MAX_CHARS,
+    SNIPPET_MIN_CHARS,
+    SNIPPET_MIN_RATING,
+    _qualifying_reviews,
     _snippet_text,
+    review_stats_update,
 )
+from app.services.review_service import ReviewService
 from tests.factories.booking_factory import BookingFactory
 from tests.factories.user_factory import UserFactory
 from tests.test_accept_contract import ADDRESS_POINT, _service
@@ -69,6 +85,23 @@ async def _review(db, booking, rating=5, comment=None, *, minutes=0, reviewer_id
         )
     )
     await db.flush()
+    await _refresh(db, booking)
+
+
+async def _refresh(db, booking):
+    service_ids = (
+        (
+            await db.execute(
+                select(BookingItem.service_id).where(BookingItem.booking_id == booking.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    await db.execute(
+        review_stats_update(list(service_ids)),
+        execution_options={"synchronize_session": "fetch"},
+    )
 
 
 async def _qualify(db, service, n, *, rating=5):
@@ -358,3 +391,184 @@ async def test_rating_is_unchanged_for_two_services_sharing_a_cart(client, db_se
     for svc, average in ((service, 5.0), (other, 4.0)):
         body = (await client.get(DETAIL.format(svc.id))).json()
         assert (body["rating_average"], body["rating_count"]) == (average, 10)
+
+
+# ---------------------------------------------------------------------------
+# Write path: ReviewService.create_review keeps the stored stats current
+# ---------------------------------------------------------------------------
+
+
+async def _stored(db, service):
+    await db.refresh(service)
+    return service.qualifying_review_count, service.latest_snippet_review_id
+
+
+@pytest.mark.asyncio
+async def test_creating_an_eligible_review_sets_the_count_and_the_pointer(db_session):
+    service = await _service(db_session)
+    booking = await _booking(db_session, [service.id])
+
+    review = await ReviewService(db_session).create_review(booking.id, booking.consumer_id, 5, GOOD)
+
+    assert await _stored(db_session, service) == (1, review.id)
+
+
+@pytest.mark.asyncio
+async def test_an_ineligible_review_bumps_the_count_and_leaves_the_pointer(db_session):
+    service = await _service(db_session)
+    first = await _booking(db_session, [service.id])
+    eligible = await ReviewService(db_session).create_review(first.id, first.consumer_id, 4, GOOD)
+    # Older than anything created later in this transaction (now() is fixed
+    # per transaction, and the tie would fall to the random id).
+    eligible.created_at = T0
+    await db_session.flush()
+
+    for rating, comment in ((3, "Three stars, " + GOOD), (5, "nice"), (5, None)):
+        booking = await _booking(db_session, [service.id])
+        await ReviewService(db_session).create_review(
+            booking.id, booking.consumer_id, rating, comment
+        )
+
+    assert await _stored(db_session, service) == (4, eligible.id)
+
+    newer = await _booking(db_session, [service.id])
+    moved = await ReviewService(db_session).create_review(newer.id, newer.consumer_id, 5, GOOD)
+
+    assert await _stored(db_session, service) == (5, moved.id)
+
+
+@pytest.mark.asyncio
+async def test_a_multi_service_bookings_review_changes_nothing(db_session):
+    service = await _service(db_session)
+    other = await _service(db_session)
+    booking = await _booking(db_session, [service.id, other.id])
+
+    await ReviewService(db_session).create_review(booking.id, booking.consumer_id, 5, GOOD)
+
+    assert await _stored(db_session, service) == (0, None)
+    assert await _stored(db_session, other) == (0, None)
+
+
+# ---------------------------------------------------------------------------
+# Backfill: review_stats_update over existing reviews == the old live query
+# ---------------------------------------------------------------------------
+
+
+async def _live_oracle(db, service_ids):
+    """The pre-denormalisation live query (SVC-388's first cut): ungated
+    qualifying count, and the gated newest eligible snippet, per service."""
+    qualifying = (
+        _qualifying_reviews(
+            BookingItem.service_id.label("service_id"),
+            Review.id.label("review_id"),
+            Review.rating,
+            Review.comment,
+            Review.created_at,
+            Review.reviewer_id,
+        )
+        .where(BookingItem.service_id.in_(service_ids))
+        .cte("qualifying")
+    )
+    counts = dict(
+        (
+            await db.execute(
+                select(qualifying.c.service_id, func.count()).group_by(qualifying.c.service_id)
+            )
+        ).all()
+    )
+    gated = (
+        select(qualifying.c.service_id)
+        .group_by(qualifying.c.service_id)
+        .having(func.count() >= MIN_REVIEWS_FOR_RATING)
+        .cte("gated")
+    )
+    rows = await db.execute(
+        select(qualifying.c.service_id, qualifying.c.comment, qualifying.c.created_at, User.name)
+        .select_from(qualifying)
+        .join(gated, gated.c.service_id == qualifying.c.service_id)
+        .join(User, User.id == qualifying.c.reviewer_id)
+        .where(
+            qualifying.c.rating >= SNIPPET_MIN_RATING,
+            func.length(func.btrim(qualifying.c.comment, _WHITESPACE)) > SNIPPET_MIN_CHARS,
+        )
+        .distinct(qualifying.c.service_id)
+        .order_by(
+            qualifying.c.service_id,
+            qualifying.c.created_at.desc(),
+            qualifying.c.review_id.desc(),
+        )
+    )
+    snippets = {
+        row.service_id: {
+            "text": _snippet_text(row.comment),
+            "first": row.name.split()[0] if row.name and row.name.strip() else None,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    }
+    return counts, snippets
+
+
+@pytest.mark.asyncio
+async def test_the_backfill_matches_the_old_live_query(client, db_session):
+    rng = random.Random(388)
+    category = Category(name="SVC-388 oracle", slug="svc388-oracle", sort_order=1)
+    db_session.add(category)
+    await db_session.flush()
+    services = [
+        Service(
+            category_id=category.id,
+            name=f"Oracle {i}",
+            base_price=499.0,
+            duration_minutes=60,
+            is_active=True,
+        )
+        for i in range(5)
+    ]
+    db_session.add_all(services)
+    await db_session.flush()
+    comments = [None, "nice", "  \n Good work, thanks!!!  \n", GOOD, "A" * 30 + " " + GOOD * 2]
+    for _ in range(140):
+        service = rng.choice(services)
+        ids = [service.id]
+        if rng.random() < 0.15:
+            ids.append(rng.choice([s.id for s in services if s is not service]))
+        consumer = await UserFactory.create(
+            db_session, role="consumer", name=rng.choice(["Asha Rao", "  ", "Ravi"])
+        )
+        booking = await _booking(db_session, ids, consumer=consumer)
+        db_session.add(
+            Review(
+                booking_id=booking.id,
+                reviewer_id=(booking.provider_id if rng.random() < 0.05 else booking.consumer_id),
+                reviewee_id=booking.provider_id,
+                rating=rng.randint(1, 5),
+                comment=rng.choice(comments),
+                # Coarse minutes, so some created_at ties fall to the id.
+                created_at=T0 + timedelta(minutes=rng.randint(0, 40)),
+            )
+        )
+    await db_session.flush()
+    service_ids = [s.id for s in services]
+
+    await db_session.execute(
+        review_stats_update(service_ids), execution_options={"synchronize_session": "fetch"}
+    )
+
+    counts, expected = await _live_oracle(db_session, service_ids)
+    assert any(c >= MIN_REVIEWS_FOR_RATING for c in counts.values())
+    assert expected, "the seed should give at least one service a snippet"
+    response = await client.get(LIST.format(category.id))
+    assert response.status_code == 200, response.text
+    by_id = {row["id"]: row["latest_review_snippet"] for row in response.json()}
+    for service in services:
+        await db_session.refresh(service)
+        assert service.qualifying_review_count == counts.get(service.id, 0)
+        want = expected.get(service.id)
+        got = by_id[str(service.id)]
+        if want is None:
+            assert got is None, service.name
+        else:
+            assert got["text"] == want["text"]
+            assert got["reviewer_first_name"] == want["first"]
+            assert datetime.fromisoformat(got["created_at"]) == want["created_at"]
