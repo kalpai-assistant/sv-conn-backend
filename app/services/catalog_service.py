@@ -5,7 +5,7 @@ Catalog service: admin-managed global service catalog.
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import and_, exists, func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -18,19 +18,80 @@ from app.models.review import Review
 from app.models.service import Service
 from app.models.service_relationship import RelationshipType, ServiceRelationship
 from app.models.service_variant import ServiceVariant
+from app.models.user import User
 from app.schemas.service import (
     RelatedServiceEntry,
     RelatedServicesBucket,
+    ReviewSnippet,
     ServiceDetailResponse,
+    ServiceResponse,
     ServiceVariantResponse,
 )
 
 # SVC-400 (Vipul, 2026-10-29): below this many qualifying reviews a service
 # shows no rating at all (None + 0) — the frontend renders "New" rather than
-# an average a single unhappy customer could drag to 1 star.
+# an average a single unhappy customer could drag to 1 star. SVC-388: the
+# same gate decides whether a card gets a review snippet.
 MIN_REVIEWS_FOR_RATING = 10
 # SVC-400: the rolling window behind bookings_this_week.
 BOOKINGS_THIS_WEEK_WINDOW = timedelta(days=7)
+# SVC-388: a snippet is a qualifying review of at least this many stars whose
+# trimmed comment is longer than SNIPPET_MIN_CHARS ("good" / "nice" are out).
+SNIPPET_MIN_RATING = 4
+SNIPPET_MIN_CHARS = 20
+# The card text is at most this many characters, the "…" included.
+SNIPPET_MAX_CHARS = 80
+_WHITESPACE = " \t\r\n"
+
+
+def _qualifying_reviews(*columns):
+    """``SELECT columns`` over the reviews that count for a service: the
+    consumer's own review of a booking whose only service is
+    ``booking_items.service_id``.
+
+    A multi-service booking gets one review for the whole visit, so it can't
+    be attributed to any single service; it is left out rather than counted
+    against each (Vipul: an honest signal over volume). Quantity doesn't
+    matter — two of the same service is one booking_item. ``reviewer_id =
+    consumer_id`` keeps any non-consumer review out. The caller narrows
+    ``BookingItem.service_id`` to the service(s) it wants; the rule lives
+    only here, shared by the rating (SVC-400) and the snippet (SVC-388).
+    """
+    other_item = aliased(BookingItem)
+    return (
+        select(*columns)
+        .select_from(Review)
+        .join(Booking, Booking.id == Review.booking_id)
+        .join(BookingItem, BookingItem.booking_id == Booking.id)
+        .where(
+            Review.reviewer_id == Booking.consumer_id,
+            ~exists().where(
+                other_item.booking_id == Booking.id,
+                other_item.service_id != BookingItem.service_id,
+            ),
+        )
+    )
+
+
+def _snippet_text(comment: str) -> str:
+    """Collapse whitespace and cut to ``SNIPPET_MAX_CHARS`` on a word
+    boundary, ending in "…" (counted inside the limit)."""
+    text = " ".join(comment.split())
+    if len(text) <= SNIPPET_MAX_CHARS:
+        return text
+    cut = text[: SNIPPET_MAX_CHARS - 1]
+    # Mid-word: back up to the last space. A single 79-char word is cut hard.
+    if text[SNIPPET_MAX_CHARS - 1] != " " and " " in cut:
+        cut = cut[: cut.rindex(" ")]
+    return cut.rstrip(" ,.;:-") + "…"
+
+
+def _first_name(name: str | None, deleted_at) -> str | None:
+    # A deleted account (SVC-367) keeps its reviews with name NULL; the
+    # frontend shows its fallback label for None.
+    if deleted_at is not None or not name or not name.strip():
+        return None
+    return name.split()[0]
 
 
 class CatalogService:
@@ -56,7 +117,7 @@ class CatalogService:
     async def list_services(
         self,
         category_id: uuid.UUID | None = None,
-    ) -> list[Service]:
+    ) -> list[ServiceResponse]:
         # Eager-load variants because ServiceResponse embeds them + the
         # relationship is `lazy="raise_on_sql"` — pydantic would otherwise
         # fault on serialisation, and even if it didn't, the read path would
@@ -70,8 +131,79 @@ class CatalogService:
         )
         if category_id:
             stmt = stmt.where(Service.category_id == category_id)
-        result = await self.db.execute(stmt)
-        return list(result.scalars().all())
+        services = list((await self.db.execute(stmt)).scalars().all())
+        snippets = await self._load_review_snippets([s.id for s in services])
+        return [
+            ServiceResponse.model_validate(s).model_copy(
+                update={"latest_review_snippet": snippets.get(s.id)}
+            )
+            for s in services
+        ]
+
+    async def _load_review_snippets(
+        self, service_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, ReviewSnippet]:
+        """SVC-388: the newest eligible review per service, in one query for
+        the whole listing.
+
+        Gated like the rating: a service with fewer than
+        ``MIN_REVIEWS_FOR_RATING`` qualifying reviews (any rating, any
+        comment) gets no snippet. Of the rest, eligible means at least
+        ``SNIPPET_MIN_RATING`` stars and a trimmed comment longer than
+        ``SNIPPET_MIN_CHARS``. ``DISTINCT ON`` keeps the newest per service,
+        ``id`` breaking a created_at tie. Deleted reviewers stay in (Vipul)
+        with no name. No content filter: moderation is later.
+        """
+        if not service_ids:
+            return {}
+        qualifying = (
+            _qualifying_reviews(
+                BookingItem.service_id.label("service_id"),
+                Review.id.label("review_id"),
+                Review.rating,
+                Review.comment,
+                Review.created_at,
+                Review.reviewer_id,
+            )
+            .where(BookingItem.service_id.in_(service_ids))
+            .cte("qualifying")
+        )
+        gated = (
+            select(qualifying.c.service_id)
+            .group_by(qualifying.c.service_id)
+            .having(func.count() >= MIN_REVIEWS_FOR_RATING)
+            .cte("gated")
+        )
+        rows = await self.db.execute(
+            select(
+                qualifying.c.service_id,
+                qualifying.c.comment,
+                qualifying.c.created_at,
+                User.name,
+                User.deleted_at,
+            )
+            .select_from(qualifying)
+            .join(gated, gated.c.service_id == qualifying.c.service_id)
+            .join(User, User.id == qualifying.c.reviewer_id)
+            .where(
+                qualifying.c.rating >= SNIPPET_MIN_RATING,
+                func.length(func.btrim(qualifying.c.comment, _WHITESPACE)) > SNIPPET_MIN_CHARS,
+            )
+            .distinct(qualifying.c.service_id)
+            .order_by(
+                qualifying.c.service_id,
+                qualifying.c.created_at.desc(),
+                qualifying.c.review_id.desc(),
+            )
+        )
+        return {
+            row.service_id: ReviewSnippet(
+                text=_snippet_text(row.comment),
+                reviewer_first_name=_first_name(row.name, row.deleted_at),
+                created_at=row.created_at,
+            )
+            for row in rows
+        }
 
     async def create_service(
         self,
@@ -182,34 +314,14 @@ class CatalogService:
         )
 
     async def _load_rating(self, service_id: uuid.UUID) -> tuple[float | None, int]:
-        """Average + count of the consumer's reviews on bookings whose only
-        service is this one.
-
-        A multi-service booking gets one review for the whole visit, so it
-        can't be attributed to any single service; it is left out rather than
-        counted against each (Vipul: an honest signal over volume). Quantity
-        doesn't matter — two of the same service is still single-service.
-        ``reviewer_id = consumer_id`` keeps any non-consumer review out.
-        Below ``MIN_REVIEWS_FOR_RATING`` the answer is ``(None, 0)``.
+        """Average + count of the qualifying reviews (``_qualifying_reviews``)
+        for this service. Below ``MIN_REVIEWS_FOR_RATING`` the answer is
+        ``(None, 0)``.
         """
-        other_item = aliased(BookingItem)
         row = (
             await self.db.execute(
-                select(func.avg(Review.rating), func.count(Review.id))
-                .join(Booking, Booking.id == Review.booking_id)
-                .join(
-                    BookingItem,
-                    and_(
-                        BookingItem.booking_id == Booking.id,
-                        BookingItem.service_id == service_id,
-                    ),
-                )
-                .where(
-                    Review.reviewer_id == Booking.consumer_id,
-                    ~exists().where(
-                        other_item.booking_id == Booking.id,
-                        other_item.service_id != service_id,
-                    ),
+                _qualifying_reviews(func.avg(Review.rating), func.count(Review.id)).where(
+                    BookingItem.service_id == service_id
                 )
             )
         ).one()
