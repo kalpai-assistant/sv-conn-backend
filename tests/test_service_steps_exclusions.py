@@ -29,6 +29,11 @@ from app.seed_data.service_details import (
 )
 from scripts.seed_pricing_from_xlsx import DEFAULT_XLSX, _slug, parse_workbook
 
+AC = ("ac", "Split AC foam-jet service")
+COCKROACH = ("pest-control", "Cockroach control")
+WASHING_MACHINE = ("appliances", "Washing machine repair")
+PAINTING = ("painting", "Full room painting")
+
 
 async def _make_service(db_session, **overrides):
     suffix = uuid4().hex[:6]
@@ -100,7 +105,12 @@ def test_seed_data_is_ten_services_in_ticket_shape():
     assert len(SERVICE_DETAILS) == 10
     assert len({slug for slug, _ in SERVICE_DETAILS}) == 10, "one service per sub-category"
     for key, details in SERVICE_DETAILS.items():
-        assert set(details) == {"steps", "exclusions", "included_items", "faqs"}, key
+        assert set(details) - {"duration_minutes"} == {
+            "steps",
+            "exclusions",
+            "included_items",
+            "faqs",
+        }, key
         assert 4 <= len(details["steps"]) <= 6, key
         assert 2 <= len(details["exclusions"]) <= 4, key
         titles = [step["title"] for step in details["steps"]]
@@ -135,13 +145,13 @@ def test_every_seeded_service_validates_as_a_detail_response():
 
 
 def test_steps_have_one_shape_per_service_and_known_icons():
-    """Durations are all-or-nothing per service (the four untimed services
-    carry none), and icons stay within the keywords the frontend maps."""
+    """Durations are all-or-nothing per service (painting carries none), and
+    icons stay within the keywords the frontend maps."""
     known_icons = {
         "search", "inspect", "wind", "dust", "bath", "bathroom", "kitchen",
         "degrease", "sparkles", "mop", "finish", "review",
     }  # fmt: skip
-    untimed = {"ac", "pest-control", "appliances", "painting"}
+    untimed = {"painting"}
     for (slug, name), details in SERVICE_DETAILS.items():
         steps = details["steps"]
         assert all(set(step) <= {"title", "duration_minutes", "icon"} for step in steps), name
@@ -149,6 +159,40 @@ def test_steps_have_one_shape_per_service_and_known_icons():
         timed = ["duration_minutes" in step for step in steps]
         assert all(timed) or not any(timed), name
         assert any(timed) == (slug not in untimed), name
+
+
+def test_timed_steps_add_up_to_the_hour_the_service_shows():
+    """Every timed service shows the pricing seed's 60, so its steps must add
+    up to it — including the three timed in the SVC-400 follow-up."""
+    for (slug, name), details in SERVICE_DETAILS.items():
+        if slug == "painting":
+            continue
+        assert "duration_minutes" not in details, name
+        assert sum(step["duration_minutes"] for step in details["steps"]) == 60, name
+    assert [s["duration_minutes"] for s in SERVICE_DETAILS[AC]["steps"]] == [5, 10, 30, 10, 5]
+    assert [s["duration_minutes"] for s in SERVICE_DETAILS[COCKROACH]["steps"]] == [
+        5,
+        10,
+        25,
+        15,
+        5,
+    ]
+    assert [s["duration_minutes"] for s in SERVICE_DETAILS[WASHING_MACHINE]["steps"]] == [
+        5,
+        15,
+        5,
+        25,
+        10,
+    ]
+
+
+def test_painting_is_untimed_with_a_one_day_total():
+    painting = SERVICE_DETAILS[PAINTING]
+    assert painting["duration_minutes"] == 480
+    assert all("duration_minutes" not in step for step in painting["steps"])
+    params = {(p["category_slug"], p["name"]): p for p in service_details_params()}
+    assert params[PAINTING]["duration_minutes"] == 480
+    assert all(p["duration_minutes"] is None for k, p in params.items() if k != PAINTING)
 
 
 def test_common_faqs_are_appended_once_after_each_services_own():
@@ -245,3 +289,36 @@ async def test_apply_service_details_fills_new_services_and_reports_unmatched_ke
     assert details[drain.id] == expected(("plumber", "Drain blockage removal"))
     assert details[haircut.id] == expected(("salon-men", "Men's haircut"))
     assert details[other.id] == (None, None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_apply_service_details_sets_paintings_total_and_leaves_the_rest(db_session):
+    """The seed path: the pricing re-seed recreates every service at 60, then
+    applies. Painting must come out at 480 and the others keep their 60."""
+    painting_cat = await _get_or_make_category(db_session, "painting")
+    ac_cat = await _get_or_make_category(db_session, "ac")
+    painting = Service(
+        category_id=painting_cat.id,
+        name="Full room painting",
+        base_price=999,
+        duration_minutes=60,
+        is_active=True,
+    )
+    ac = Service(
+        category_id=ac_cat.id,
+        name="Split AC foam-jet service",
+        base_price=499,
+        duration_minutes=60,
+        is_active=True,
+    )
+    db_session.add_all([painting, ac])
+
+    await apply_service_details(db_session)
+
+    rows = await db_session.execute(
+        text("SELECT id, duration_minutes, steps FROM services WHERE id IN (:a, :b)"),
+        {"a": painting.id, "b": ac.id},
+    )
+    by_id = {row.id: (row.duration_minutes, row.steps) for row in rows}
+    assert by_id[painting.id] == (480, SERVICE_DETAILS[PAINTING]["steps"])
+    assert by_id[ac.id] == (60, SERVICE_DETAILS[AC]["steps"])

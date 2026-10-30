@@ -264,3 +264,17 @@ def test_service_details_survive_the_seed_ritual(seeded_db) -> None:
         )
         for p in service_details_params()
     }
+
+
+def test_painting_total_survives_the_seed_ritual(seeded_db) -> None:
+    """SVC-400 follow-up: the pricing pass recreates services at 60; the
+    re-apply puts painting's one-day total back and leaves the rest alone."""
+    with _seed_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.slug, s.name, s.duration_minutes
+            FROM services s JOIN categories c ON c.id = s.category_id
+            WHERE s.duration_minutes <> 60
+            """
+        )
+        assert cur.fetchall() == [("painting", "Full room painting", 480)]
