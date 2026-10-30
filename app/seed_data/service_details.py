@@ -17,11 +17,16 @@ shape per service: a mixed list fails ``ServiceDetailResponse`` and 500s the
 detail endpoint. ``duration_minutes`` is set only where a real step time is
 known. ``icon`` must be one of the keywords the frontend maps (see SVC-400).
 Never put ratings, job counts, guarantees, insurance or warranty claims here.
+
+An entry may also carry a service-level ``duration_minutes`` (the total shown
+when the variant has none). It is applied only when given; the rest keep the
+60 the pricing seed writes.
 """
 
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from sqlalchemy import text
 
@@ -48,10 +53,10 @@ COMMON_FAQS: list[dict[str, str]] = [
     },
 ]
 
-# (category slug, service name) -> {steps, exclusions, included_items, faqs}.
-# One service per sub-category. ``faqs`` is the service's own; COMMON_FAQS is
-# added on top.
-SERVICE_DETAILS: dict[tuple[str, str], dict[str, list]] = {
+# (category slug, service name) -> {steps, exclusions, included_items, faqs,
+# duration_minutes?}. One service per sub-category. ``faqs`` is the service's
+# own; COMMON_FAQS is added on top.
+SERVICE_DETAILS: dict[tuple[str, str], dict[str, Any]] = {
     ("cleaning", "Bathroom deep cleaning"): {
         "steps": [
             {
@@ -294,20 +299,33 @@ SERVICE_DETAILS: dict[tuple[str, str], dict[str, list]] = {
             },
         ],
     },
-    # Step times pending real durations from Vipul: title + icon only.
     ("ac", "Split AC foam-jet service"): {
         "steps": [
-            {"title": "Pro arrives with a foam-jet kit and protective covers", "icon": "wind"},
+            {
+                "title": "Pro arrives with a foam-jet kit and protective covers",
+                "duration_minutes": 5,
+                "icon": "wind",
+            },
             {
                 "title": "Checks the AC's cooling and covers the wall and floor below the unit",
+                "duration_minutes": 10,
                 "icon": "inspect",
             },
             {
                 "title": "Cleans the filters, cooling coil and fan with foam and water jet",
+                "duration_minutes": 30,
                 "icon": "wind",
             },
-            {"title": "Flushes the drain pipe and checks for leaks", "icon": "search"},
-            {"title": "Reassembles the unit, tests cooling and cleans up", "icon": "finish"},
+            {
+                "title": "Flushes the drain pipe and checks for leaks",
+                "duration_minutes": 10,
+                "icon": "search",
+            },
+            {
+                "title": "Reassembles the unit, tests cooling and cleans up",
+                "duration_minutes": 5,
+                "icon": "finish",
+            },
         ],
         "exclusions": [
             "Does not include gas refilling or top-up",
@@ -389,17 +407,33 @@ SERVICE_DETAILS: dict[tuple[str, str], dict[str, list]] = {
             },
         ],
     },
-    # Step times pending real durations from Vipul: title + icon only.
     ("pest-control", "Cockroach control"): {
         "steps": [
-            {"title": "Pro arrives with odourless gel and spray treatment", "icon": "sparkles"},
+            {
+                "title": "Pro arrives with odourless gel and spray treatment",
+                "duration_minutes": 5,
+                "icon": "sparkles",
+            },
             {
                 "title": "Inspects the kitchen and bathrooms for activity and hiding spots",
+                "duration_minutes": 10,
                 "icon": "inspect",
             },
-            {"title": "Applies gel in cracks, crevices and cabinet hinges", "icon": "kitchen"},
-            {"title": "Sprays drains and corners where needed", "icon": "bath"},
-            {"title": "Explains the precautions to follow after treatment", "icon": "review"},
+            {
+                "title": "Applies gel in cracks, crevices and cabinet hinges",
+                "duration_minutes": 25,
+                "icon": "kitchen",
+            },
+            {
+                "title": "Sprays drains and corners where needed",
+                "duration_minutes": 15,
+                "icon": "bath",
+            },
+            {
+                "title": "Explains the precautions to follow after treatment",
+                "duration_minutes": 5,
+                "icon": "review",
+            },
         ],
         "exclusions": [
             "Does not include treatment for termites, bed bugs or rodents",
@@ -433,14 +467,33 @@ SERVICE_DETAILS: dict[tuple[str, str], dict[str, list]] = {
             },
         ],
     },
-    # Step times pending real durations from Vipul: title + icon only.
     ("appliances", "Washing machine repair"): {
         "steps": [
-            {"title": "Technician arrives with diagnostic tools", "icon": "search"},
-            {"title": "Inspects the machine and identifies the fault", "icon": "inspect"},
-            {"title": "Shares the repair estimate before starting any work", "icon": "review"},
-            {"title": "Repairs the fault once you approve", "icon": "sparkles"},
-            {"title": "Runs a test cycle to confirm it works", "icon": "finish"},
+            {
+                "title": "Technician arrives with diagnostic tools",
+                "duration_minutes": 5,
+                "icon": "search",
+            },
+            {
+                "title": "Inspects the machine and identifies the fault",
+                "duration_minutes": 15,
+                "icon": "inspect",
+            },
+            {
+                "title": "Shares the repair estimate before starting any work",
+                "duration_minutes": 5,
+                "icon": "review",
+            },
+            {
+                "title": "Repairs the fault once you approve",
+                "duration_minutes": 25,
+                "icon": "sparkles",
+            },
+            {
+                "title": "Runs a test cycle to confirm it works",
+                "duration_minutes": 10,
+                "icon": "finish",
+            },
         ],
         "exclusions": [
             "Does not include the cost of spare parts — charged separately at actuals",
@@ -536,9 +589,12 @@ SERVICE_DETAILS: dict[tuple[str, str], dict[str, list]] = {
             },
         ],
     },
-    # Step times pending real durations from Vipul: title + icon only. "Is paint
-    # included?" is left out until Vipul says who supplies the paint.
+    # Steps are untimed on purpose: a room takes a working day including drying
+    # time between coats, so the service-level duration_minutes carries the
+    # total instead. "Is paint included?" is left out until Vipul says who
+    # supplies the paint.
     ("painting", "Full room painting"): {
+        "duration_minutes": 480,
         "steps": [
             {
                 "title": "Painter arrives with tools and covers for furniture and floor",
@@ -579,12 +635,14 @@ SERVICE_DETAILS: dict[tuple[str, str], dict[str, list]] = {
 # Scoped by (category slug, service name) — ``services`` has no slug. Fixed
 # values make a re-run a no-op; a key with no matching row updates nothing.
 # hero_image_url and before_after_photos are deliberately not set (SVC-401).
+# A NULL :duration_minutes leaves the service's own duration alone.
 UPDATE_SERVICE_DETAILS = """
     UPDATE services s
     SET steps = CAST(:steps AS jsonb),
         exclusions = CAST(:exclusions AS jsonb),
         included_items = CAST(:included_items AS jsonb),
-        faqs = CAST(:faqs AS jsonb)
+        faqs = CAST(:faqs AS jsonb),
+        duration_minutes = COALESCE(CAST(:duration_minutes AS integer), s.duration_minutes)
     FROM categories c
     WHERE c.id = s.category_id
       AND c.slug = :category_slug
@@ -608,7 +666,8 @@ UPDATE_SERVICE_DETAILS_SVC_340 = """
 def service_details_params() -> list[dict]:
     """One bound-parameter set per seeded service, for UPDATE_SERVICE_DETAILS.
 
-    COMMON_FAQS goes after each service's own FAQs."""
+    COMMON_FAQS goes after each service's own FAQs. ``duration_minutes`` is
+    None for an entry without one, which the statement leaves unchanged."""
     return [
         {
             "category_slug": category_slug,
@@ -617,6 +676,7 @@ def service_details_params() -> list[dict]:
             "exclusions": json.dumps(details["exclusions"]),
             "included_items": json.dumps(details["included_items"]),
             "faqs": json.dumps(details["faqs"] + COMMON_FAQS),
+            "duration_minutes": details.get("duration_minutes"),
         }
         for (category_slug, name), details in SERVICE_DETAILS.items()
     ]

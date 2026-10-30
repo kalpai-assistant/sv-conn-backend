@@ -982,3 +982,109 @@ def test_svc_400_content_seeds_matching_services_and_downgrade_restores_svc_340(
         None,
         None,
     )
+
+
+# --- SVC-400 follow-up: step times for 3 services, painting's one-day total ------
+
+
+SVC_400_STEP_TIMES = "efe67aee5402"
+BEFORE_SVC_400_STEP_TIMES = "b3f1c7a9d388"
+_NEWLY_TIMED = [
+    ("ac", "Split AC foam-jet service"),
+    ("pest-control", "Cockroach control"),
+    ("appliances", "Washing machine repair"),
+]
+_PAINTING = ("painting", "Full room painting")
+_DRAIN = ("plumber", "Drain blockage removal")
+
+
+def _seed_before_svc_400_step_times(url: URL) -> dict:
+    """The 5 services as beta had them after 9486c2fc98b3: the 3 newly timed
+    ones and painting with untimed steps, everyone at the pricing seed's 60.
+    Drain stands in for the services this revision must not change."""
+    ids = {}
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            for slug, name in [*_NEWLY_TIMED, _PAINTING, _DRAIN]:
+                details = SERVICE_DETAILS[(slug, name)]
+                steps = details["steps"]
+                if (slug, name) in _NEWLY_TIMED:
+                    steps = [
+                        {k: v for k, v in step.items() if k != "duration_minutes"} for step in steps
+                    ]
+                cat_id, ids[(slug, name)] = uuid.uuid4(), uuid.uuid4()
+                conn.execute(
+                    text(
+                        "INSERT INTO categories (id, name, slug, is_active, sort_order) "
+                        "VALUES (:id, :name, :slug, true, 1)"
+                    ),
+                    {"id": cat_id, "name": f"Step times {slug}", "slug": slug},
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO services (id, category_id, name, base_price, "
+                        "duration_minutes, is_active, steps, exclusions, included_items, faqs) "
+                        "VALUES (:id, :category_id, :name, 99, 60, true, CAST(:steps AS jsonb), "
+                        "CAST(:exclusions AS jsonb), CAST(:included_items AS jsonb), "
+                        "CAST(:faqs AS jsonb))"
+                    ),
+                    {
+                        "id": ids[(slug, name)],
+                        "category_id": cat_id,
+                        "name": name,
+                        "steps": json.dumps(steps),
+                        "exclusions": json.dumps(details["exclusions"]),
+                        "included_items": json.dumps(details["included_items"]),
+                        "faqs": json.dumps(details["faqs"] + COMMON_FAQS),
+                    },
+                )
+    finally:
+        engine.dispose()
+    return ids
+
+
+def _durations_and_content(url: URL) -> dict:
+    rows = _query(
+        url,
+        "SELECT id, duration_minutes, steps, exclusions, included_items, faqs FROM services",
+    )
+    return {
+        row["id"]: (
+            row["duration_minutes"],
+            row["steps"],
+            row["exclusions"],
+            row["included_items"],
+            row["faqs"],
+        )
+        for row in rows
+    }
+
+
+def test_svc_400_step_times_and_painting_total_round_trip(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_400_STEP_TIMES)
+    ids = _seed_before_svc_400_step_times(scratch_db)
+    before = _durations_and_content(scratch_db)
+    before_shape = _shape(scratch_db, "services")
+
+    _alembic(scratch_db, "upgrade", SVC_400_STEP_TIMES)
+
+    after = _durations_and_content(scratch_db)
+    for key in _NEWLY_TIMED:
+        duration, steps, *rest = after[ids[key]]
+        assert duration == 60, key
+        assert steps == SERVICE_DETAILS[key]["steps"], key
+        assert sum(step["duration_minutes"] for step in steps) == 60, key
+        assert [s["title"] for s in steps] == [s["title"] for s in before[ids[key]][1]], key
+        assert rest == list(before[ids[key]][2:]), key
+    duration, steps, *_ = after[ids[_PAINTING]]
+    assert duration == 480
+    assert all("duration_minutes" not in step for step in steps)
+    assert after[ids[_PAINTING]][1:] == before[ids[_PAINTING]][1:], "only the total changed"
+    assert after[ids[_DRAIN]] == before[ids[_DRAIN]], "other services unchanged"
+    assert _shape(scratch_db, "services") == before_shape, "data only, no DDL"
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_400_STEP_TIMES)
+    assert _durations_and_content(scratch_db) == before
+    _alembic(scratch_db, "upgrade", SVC_400_STEP_TIMES)
+    assert _durations_and_content(scratch_db) == after
