@@ -1088,3 +1088,50 @@ def test_svc_400_step_times_and_painting_total_round_trip(scratch_db):
     assert _durations_and_content(scratch_db) == before
     _alembic(scratch_db, "upgrade", SVC_400_STEP_TIMES)
     assert _durations_and_content(scratch_db) == after
+
+
+# --- FIRST20 retired (soft delete) --------------------------------------------
+
+
+RETIRE_FIRST20 = "ba56e901f1c4"
+BEFORE_RETIRE_FIRST20 = "efe67aee5402"
+
+
+def _seed_coupons(url: URL) -> None:
+    """FIRST20 stored in mixed case (codes are matched on lower()), plus the
+    two coupons that replace it, which this revision must not touch."""
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            for code in ("First20", "EXPO25", "FIRST100"):
+                conn.execute(
+                    text(
+                        "INSERT INTO coupons (id, code, discount_type, discount_value, "
+                        "valid_until, usage_limit_per_user, is_active) VALUES (:id, :code, "
+                        "'PERCENT', 20, now() + interval '30 days', 1, true)"
+                    ),
+                    {"id": uuid.uuid4(), "code": code},
+                )
+    finally:
+        engine.dispose()
+
+
+def _coupon_states(url: URL) -> dict:
+    return {
+        row["code"]: row["is_active"] for row in _query(url, "SELECT code, is_active FROM coupons")
+    }
+
+
+def test_retire_first20_coupon_round_trip(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_RETIRE_FIRST20)
+    _seed_coupons(scratch_db)
+    before_shape = _shape(scratch_db, "coupons")
+
+    _alembic(scratch_db, "upgrade", RETIRE_FIRST20)
+
+    # Soft delete: the row stays, only the kill switch flips.
+    assert _coupon_states(scratch_db) == {"First20": False, "EXPO25": True, "FIRST100": True}
+    assert _shape(scratch_db, "coupons") == before_shape, "data only, no DDL"
+
+    _alembic(scratch_db, "downgrade", BEFORE_RETIRE_FIRST20)
+    assert _coupon_states(scratch_db) == {"First20": True, "EXPO25": True, "FIRST100": True}
