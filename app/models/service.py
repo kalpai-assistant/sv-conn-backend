@@ -61,6 +61,18 @@ class Service(Base):
     faqs: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
     # [{before_url, after_url}]; stays empty until SVC-401.
     before_after_photos: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    # SVC-388: denormalised so GET /services doesn't aggregate every review on
+    # each load. Both are rewritten by CatalogService.refresh_review_stats when a
+    # review is created (the only review write). The count is every qualifying
+    # review, the pointer is the newest eligible one; the snippet's text and
+    # reviewer name are read live through it, so an account deletion needs no
+    # write here. The MIN_REVIEWS_FOR_RATING gate is applied at read time.
+    qualifying_review_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    latest_snippet_review_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reviews.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

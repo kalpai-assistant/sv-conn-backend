@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import BookingNotFound, DuplicateReview, UnauthorizedAction
 from app.models.booking import Booking, BookingStatus
+from app.models.booking_item import BookingItem
 from app.models.review import Review
+from app.services.catalog_service import CatalogService
 from app.services.provider_service import ProviderService
 
 
@@ -63,6 +65,21 @@ class ReviewService:
 
         # Cascade: update provider's rolling average rating
         await self._provider_service.refresh_avg_rating(booking.provider_id, rating)
+
+        # SVC-388: this is the only place a review is written, so it keeps the
+        # service's stored review stats current. A multi-service booking's
+        # review counts for no service, so there is nothing to recompute.
+        service_ids = (
+            (
+                await self.db.execute(
+                    select(BookingItem.service_id).where(BookingItem.booking_id == booking_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(service_ids) == 1:
+            await CatalogService(self.db).refresh_review_stats(service_ids[0])
 
         return review
 

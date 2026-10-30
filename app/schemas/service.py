@@ -49,6 +49,19 @@ class ServiceVariantResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ReviewSnippet(BaseModel):
+    """SVC-388: one customer quote for a service card.
+
+    ``created_at`` rather than "N days ago" so a cached response never goes
+    stale; the frontend formats it. ``reviewer_first_name`` is None for a
+    deleted or nameless reviewer, and the frontend shows its fallback label.
+    """
+
+    text: str
+    reviewer_first_name: str | None
+    created_at: datetime
+
+
 class ServiceResponse(BaseModel):
     id: UUID
     category_id: UUID
@@ -67,6 +80,11 @@ class ServiceResponse(BaseModel):
     # service without curated media renders intentionally.
     banner_image_url: str | None = None
     banner_video_url: str | None = None
+    # SVC-388: filled on GET /services only. It is always None on
+    # GET /services/{id} and the admin routes, so a None there does not mean
+    # "no eligible review". On the list, None means fewer than
+    # MIN_REVIEWS_FOR_RATING qualifying reviews or no eligible quote.
+    latest_review_snippet: ReviewSnippet | None = None
 
     model_config = {"from_attributes": True}
 
