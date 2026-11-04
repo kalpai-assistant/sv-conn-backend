@@ -17,7 +17,6 @@ dependencies = [
     "redis[hiredis]>=5.2,<5.3",
     "celery>=5.4,<5.5",
     "python-jose[cryptography]>=3.3,<3.4",
-    "passlib[bcrypt]>=1.7,<1.8",
     "razorpay>=1.4,<1.5",
     "firebase-admin>=6.6,<6.7",
     "boto3>=1.36,<1.37",
@@ -41,6 +40,8 @@ dependencies = [
     # judgement alone isn't reliable enough for.
     "google-genai>=1.0,<2.0",
     "rapidfuzz>=3.10,<4.0",
+    "pyotp>=2.10.0",
+    "bcrypt>=4,<6",
 ]
 
 [dependency-groups]

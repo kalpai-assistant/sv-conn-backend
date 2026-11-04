@@ -18,6 +18,7 @@ from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.request_id import RequestIDMiddleware
 from app.routers import (
     admin,
+    admin_auth,
     admin_team,
     auth,
     bookings,
@@ -112,6 +113,8 @@ def create_app() -> FastAPI:
             "X-RateLimit-Remaining",
             "X-RateLimit-Reset",
             "Retry-After",
+            # SVC-422: the sliding admin session token. See ``require_roles``.
+            "X-Admin-Token",
         ],
     )
 
@@ -149,6 +152,7 @@ def create_app() -> FastAPI:
     app.include_router(reviews.router, prefix=prefix)
     app.include_router(coupons.router, prefix=prefix)
     app.include_router(tracking.router, prefix=prefix)
+    app.include_router(admin_auth.router, prefix=prefix)
     app.include_router(admin.router, prefix=prefix)
     app.include_router(admin_team.router, prefix=prefix)
     app.include_router(downloads.router, prefix=prefix)

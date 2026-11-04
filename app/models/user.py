@@ -2,7 +2,17 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum, String, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    Index,
+    Integer,
+    String,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -13,6 +23,23 @@ class UserRole(str, enum.Enum):
     CONSUMER = "consumer"
     PROVIDER = "provider"
     ADMIN = "admin"
+
+
+class AdminRole(str, enum.Enum):
+    """What a ``role=ADMIN`` user may do in the console (SVC-422)."""
+
+    ADMIN = "admin"
+    OPS = "ops"
+    SUPPORT = "support"
+
+
+def admin_placeholder_phone(user_id: uuid.UUID) -> str:
+    """``users.phone`` for an admin with no real number: ``A`` + 14 hex of the id.
+
+    Same idea as a deleted account's ``D`` + 14 hex (SVC-367). ``users.phone`` is
+    NOT NULL and unique, and this value can never pass phone validation.
+    """
+    return "A" + user_id.hex[:14]
 
 
 # SVC-374: the languages a user can pick for the provider/Pro app and its push
@@ -27,6 +54,21 @@ class User(Base):
         CheckConstraint(
             "preferred_language IN (" + ", ".join(f"'{c}'" for c in SUPPORTED_LANGUAGES) + ")",
             name="ck_users_preferred_language",
+        ),
+        # SVC-422. NOT VALID in the migration: an admin who predates it gets these
+        # from scripts/create_admin.py afterwards. Lowercase because login lowercases.
+        CheckConstraint(
+            "role <> 'ADMIN' OR (email IS NOT NULL AND email = lower(email) "
+            "AND password_hash IS NOT NULL AND admin_role IS NOT NULL)",
+            name="ck_users_admin_has_login",
+        ),
+        # Partial, because users.email is free text any consumer can edit: it is
+        # not unique across all users, and a consumer can't take an admin's address.
+        Index(
+            "uq_users_admin_email",
+            "email",
+            unique=True,
+            postgresql_where=text("role = 'ADMIN'"),
         ),
     )
 
@@ -55,6 +97,17 @@ class User(Base):
     # it; ``phone`` then holds a non-phone placeholder, so the number is free to
     # sign up again as a new account. See ``AccountService.delete_account``.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # SVC-422: the console login, set only on role=ADMIN rows. See ADMIN.md.
+    password_hash: Mapped[str | None] = mapped_column(String(255))
+    admin_role: Mapped[AdminRole | None] = mapped_column(
+        Enum(AdminRole, name="adminrole", values_callable=lambda e: [m.value for m in e])
+    )
+    # Encrypted with app/utils/encryption.py. Set at setup, before it is verified,
+    # so a non-NULL secret does not mean TOTP is on: ``totp_enabled_at`` does.
+    totp_secret: Mapped[str | None] = mapped_column(String(255))
+    totp_enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

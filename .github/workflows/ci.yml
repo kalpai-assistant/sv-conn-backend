@@ -30,7 +30,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, "feature/**"]
   # Also run on any feat/* push so juniors see failures before opening a PR.
   # Not strictly required but the compute is cheap and the feedback loop
   # dramatically shortens.

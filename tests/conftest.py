@@ -1,4 +1,5 @@
 import os
+import uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -9,7 +10,7 @@ from app.config import get_settings
 from app.database import Base, get_db
 from app.dependencies import get_redis
 from app.main import create_app
-from app.utils.security import create_access_token
+from app.utils.security import create_access_token, create_admin_session_token
 
 # Env-overridable so a machine with a native postgres on 5432 (and Docker's
 # postgres bound to a different port via docker-compose.override.yml) can
@@ -71,10 +72,14 @@ async def client(db_session, redis_client):
 
 @pytest.fixture
 def auth_headers():
-    """Generate JWT authorization headers for a given user_id and role."""
+    """Generate JWT authorization headers for a given user_id and role. An admin
+    gets a console session, the only token admins hold since SVC-422."""
 
     def _make(user_id: str, role: str = "consumer") -> dict:
-        token = create_access_token({"sub": user_id, "role": role})
+        if role == "admin":
+            token = create_admin_session_token(uuid.UUID(user_id), uuid.uuid4().hex)
+        else:
+            token = create_access_token({"sub": user_id, "role": role})
         return {"Authorization": f"Bearer {token}"}
 
     return _make
