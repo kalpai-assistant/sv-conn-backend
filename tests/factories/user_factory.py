@@ -7,7 +7,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user import User, UserRole
+from app.models.user import AdminRole, User, UserRole
 
 
 def _random_phone() -> str:
@@ -55,6 +55,11 @@ class UserFactory:
             is_active=is_active,
             fcm_token=fcm_token,
         )
+        if user.role == UserRole.ADMIN:
+            # The CHECK requires a login. Not a real hash: use provision_admin to log in.
+            user.email = f"a{uuid.uuid4().hex[:12]}@kalpai.in"
+            user.password_hash = "not-a-real-hash"
+            user.admin_role = AdminRole.ADMIN
         db.add(user)
         await db.flush()
         return user

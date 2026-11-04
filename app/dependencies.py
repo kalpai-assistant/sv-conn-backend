@@ -5,14 +5,13 @@ FastAPI shared dependencies: DB session, Redis, current user resolution, RBAC.
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, Request, Response, WebSocket, status
+from fastapi import Depends, HTTPException, Response, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.asyncio import Redis as AsyncRedis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
-from app.models.admin_user import AdminUser
 from app.models.user import User, UserRole
 from app.utils.security import (
     ADMIN_SESSION_TTL,
@@ -69,7 +68,9 @@ async def get_current_user(
         )
 
     user = await db.get(User, UUID(payload["sub"]))
-    if not user or not user.is_active:
+    # SVC-422: an admin only ever holds a console session, which never gets here.
+    # The role check catches a phone token issued before the user became an admin.
+    if not user or not user.is_active or user.role == UserRole.ADMIN:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
@@ -126,7 +127,7 @@ def _unauthorized(detail: str) -> HTTPException:
 
 async def _load_admin_session(
     payload: dict, response: Response, db: AsyncSession, redis: AsyncRedis
-) -> AdminUser:
+) -> User:
     """The active admin behind a decoded session token. Role and is_active come
     from the DB on every request, never from the JWT.
 
@@ -138,8 +139,13 @@ async def _load_admin_session(
     if not sid or await redis.exists(f"{ADMIN_SESSION_BLACKLIST_PREFIX}{sid}"):
         raise _unauthorized("Session has ended")
 
-    admin = await db.get(AdminUser, UUID(payload["sub"]))
-    if admin is None or not admin.is_active:
+    admin = await db.get(User, UUID(payload["sub"]))
+    if (
+        admin is None
+        or not admin.is_active
+        or admin.role != UserRole.ADMIN
+        or admin.admin_role is None
+    ):
         raise _unauthorized("User not found or inactive")
 
     remaining = payload["exp"] - datetime.now(UTC).timestamp()
@@ -154,55 +160,46 @@ async def authorize_admin_token(
     response: Response,
     db: AsyncSession,
     redis: AsyncRedis,
-    request: Request | None = None,
 ) -> User:
-    """Check a bearer token against the roles a route allows; return the actor.
+    """Check a bearer token against the roles a route allows; return the admin.
 
-    A console session is checked against its ``admin_users`` role, and the actor
-    is the linked ``users`` row, so ``admin.id`` keeps working in every route. An
-    old phone-login token (until SVC-434) counts as role ``admin``. Any other
-    token that decodes is a 403; a challenge token decodes as neither, so a 401.
+    Only a console session gets through. Any other token that decodes is a 403 for
+    a consumer or provider and a 401 for an admin, whose old phone-login tokens no
+    longer work (SVC-422). A challenge token decodes as neither, so a 401.
     """
     payload = decode_admin_token(token, ADMIN_TOKEN_TYPE_SESSION)
     if payload is not None:
         admin = await _load_admin_session(payload, response, db, redis)
-        if admin.role.value not in roles:
+        if admin.admin_role.value not in roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Requires role: {', '.join(roles)}",
             )
-        user = await db.get(User, admin.user_id)
-        if request is not None:
-            request.state.admin_user = admin
-        _tag_sentry_user(str(user.id), admin.role.value)
-        return user
+        _tag_sentry_user(str(admin.id), admin.admin_role.value)
+        return admin
 
-    legacy = decode_access_token(token)
-    if not legacy:
+    other = decode_access_token(token)
+    if not other:
         raise _unauthorized("Invalid or expired token")
-    user = await db.get(User, UUID(legacy["sub"]))
-    if user is None or not user.is_active:
+    user = await db.get(User, UUID(other["sub"]))
+    if user is None or not user.is_active or user.role == UserRole.ADMIN:
         raise _unauthorized("User not found or inactive")
-    if user.role != UserRole.ADMIN or "admin" not in roles:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Requires role: {', '.join(roles)}",
-        )
-    _tag_sentry_user(str(user.id), user.role.value)
-    return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Requires role: {', '.join(roles)}",
+    )
 
 
 def require_roles(*roles: str):
     """Dependency factory for ``/admin/*`` routes: which admin roles may call this.
 
-    Separate from ``require_role`` (provider routes use that) because it also
-    accepts console sessions. Returns the actor as a ``User``.
+    Separate from ``require_role`` (provider routes use that) because it takes
+    console sessions, which ``get_current_user`` refuses. Returns the admin.
 
         @router.post("/admin/...", dependencies=[Depends(require_roles("admin", "ops"))])
     """
 
     async def checker(
-        request: Request,
         response: Response,
         credentials: HTTPAuthorizationCredentials | None = Depends(security),
         db: AsyncSession = Depends(get_db),
@@ -210,9 +207,7 @@ def require_roles(*roles: str):
     ) -> User:
         if credentials is None:
             raise _unauthorized("Not authenticated")
-        return await authorize_admin_token(
-            credentials.credentials, roles, response, db, redis, request
-        )
+        return await authorize_admin_token(credentials.credentials, roles, response, db, redis)
 
     return checker
 
@@ -222,9 +217,8 @@ async def get_current_admin(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
     redis: AsyncRedis = Depends(get_redis),
-) -> tuple[AdminUser, str]:
-    """The console session calling ``/admin/auth/me`` or ``logout``, with its sid.
-    A session token only: old phone-login tokens have no admin_users row."""
+) -> tuple[User, str]:
+    """The console session calling ``/admin/auth/me`` or ``logout``, with its sid."""
     if credentials is None:
         raise _unauthorized("Not authenticated")
     payload = decode_admin_token(credentials.credentials, ADMIN_TOKEN_TYPE_SESSION)

@@ -99,14 +99,16 @@ def decode_jwt(token: str) -> dict[str, Any] | None:
 
 
 def decode_access_token(token: str) -> dict[str, Any] | None:
-    """``decode_jwt`` for anything that grants access: a refresh token is refused.
+    """``decode_jwt`` for anything that grants access. Refuses a refresh token and
+    a token from the retired admin phone login.
 
-    Both kinds are signed the same way, so without this check a 30-day refresh
-    token also worked as a bearer token. Refresh tokens are only for
+    Both kinds of token are signed the same way, so without this check a 30-day
+    refresh token also worked as a bearer token. Refresh tokens are only for
     ``/auth/refresh`` and ``/auth/logout``, which read them with ``decode_jwt``.
+    Admins now hold console sessions only (SVC-422), which this never accepts.
     """
     payload = decode_jwt(token)
-    if payload is None or payload.get("type") == "refresh":
+    if payload is None or payload.get("type") == "refresh" or payload.get("role") == "admin":
         return None
     return payload
 

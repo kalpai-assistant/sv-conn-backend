@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_admin, get_redis
-from app.models.admin_user import AdminUser
+from app.models.user import User
 from app.schemas.admin_auth import (
     AdminLoginRequest,
     AdminLoginResponse,
@@ -65,7 +65,7 @@ async def totp_verify(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
-    current: tuple[AdminUser, str] = Depends(get_current_admin),
+    current: tuple[User, str] = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ):
@@ -75,6 +75,6 @@ async def logout(
 
 
 @router.get("/me", response_model=AdminUserResponse)
-async def me(current: tuple[AdminUser, str] = Depends(get_current_admin)):
+async def me(current: tuple[User, str] = Depends(get_current_admin)):
     admin, _ = current
     return admin

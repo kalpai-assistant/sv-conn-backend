@@ -12,8 +12,11 @@ Even a stolen admin JWT is useless from an unlisted network.
 
 ## Admin console login (SVC-422)
 
-Email + password, then a TOTP code. No self-signup. The old phone login
-(`/auth/admin/*`) keeps working, as role `admin`, until SVC-434.
+Email + password, then a TOTP code. No self-signup. Admins are `users` rows with
+`role=ADMIN`; `admin_role` holds `admin`, `ops` or `support`.
+
+The phone login is retired: `POST /auth/admin/send-otp` and `verify-otp` return 410
+`ADMIN_PHONE_LOGIN_GONE`, and old admin access and refresh tokens get 401.
 
 | Endpoint | Does | Refusals |
 |---|---|---|
@@ -39,42 +42,40 @@ no absolute cap, so an active session can run indefinitely. Admin tokens carry
 ### Add an admin
 
 ```bash
-uv run python scripts/create_admin_user.py someone@kalpai.in ops
+# An existing admin keeps their own row and history. Run this right after the
+# deploy that adds the columns, once for every existing admin:
+uv run python scripts/create_admin.py --email vipul@kalpai.in --phone +919999900001
+# Someone new:
+uv run python scripts/create_admin.py --email someone@kalpai.in --role ops
 ```
 
 The password comes from `ADMIN_USER_PASSWORD` or a prompt, never an argument: 12+
 characters, at most 72 bytes. On beta, run it through the SSM bastion tunnel in
-CLAUDE.md.
+CLAUDE.md. Nothing is seeded by the migration, so **nobody can log in until this has
+run**. Someone new with no `--phone` gets a placeholder phone, `A` + 14 hex.
 
-The migration seeds one admin only if `ADMIN_SEED_PASSWORD` is set when it first
-runs. `ADMIN_SEED_EMAIL` picks the account and defaults to `vipul@kalpai.in`. The
-migration never runs again, so setting either variable later does nothing: use the
-script instead.
+An admin who predates the migration can't be updated until the script has run for
+them, because the CHECK holds every update to it. To list who still needs it:
+`SELECT phone FROM users WHERE role = 'ADMIN' AND password_hash IS NULL;`. After the
+last one, `ALTER TABLE users VALIDATE CONSTRAINT ck_users_admin_has_login;`.
 
 ### SQL recipes
 
 ```sql
 -- Unlock an account
-UPDATE admin_users SET failed_login_count = 0, locked_until = NULL WHERE email = '...';
+UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE email = '...' AND role = 'ADMIN';
 -- Deactivate (takes effect on the next request)
-UPDATE admin_users SET is_active = false WHERE email = '...';
+UPDATE users SET is_active = false WHERE email = '...' AND role = 'ADMIN';
 -- Change role (takes effect on the next request)
-UPDATE admin_users SET role = 'support' WHERE email = '...';
+UPDATE users SET admin_role = 'support' WHERE email = '...' AND role = 'ADMIN';
 -- Lost authenticator: the next login goes through setup again
-UPDATE admin_users SET totp_secret = NULL, totp_enabled_at = NULL WHERE email = '...';
+UPDATE users SET totp_secret = NULL, totp_enabled_at = NULL WHERE email = '...' AND role = 'ADMIN';
 ```
-
-### Actor IDs
-
-`admin_actions` and `payout_audit` have foreign keys to `users.id`, so each
-`admin_users` row links to its own `users` row through `user_id`, and routes get
-that `User` as `admin`. The row has phone `A` + 14 hex and `is_active=false`, so it
-can never log in by phone. `GET /admin/users` hides these rows.
 
 ### Who can call what
 
-An old phone-login token counts as `admin`. A consumer or provider token gets 403;
-a challenge token gets 401. `tests/test_admin_console_auth.py::ROUTE_ROLES` holds
+A consumer or provider token gets 403; an old admin phone-login token or a challenge
+token gets 401. `tests/test_admin_console_auth.py::ROUTE_ROLES` holds
 this table and fails if a new `/admin` route isn't in it.
 
 | Roles | Routes |
@@ -177,8 +178,7 @@ Non-admin JWT + listed IP: GET → 403 (IP passes, role fails at handler)
 ## What this does NOT protect against
 
 - **Compromised admin machine on an allowed network.** Partly addressed by
-  console TOTP (SVC-422); old phone login has none until SVC-434. Cloudflare
-  Access is still post-beta.
+  console TOTP (SVC-422). Cloudflare Access is still post-beta.
 - **XSS / CSRF on the admin panel.** Different threat, handled at the
   frontend / CORS layer.
 - **Insider abuse.** An admin with legit credentials from a legit network can

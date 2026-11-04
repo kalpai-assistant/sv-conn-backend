@@ -18,7 +18,7 @@ from app.config import get_settings
 from app.dependencies import verify_ws_token
 from app.main import create_app
 from app.models.admin_action import AdminAction
-from app.models.admin_user import AdminRole, admin_placeholder_phone
+from app.models.user import AdminRole, User, UserRole, admin_placeholder_phone
 from app.services.admin_auth_service import provision_admin
 from app.utils.encryption import decrypt
 from app.utils.security import (
@@ -30,7 +30,7 @@ from app.utils.security import (
     hash_password,
     verify_password,
 )
-from tests.factories.user_factory import UserFactory
+from tests.factories.user_factory import UserFactory, _random_phone
 
 A = "/api/v1/admin"
 AUTH = f"{A}/auth"
@@ -448,7 +448,7 @@ async def test_role_is_read_from_the_db_on_every_request(client, db_session):
     admin = await _admin(db_session, AdminRole.ADMIN)
     headers = _session(admin)
     assert (await client.get(f"{A}/users", headers=headers)).status_code == 200
-    admin.role = AdminRole.OPS
+    admin.admin_role = AdminRole.OPS
     await db_session.commit()
     assert (await client.get(f"{A}/users", headers=headers)).status_code == 403
 
@@ -458,20 +458,42 @@ async def test_role_is_read_from_the_db_on_every_request(client, db_session):
 # ---------------------------------------------------------------------------
 
 
-async def test_old_phone_login_admin_token_keeps_full_access(client, db_session, auth_headers):
-    old_admin = await UserFactory.create(db_session, role="admin")
-    headers = auth_headers(str(old_admin.id), "admin")
-    assert (await client.get(f"{A}/users", headers=headers)).status_code == 200
-    # An admin-only write: reaches the handler and fails on the body, not on auth.
-    assert (
-        await client.post(f"{A}/app-versions/android/release", json={}, headers=headers)
-    ).status_code == 422
+def _old_tokens(user) -> tuple[str, str]:
+    """What the retired phone login issued: an access token and a refresh token."""
+    claims = {"sub": str(user.id), "role": "admin"}
+    return create_access_token(claims), create_refresh_token({**claims, "type": "refresh"})
 
 
-async def test_old_token_has_no_console_identity(client, db_session, auth_headers):
-    old_admin = await UserFactory.create(db_session, role="admin")
-    headers = auth_headers(str(old_admin.id), "admin")
+async def test_old_admin_tokens_are_refused_everywhere(client, db_session):
+    """Ticket: existing admin JWTs stop working. Same row, so a live admin."""
+    admin = await _admin(db_session)
+    access, refresh = _old_tokens(admin)
+    headers = _bearer(access)
+    assert (await client.get(f"{A}/users", headers=headers)).status_code == 401
     assert (await client.get(f"{AUTH}/me", headers=headers)).status_code == 401
+    assert (await client.get("/api/v1/users/me", headers=headers)).status_code == 401
+    r = await client.post(
+        f"{A}/app-versions/android/release", json={"version": "9.9.9"}, headers=headers
+    )
+    assert r.status_code == 401
+    ws = _FakeWS(access)
+    assert await verify_ws_token(ws) is None
+    assert ws.closed == 4001
+    # Without this, a refresh token keeps minting access tokens indefinitely.
+    r = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+    assert r.status_code == 401
+
+
+async def test_phone_token_from_before_someone_became_an_admin_is_refused(client, db_session):
+    """Its role claim says consumer, so only the DB role can catch it."""
+    admin = await _admin(db_session)
+    token = create_access_token({"sub": str(admin.id), "role": "consumer"})
+    headers = _bearer(token)
+    assert (await client.get(f"{A}/users", headers=headers)).status_code == 401
+    assert (await client.get("/api/v1/users/me", headers=headers)).status_code == 401
+    refresh = create_refresh_token({"sub": str(admin.id), "role": "consumer", "type": "refresh"})
+    r = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+    assert r.status_code == 401
 
 
 @pytest.mark.parametrize("role", ["consumer", "provider"])
@@ -482,10 +504,41 @@ async def test_consumer_and_provider_tokens_get_403(client, db_session, auth_hea
     assert (await client.get(f"{AUTH}/me", headers=headers)).status_code == 401
 
 
-async def test_forged_role_claim_on_a_consumer_token_gets_403(client, db_session, auth_headers):
+async def test_admin_role_claim_on_a_consumer_token_is_refused(client, db_session):
     user = await UserFactory.create(db_session, role="consumer")
-    r = await client.get(f"{A}/users", headers=auth_headers(str(user.id), "admin"))
-    assert r.status_code == 403
+    token = create_access_token({"sub": str(user.id), "role": "admin"})
+    assert (await client.get(f"{A}/users", headers=_bearer(token))).status_code == 401
+
+
+async def test_session_token_for_a_non_admin_row_is_refused(client, db_session):
+    """A signed session whose user is, or has become, a consumer."""
+    user = await UserFactory.create(db_session, role="consumer")
+    token = create_admin_session_token(user.id, uuid.uuid4().hex)
+    assert (await client.get(f"{A}/users", headers=_bearer(token))).status_code == 401
+    assert (await client.get(f"{AUTH}/me", headers=_bearer(token))).status_code == 401
+
+
+async def test_a_demoted_admin_who_still_has_an_admin_role_is_refused(client, db_session):
+    admin = await _admin(db_session)
+    headers = _session(admin)
+    admin.role = UserRole.CONSUMER
+    await db_session.commit()
+    assert (await client.get(f"{A}/users", headers=headers)).status_code == 401
+    assert (await client.get(f"{AUTH}/me", headers=headers)).status_code == 401
+
+
+async def test_a_consumer_with_an_admins_email_cannot_log_in_or_block_it(client, db_session):
+    """users.email is free text a consumer can edit."""
+    admin = await _admin(db_session)
+    consumer = await UserFactory.create(db_session, role="consumer")
+    consumer.email = admin.email
+    await db_session.commit()
+    assert (await _login(client, admin.email)).status_code == 200
+
+    only_consumer = await UserFactory.create(db_session, role="consumer")
+    only_consumer.email = f"c{uuid.uuid4().hex[:10]}@kalpai.in"
+    await db_session.commit()
+    assert (await _login(client, only_consumer.email)).status_code == 401
 
 
 async def test_challenge_token_is_not_a_session(client, db_session):
@@ -502,7 +555,7 @@ async def test_no_token_is_401(client):
 
 
 async def test_admin_tokens_are_refused_everywhere_outside_admin(client, db_session):
-    """Mainly the linked users row's id must not be reachable through ``sub``."""
+    """``sub`` is a real users id, so ``aud`` is all that keeps these out."""
     admin = await _admin(db_session)
     for token in (
         create_admin_session_token(admin.id, uuid.uuid4().hex),
@@ -547,17 +600,6 @@ async def test_refresh_token_is_refused_on_normal_routes(client, db_session, rol
     assert r.status_code == 401
 
 
-async def test_refresh_token_is_refused_on_the_old_admin_path(client, db_session):
-    old_admin = await UserFactory.create(db_session, role="admin")
-    headers = _refresh_headers(old_admin)
-    assert (await client.get(f"{A}/users", headers=headers)).status_code == 401
-    # The release route's JWT branch, on the same check.
-    r = await client.post(
-        f"{A}/app-versions/android/release", json={"version": "9.9.9"}, headers=headers
-    )
-    assert r.status_code == 401
-
-
 async def test_refresh_token_is_refused_by_the_websocket_check(db_session):
     user = await UserFactory.create(db_session, role="consumer")
     ws = _FakeWS(create_refresh_token({"sub": str(user.id), "role": "consumer", "type": "refresh"}))
@@ -565,7 +607,7 @@ async def test_refresh_token_is_refused_by_the_websocket_check(db_session):
     assert ws.closed == 4001
 
 
-@pytest.mark.parametrize("role", ["consumer", "provider", "admin"])
+@pytest.mark.parametrize("role", ["consumer", "provider"])
 async def test_access_token_still_works_on_normal_routes(client, db_session, auth_headers, role):
     user = await UserFactory.create(db_session, role=role)
     r = await client.get("/api/v1/users/me", headers=auth_headers(str(user.id), role))
@@ -588,19 +630,11 @@ async def test_refresh_endpoint_still_works_for_normal_users(client, db_session)
 
 
 # ---------------------------------------------------------------------------
-# Actor identity
+# Actor identity + provisioning
 # ---------------------------------------------------------------------------
 
 
-async def test_linked_user_row_cannot_log_in_by_phone(client, db_session):
-    admin = await _admin(db_session)
-    r = await client.post(
-        "/api/v1/auth/admin/send-otp", json={"phone": admin_placeholder_phone(admin.id)}
-    )
-    assert r.status_code == 422
-
-
-async def test_routes_record_the_linked_user_as_actor(client, db_session):
+async def test_routes_record_the_admin_as_actor(client, db_session):
     admin = await _admin(db_session)
     target = await UserFactory.create(db_session, role="consumer")
     r = await client.patch(
@@ -610,39 +644,66 @@ async def test_routes_record_the_linked_user_as_actor(client, db_session):
     action = (
         await db_session.execute(select(AdminAction).where(AdminAction.target_id == target.id))
     ).scalar_one()
-    assert action.admin_user_id == admin.user_id
+    assert action.admin_user_id == admin.id
 
 
-async def test_user_list_hides_linked_rows(client, db_session):
-    admin = await _admin(db_session)
-    r = await client.get(f"{A}/users", params={"per_page": 200}, headers=_session(admin))
+async def test_me_reports_the_console_role_not_the_users_role(client, db_session):
+    admin = await _admin(db_session, AdminRole.SUPPORT)
+    r = await client.get(f"{AUTH}/me", headers=_session(admin))
     assert r.status_code == 200
-    assert str(admin.user_id) not in {row["id"] for row in r.json()}
+    assert r.json()["role"] == "support"
+    assert r.json()["id"] == str(admin.id)
 
 
-# ---------------------------------------------------------------------------
-# Provisioning + password helpers
-# ---------------------------------------------------------------------------
-
-
-async def test_provision_refuses_duplicate_email_and_bad_passwords(db_session):
+async def test_provision_refuses_duplicate_email_and_bad_input(db_session):
     admin = await _admin(db_session)
     with pytest.raises(ValueError, match="already"):
         await provision_admin(db_session, admin.email.upper(), AdminRole.OPS, PASSWORD)
     for bad in ("short", "x" * 73):
         with pytest.raises(ValueError, match="Password"):
             await provision_admin(db_session, "new@kalpai.in", AdminRole.OPS, bad)
+    with pytest.raises(ValueError, match="not an email"):
+        await provision_admin(db_session, "no-at-sign", AdminRole.OPS, PASSWORD)
 
 
-async def test_provision_creates_an_inactive_linked_user(db_session):
-    from app.models.user import User
-
-    admin = await _admin(db_session)
-    user = await db_session.get(User, admin.user_id)
-    assert user.is_active is False
+async def test_provision_without_a_phone_makes_an_active_admin_row(db_session):
+    admin = await _admin(db_session, AdminRole.OPS)
+    user = await db_session.get(User, admin.id)
+    assert user.is_active is True
+    assert user.role.value == "admin"
+    assert user.admin_role == AdminRole.OPS
     assert user.phone == admin_placeholder_phone(admin.id)
     assert len(user.phone) == 15
-    assert admin.password_hash.startswith("$2")
+    assert user.password_hash.startswith("$2")
+
+
+async def test_provision_refuses_a_consumer_or_provider_phone(db_session):
+    for role in ("consumer", "provider"):
+        user = await UserFactory.create(db_session, role=role)
+        with pytest.raises(ValueError, match=f"is a {role} account"):
+            await provision_admin(
+                db_session, "x@kalpai.in", AdminRole.ADMIN, PASSWORD, phone=user.phone
+            )
+        assert user.role.value == role
+
+
+async def test_provision_refuses_a_phone_that_already_has_a_login(db_session):
+    existing = await UserFactory.create(db_session, role="admin")
+    with pytest.raises(ValueError, match="already has an admin login"):
+        await provision_admin(
+            db_session, "x@kalpai.in", AdminRole.ADMIN, PASSWORD, phone=existing.phone
+        )
+
+
+async def test_provision_with_a_new_phone_records_it(db_session):
+    admin = await provision_admin(
+        db_session,
+        f"a{uuid.uuid4().hex[:10]}@kalpai.in",
+        AdminRole.ADMIN,
+        PASSWORD,
+        phone=_random_phone(),
+    )
+    assert admin.phone.startswith("+91")
 
 
 def test_password_hash_round_trip():
@@ -757,10 +818,11 @@ async def test_route_gating(client, db_session, auth_headers, method, path):
         else:
             assert r.status_code == 403, f"{role.value}: {r.status_code}"
 
-    # An old phone-login admin token passes every route; a consumer passes none.
+    # An old phone-login admin token passes no route, and neither does a consumer.
     old_admin = await UserFactory.create(db_session, role="admin")
-    r = await client.request(method, url, headers=auth_headers(str(old_admin.id), "admin"), **body)
-    assert r.status_code not in (401, 403), f"old admin: {r.status_code} {r.text}"
+    old = create_access_token({"sub": str(old_admin.id), "role": "admin"})
+    r = await client.request(method, url, headers=_bearer(old), **body)
+    assert r.status_code == 401, f"old admin: {r.status_code} {r.text}"
     consumer = await UserFactory.create(db_session, role="consumer")
     r = await client.request(method, url, headers=auth_headers(str(consumer.id)), **body)
     assert r.status_code == 403

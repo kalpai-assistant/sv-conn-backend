@@ -14,8 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import ADMIN_SESSION_BLACKLIST_PREFIX
 from app.exceptions import AppException, RateLimitExceeded
-from app.models.admin_user import AdminRole, AdminUser, admin_placeholder_phone
-from app.models.user import User, UserRole
+from app.models.user import AdminRole, User, UserRole, admin_placeholder_phone
 from app.utils.encryption import decrypt, encrypt
 from app.utils.security import (
     ADMIN_CHALLENGE_TTL,
@@ -100,6 +99,11 @@ class TOTPSetupRequired(AppException):
         )
 
 
+def _can_sign_in(admin: User, now: datetime | None = None) -> bool:
+    locked = admin.locked_until is not None and admin.locked_until > (now or datetime.now(UTC))
+    return admin.is_active and admin.admin_role is not None and not locked
+
+
 class AdminAuthService:
     def __init__(self, db: AsyncSession, redis: Redis):
         self.db = db
@@ -111,12 +115,14 @@ class AdminAuthService:
         ``get_db`` rolls back on an exception and would undo the failure count."""
         now = datetime.now(UTC)
         result = await self.db.execute(
-            select(AdminUser).where(AdminUser.email == email.strip().lower()).with_for_update()
+            select(User)
+            .where(User.email == email.strip().lower(), User.role == UserRole.ADMIN)
+            .with_for_update()
         )
         admin = result.scalar_one_or_none()
-        locked = admin is not None and admin.locked_until is not None and admin.locked_until > now
 
-        if admin is None or not admin.is_active or locked:
+        # password_hash is NULL on an admin who predates SVC-422 until the script runs.
+        if admin is None or admin.password_hash is None or not _can_sign_in(admin, now):
             await asyncio.to_thread(verify_password, password, _get_dummy_hash())
             raise InvalidAdminCredentials()
 
@@ -195,14 +201,12 @@ class AdminAuthService:
             f"{ADMIN_SESSION_BLACKLIST_PREFIX}{sid}", int(ADMIN_SESSION_TTL.total_seconds()), "1"
         )
 
-    async def _admin_from_challenge(self, challenge_token: str) -> tuple[AdminUser, dict]:
+    async def _admin_from_challenge(self, challenge_token: str) -> tuple[User, dict]:
         payload = decode_admin_token(challenge_token, ADMIN_TOKEN_TYPE_CHALLENGE)
         if payload is None or await self.redis.exists(f"admin:challenge:spent:{payload['jti']}"):
             raise InvalidChallenge()
-        admin = await self.db.get(AdminUser, uuid.UUID(payload["sub"]), with_for_update=True)
-        now = datetime.now(UTC)
-        locked = admin is not None and admin.locked_until is not None and admin.locked_until > now
-        if admin is None or not admin.is_active or locked:
+        admin = await self.db.get(User, uuid.UUID(payload["sub"]), with_for_update=True)
+        if admin is None or admin.role != UserRole.ADMIN or not _can_sign_in(admin):
             raise InvalidChallenge()
         return admin, payload
 
@@ -224,37 +228,50 @@ class AdminAuthService:
 
 
 async def provision_admin(
-    db: AsyncSession, email: str, role: AdminRole, password: str
-) -> AdminUser:
-    """Create an admin login and its linked actor row. Caller commits.
+    db: AsyncSession, email: str, role: AdminRole, password: str, phone: str | None = None
+) -> User:
+    """Give someone a console login. Caller commits.
 
-    Raises ValueError on a bad password or an email already in use.
+    With ``phone``, an existing admin at that number gets the login on its own row,
+    so its history stays with it, and a new number becomes a new row. Without one,
+    a new row gets a placeholder phone.
+
+    Raises ValueError on a bad password, an email already in use, a phone belonging
+    to a consumer or provider, or an admin who already has a login.
     """
     problem = admin_password_problem(password)
     if problem:
         raise ValueError(f"Password {problem}")
     email = email.strip().lower()
-    existing = await db.execute(select(AdminUser.id).where(AdminUser.email == email))
-    if existing.scalar_one_or_none() is not None:
+    if "@" not in email or len(email) > 255:
+        raise ValueError(f"{email} is not an email address")
+    taken = await db.execute(
+        select(User.id).where(User.email == email, User.role == UserRole.ADMIN)
+    )
+    if taken.scalar_one_or_none() is not None:
         raise ValueError(f"{email} already has an admin login")
 
-    admin_id = uuid.uuid4()
-    user = User(
-        phone=admin_placeholder_phone(admin_id),
-        name=email[:100],
-        email=email,
-        role=UserRole.ADMIN,
-        is_active=False,
-    )
-    db.add(user)
+    user = None
+    if phone is not None:
+        result = await db.execute(select(User).where(User.phone == phone))
+        user = result.scalar_one_or_none()
+    if user is None:
+        user_id = uuid.uuid4()
+        user = User(
+            id=user_id,
+            phone=phone or admin_placeholder_phone(user_id),
+            name=email[:100],
+            role=UserRole.ADMIN,
+        )
+        db.add(user)
+    elif user.role != UserRole.ADMIN:
+        raise ValueError(f"{phone} is a {user.role.value} account, not an admin")
+    elif user.password_hash is not None:
+        raise ValueError(f"{phone} already has an admin login")
+
+    user.email = email
+    user.password_hash = hash_password(password)
+    user.admin_role = role
+    user.is_active = True
     await db.flush()
-    admin = AdminUser(
-        id=admin_id,
-        user_id=user.id,
-        email=email,
-        password_hash=hash_password(password),
-        role=role,
-    )
-    db.add(admin)
-    await db.flush()
-    return admin
+    return user

@@ -19,7 +19,6 @@ from app.config import get_settings
 from app.database import get_db
 from app.dependencies import authorize_admin_token, get_redis, require_roles
 from app.exceptions import BookingNotFound
-from app.models.admin_user import AdminUser
 from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, SettlementStatus
 from app.models.payment import Payment
@@ -65,9 +64,7 @@ async def list_users(
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    # An admin console login's linked row is only an actor id (SVC-422), not a person.
-    linked = select(AdminUser.id).where(AdminUser.user_id == User.id).exists()
-    stmt = select(User).where(~linked).offset((page - 1) * per_page).limit(per_page)
+    stmt = select(User).offset((page - 1) * per_page).limit(per_page)
     result = await db.execute(stmt)
     return list(result.scalars().all())
 

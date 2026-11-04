@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.models.admin_user import AdminRole
+from app.models.user import AdminRole
 
 
 class AdminLoginRequest(BaseModel):
@@ -35,7 +35,8 @@ class TOTPVerifyRequest(BaseModel):
 class AdminUserResponse(BaseModel):
     id: UUID
     email: str
-    role: AdminRole
+    # admin_role on the row: users.role is ADMIN for all three.
+    role: AdminRole = Field(validation_alias="admin_role")
     last_login_at: datetime | None
 
     model_config = {"from_attributes": True}
