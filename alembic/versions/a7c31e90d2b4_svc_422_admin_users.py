@@ -6,7 +6,8 @@ Create Date: 2026-11-04 12:00:00.000000
 
 The seed runs here once. If ADMIN_SEED_PASSWORD is unset (or unusable) it skips
 and logs, and setting the variable later does nothing because this revision never
-runs again: use scripts/create_admin_user.py instead.
+runs again: use scripts/create_admin_user.py instead. ADMIN_SEED_EMAIL picks the
+account, defaulting to vipul@kalpai.in.
 
 Each admin gets a linked ``users`` row as its actor id. See ``AdminUser``.
 
@@ -32,7 +33,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 logger = logging.getLogger("alembic.runtime.migration")
 
-SEED_EMAIL = "vipul@kalpai.in"
+DEFAULT_SEED_EMAIL = "vipul@kalpai.in"
 
 
 def upgrade() -> None:
@@ -77,6 +78,12 @@ def _seed() -> None:
     if problem:
         logger.warning("ADMIN_SEED_PASSWORD %s: no seed admin created (SVC-422)", problem)
         return
+    # Lowercased because login lowercases, and the table's CHECK refuses anything
+    # else, which would fail the migration and so the deploy.
+    email = (os.environ.get("ADMIN_SEED_EMAIL") or DEFAULT_SEED_EMAIL).strip().lower()
+    if "@" not in email or len(email) > 255:
+        logger.warning("ADMIN_SEED_EMAIL is not an email: no seed admin created (SVC-422)")
+        return
 
     admin_id = uuid.uuid4()
     user_id = uuid.uuid4()
@@ -85,9 +92,9 @@ def _seed() -> None:
     bind.execute(
         sa.text(
             "INSERT INTO users (id, phone, name, email, role, is_active) "
-            "VALUES (:id, :phone, :email, :email, 'ADMIN', false)"
+            "VALUES (:id, :phone, :name, :email, 'ADMIN', false)"
         ),
-        {"id": user_id, "phone": "A" + admin_id.hex[:14], "email": SEED_EMAIL},
+        {"id": user_id, "phone": "A" + admin_id.hex[:14], "name": email[:100], "email": email},
     )
     bind.execute(
         sa.text(
@@ -97,11 +104,11 @@ def _seed() -> None:
         {
             "id": admin_id,
             "user_id": user_id,
-            "email": SEED_EMAIL,
+            "email": email,
             "password_hash": hash_password(password),
         },
     )
-    logger.info("Seeded admin %s (SVC-422)", SEED_EMAIL)
+    logger.info("Seeded admin %s (SVC-422)", email)
 
 
 def downgrade() -> None:

@@ -46,8 +46,9 @@ The password comes from `ADMIN_USER_PASSWORD` or a prompt, never an argument: 12
 characters, at most 72 bytes. On beta, run it through the SSM bastion tunnel in
 CLAUDE.md.
 
-The migration seeds `vipul@kalpai.in` only if `ADMIN_SEED_PASSWORD` is set when it
-first runs. It never runs again, so setting the variable later does nothing: use the
+The migration seeds one admin only if `ADMIN_SEED_PASSWORD` is set when it first
+runs. `ADMIN_SEED_EMAIL` picks the account and defaults to `vipul@kalpai.in`. The
+migration never runs again, so setting either variable later does nothing: use the
 script instead.
 
 ### SQL recipes
