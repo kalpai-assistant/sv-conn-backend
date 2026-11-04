@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import require_role
+from app.dependencies import require_roles
 from app.models.user import User
 from app.schemas.service import (
     CategoryResponse,
@@ -61,10 +61,10 @@ async def get_service(
 @router.post("/services", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED)
 async def create_service(
     request: CreateServiceRequest,
-    current_user: User = Depends(require_role("admin")),  # Fix #3: admin-only
+    current_user: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin-only: add a service to the global catalog."""
+    """Admin or ops: add a service to the global catalog."""
     return await CatalogService(db).create_service(
         category_id=request.category_id,
         name=request.name,
@@ -78,10 +78,10 @@ async def create_service(
 async def update_service(
     service_id: UUID,
     request: UpdateServiceRequest,
-    current_user: User = Depends(require_role("admin")),  # Fix #3: admin-only
+    current_user: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin-only: update a catalog service."""
+    """Admin or ops: update a catalog service."""
     return await CatalogService(db).update_service(
         service_id=service_id,
         **request.model_dump(exclude_none=True),
@@ -91,8 +91,8 @@ async def update_service(
 @router.delete("/services/{service_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_service(
     service_id: UUID,
-    current_user: User = Depends(require_role("admin")),  # Fix #3: admin-only
+    current_user: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin-only: soft-delete a catalog service."""
+    """Admin or ops: soft-delete a catalog service."""
     await CatalogService(db).delete_service(service_id)

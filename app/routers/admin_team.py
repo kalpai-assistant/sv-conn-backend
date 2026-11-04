@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import require_role
+from app.dependencies import require_roles
 from app.models.user import User
 from app.schemas.admin_team import (
     AdminActionRow,
@@ -32,10 +32,11 @@ from app.services.admin_team_service import AdminTeamService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
-_admin_dep = Depends(require_role("admin"))
+_any_admin_role_dep = Depends(require_roles("admin", "ops", "support"))
+_admin_support_dep = Depends(require_roles("admin", "support"))
 
 
-@router.get("/providers", response_model=list[AdminProviderRow], dependencies=[_admin_dep])
+@router.get("/providers", response_model=list[AdminProviderRow], dependencies=[_any_admin_role_dep])
 async def search_providers(
     q: str | None = Query(
         None,
@@ -55,7 +56,7 @@ async def search_providers(
 @router.get(
     "/providers/{sp_user_id}",
     response_model=AdminProviderRow,
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def get_provider(sp_user_id: UUID, db: AsyncSession = Depends(get_db)):
     """One owner: the same row the search returns, for the owner page header.
@@ -66,7 +67,7 @@ async def get_provider(sp_user_id: UUID, db: AsyncSession = Depends(get_db)):
 @router.get(
     "/providers/{sp_user_id}/team",
     response_model=list[AdminTeamPro],
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def get_provider_team(sp_user_id: UUID, db: AsyncSession = Depends(get_db)):
     """Every Pro row under this owner, removed ones included (``is_active``):
@@ -77,7 +78,7 @@ async def get_provider_team(sp_user_id: UUID, db: AsyncSession = Depends(get_db)
 @router.get(
     "/providers/{sp_user_id}/invites",
     response_model=list[AdminInviteRow],
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def get_provider_invites(sp_user_id: UUID, db: AsyncSession = Depends(get_db)):
     """The owner's invites, newest first, any status. No codes. Stale PENDING
@@ -87,7 +88,9 @@ async def get_provider_invites(sp_user_id: UUID, db: AsyncSession = Depends(get_
     return invites
 
 
-@router.get("/pros/{professional_id}", response_model=AdminProDetail, dependencies=[_admin_dep])
+@router.get(
+    "/pros/{professional_id}", response_model=AdminProDetail, dependencies=[_any_admin_role_dep]
+)
 async def get_pro(professional_id: UUID, db: AsyncSession = Depends(get_db)):
     """One Pro row, removed or not, and the owner it belongs to."""
     return await AdminTeamService(db).pro_detail(professional_id)
@@ -97,7 +100,7 @@ async def get_pro(professional_id: UUID, db: AsyncSession = Depends(get_db)):
 async def force_remove_pro(
     professional_id: UUID,
     body: ForceRemoveRequest,
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """Remove a Pro from their owner's team (soft), e.g. when the owner is
@@ -113,7 +116,7 @@ async def force_remove_pro(
 async def reassign_pro(
     professional_id: UUID,
     body: ReassignRequest,
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """Move a person to another owner's team by admin authority: no invite or
@@ -139,7 +142,7 @@ async def reassign_pro(
     )
 
 
-@router.get("/actions", response_model=list[AdminActionRow], dependencies=[_admin_dep])
+@router.get("/actions", response_model=list[AdminActionRow], dependencies=[_admin_support_dep])
 async def list_admin_actions(
     target_type: Literal["user", "professional"] | None = Query(None),
     target_id: UUID | None = Query(None),

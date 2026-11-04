@@ -147,3 +147,24 @@ async def test_expose_headers_includes_ratelimit_triplet(monkeypatch):
             f"Access-Control-Expose-Headers missing {required!r}; "
             f"browser JS can't read the SVC-159 rate-limit headers. Got: {exposed!r}"
         )
+
+
+def test_default_origins_include_the_admin_console():
+    """SVC-422: the admin console's dev server and production origin."""
+    from app.config import Settings
+
+    default = Settings.model_fields["CORS_ALLOWED_ORIGINS"].default
+    assert "http://localhost:5174" in default.split(",")
+    assert "https://admin.eazyserv.com" in default.split(",")
+
+
+async def test_admin_token_header_is_readable_by_the_browser(monkeypatch):
+    """SVC-422: without this expose, the app could never read a refreshed token."""
+    from app import main as main_mod
+
+    monkeypatch.setattr(main_mod.settings, "CORS_ALLOWED_ORIGINS", "https://admin.eazyserv.com")
+    app = create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        r = await ac.get("/health", headers={"Origin": "https://admin.eazyserv.com"})
+
+    assert "X-Admin-Token" in r.headers.get("access-control-expose-headers", "")

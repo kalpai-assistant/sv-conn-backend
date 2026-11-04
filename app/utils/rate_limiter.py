@@ -18,6 +18,7 @@ calendar hour when the window is short.
 """
 
 import time
+from collections.abc import Callable
 
 from fastapi import Depends, Request, Response
 from redis.asyncio import Redis
@@ -38,7 +39,12 @@ def _write_rate_headers(response: Response, limit: int, remaining: int, reset_at
     response.headers["X-RateLimit-Reset"] = str(reset_at)
 
 
-def ip_rate_limit(namespace: str, max_requests: int, window_seconds: int = 3600):
+def ip_rate_limit(
+    namespace: str,
+    max_requests: int,
+    window_seconds: int = 3600,
+    ip_resolver: Callable[[Request], str] | None = None,
+):
     """Public-endpoint rate limit — keyed by client IP, not user.
 
     Same shape as ``rate_limit`` but for endpoints without auth (SMS
@@ -58,7 +64,7 @@ def ip_rate_limit(namespace: str, max_requests: int, window_seconds: int = 3600)
         response: Response,
         redis: Redis = Depends(get_redis),
     ) -> None:
-        client_ip = _extract_client_ip(request)
+        client_ip = (ip_resolver or _extract_client_ip)(request)
         key = f"rl:ip:{namespace}:{client_ip}"
 
         current = await redis.incr(key)
@@ -97,6 +103,21 @@ def _extract_client_ip(request: Request) -> str:
     if xff:
         # Leftmost = origin client; rightmost = trusted proxy.
         return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def appended_client_ip(request: Request) -> str:
+    """The X-Forwarded-For entry our own proxy appended (rightmost), else the peer.
+
+    SVC-422: for limits a client must not be able to dodge. The leftmost entry
+    that ``_extract_client_ip`` reads is whatever the client sent, so changing it
+    on each request would give a fresh bucket every time. Assumes one proxy in
+    front of the app: with more, the rightmost is a proxy and every caller shares
+    a bucket, which fails closed and is noticed at once.
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 

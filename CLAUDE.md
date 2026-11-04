@@ -27,7 +27,8 @@ celery -A app.tasks.celery_app beat --loglevel=info     # Scheduler
 ```bash
 uv run alembic revision --autogenerate -m "message"
 uv run alembic upgrade head
-uv run python scripts/create_admin.py +91XXXXXXXXXX
+uv run python scripts/create_admin.py +91XXXXXXXXXX       # old phone-login admin
+uv run python scripts/create_admin_user.py a@b.in ops     # console login (SVC-422)
 ```
 
 **Seed ritual (SVC-312).** Run in this exact order against a freshly-migrated DB. Each step is idempotent — re-runs are safe and never wipe categories.
@@ -101,8 +102,12 @@ Every operational concern has its own runbook — followable by anyone with AWS 
 - **[BACKUPS.md](BACKUPS.md)** — RDS backup config + quarterly restore drill. SC-34.
 - **[SECRETS.md](SECRETS.md)** — every secret enumerated, rotation cadence + procedure, incident response (DPDP 72h clock). SC-50.
 - **[OBSERVABILITY.md](OBSERVABILITY.md)** — Better Stack Logs vendor decision, alert catalog (P1/P2/P3), dashboard spec, Sentry↔logs correlation. SC-47.
-- **[ADMIN.md](ADMIN.md)** — admin IP allowlist + role hardening. SC-75.
+- **[ADMIN.md](ADMIN.md)** — admin console login, roles, IP allowlist. SC-75, SVC-422.
 - **[PURE_CODE_QUEUE.md](PURE_CODE_QUEUE.md)** — in-flight pure-code work queue. Delete when drained.
+
+### Admin console auth (SVC-422)
+
+Runbook and route-to-role table: [ADMIN.md](ADMIN.md). `admin_users` holds console logins (email + password + TOTP; roles `admin` / `ops` / `support`). Each row links through `user_id` to a `users` row with phone `A` + 14 hex and `is_active=false`, which exists only as the actor id, because `admin_actions` and `payout_audit` have FKs to `users.id`. Every `/admin/*` route and the 3 `services.py` writes use `require_roles(...)`, which returns that `User`; `require_role` stays for provider routes. Old phone-login tokens (`/auth/admin/*`) pass as role `admin` until SVC-434. A new `/admin` route must be added to `ROUTE_ROLES` in `tests/test_admin_console_auth.py`, or the test fails. Admin tokens carry `aud=eazyserv-admin`, so `decode_jwt` and everything built on it refuses them. Role and `is_active` come from the DB per request. Tokens slide through the `X-Admin-Token` response header; logout blacklists the `sid` in Redis. Passwords use `bcrypt` directly (passlib crashed on bcrypt 5).
 
 ### Booking State Machine
 
@@ -133,7 +138,7 @@ Doorstep OTP (4-digit, stored in Redis) is required to transition from `en_route
 1. `POST /send-otp` — generates 6-digit OTP, stores in Redis with 10-min TTL, sends via SMS
 2. `POST /verify-otp` — validates OTP, upserts user, returns JWT access + refresh tokens
 3. `POST /refresh` — exchanges refresh token for new token pair
-4. JWT middleware (`app/middleware/auth.py`) attaches user to request context; `get_current_user` dependency enforces authentication
+4. JWT middleware (`app/middleware/auth.py`) attaches user to request context; `get_current_user` dependency enforces authentication. Anything granting access reads tokens with `decode_access_token`, which refuses a refresh token; only `/auth/refresh` and `/auth/logout` take one.
 
 Rate limiting: 5 OTP attempts per phone per hour, tracked in Redis.
 
@@ -310,7 +315,7 @@ Tests use `pytest-asyncio` with `AsyncClient` over ASGI transport. `conftest.py`
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push to main + every PR:
+`.github/workflows/ci.yml` runs on push to main + every PR into `main` or `feature/**`:
 1. `ruff check` (lint) + `ruff format --check` (format enforcement) — blocking
 2. PostGIS extension enable → `alembic upgrade head` → `alembic check` (drift catch) — blocking
 3. `pytest tests/` — blocking

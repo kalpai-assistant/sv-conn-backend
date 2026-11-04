@@ -19,7 +19,8 @@ compromise or personnel change."
 | Secret | Env var | SSM path | Rotate | Blast radius on leak |
 |---|---|---|---|---|
 | **JWT signing key** | `JWT_SECRET_KEY` | `/sc/{env}/JWT_SECRET` | **Quarterly** + on incident | Every session token forgeable → full user impersonation. Highest severity. |
-| **AES-256 PII key** | `ENCRYPTION_KEY` | `/sc/{env}/ENCRYPTION_KEY` | **Never routinely** (see below) | Aadhaar / PAN plaintext derivable. DPDP-reportable. |
+| **AES-256 PII key** | `ENCRYPTION_KEY` | `/sc/{env}/ENCRYPTION_KEY` | **Never routinely** (see below) | Aadhaar / PAN plaintext derivable, and admin TOTP secrets (SVC-422). DPDP-reportable. |
+| **Admin seed password** | `ADMIN_SEED_PASSWORD` | Set only for the deploy that first runs the SVC-422 migration, then remove | Change the password after first login; the variable is read once | First-factor access to the seed admin until TOTP is set up. |
 | **DB password** | `DATABASE_URL`, `SYNC_DATABASE_URL` | `/sc/{env}/DATABASE_URL` | **Quarterly** + on incident | Full DB read/write. Prod = every user's PII, bookings, payments. |
 | **Redis auth** | `REDIS_URL` | `/sc/{env}/REDIS_URL` | Quarterly | OTPs, rate-limit counters, session cache. Low PII, high nuisance. |
 | **Razorpay live keys** | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | `/sc/prod/RAZORPAY_*` | **On personnel change** | Attacker can initiate refunds, read payment history via API. Money movement possible. |

@@ -1,8 +1,8 @@
-# Admin Access Runbook (SVC-75)
+# Admin Access Runbook (SVC-75, SVC-422)
 
 `/admin/*` sits behind **two** layers of defence:
 
-1. **JWT role check** (`require_role("admin")`) — enforced per-endpoint.
+1. **Login + role check** (`require_roles(...)`) — enforced per-endpoint.
 2. **IP allowlist middleware** (`AdminIPAllowlistMiddleware`) — enforced app-wide
    before the router. Optional; empty allowlist = no restriction (dev-safe).
 
@@ -10,7 +10,85 @@ Even a stolen admin JWT is useless from an unlisted network.
 
 ---
 
-## Config
+## Admin console login (SVC-422)
+
+Email + password, then a TOTP code. No self-signup. The old phone login
+(`/auth/admin/*`) keeps working, as role `admin`, until SVC-434.
+
+| Endpoint | Does | Refusals |
+|---|---|---|
+| `POST /admin/auth/login` | Password step. Returns `requires_totp`, `totp_setup_required`, and a 5-minute `challenge_token`. | 401 `INVALID_CREDENTIALS`, 429 |
+| `POST /admin/auth/totp/setup` | First login: returns `otpauth_url`; the app draws the QR. A new secret on every call. | 401 `INVALID_CHALLENGE`, 409 `TOTP_ALREADY_ACTIVE` |
+| `POST /admin/auth/totp/verify` | Returns the session JWT, and activates TOTP on first success. | 401 `INVALID_CHALLENGE` / `INVALID_TOTP_CODE`, 409 `TOTP_SETUP_REQUIRED`, 429 |
+| `POST /admin/auth/logout` | Ends the session (every token with its `sid`). | 401 |
+| `GET /admin/auth/me` | Who is logged in. Console sessions only. | 401 |
+
+**Limits.** Login: 5 attempts per IP per 15 minutes, using the rightmost
+`X-Forwarded-For` entry, because a client controls the leftmost. This assumes one
+proxy in front of the app; with more, all admins share one bucket. TOTP verify: 10
+attempts per admin per 15 minutes. Three wrong passwords in a row lock the account
+for 24 hours. Unknown email, wrong password, locked and deactivated accounts all
+get the same 401.
+
+**Session.** The JWT lasts 12 hours and has `typ=admin` and a `sid`; role and
+`is_active` are read from the DB on every request. Past half its life, a response
+carries a fresh token in `X-Admin-Token`, and the client should swap to it. There is
+no absolute cap, so an active session can run indefinitely. Admin tokens carry
+`aud=eazyserv-admin`, which makes every non-admin path refuse them.
+
+### Add an admin
+
+```bash
+uv run python scripts/create_admin_user.py someone@kalpai.in ops
+```
+
+The password comes from `ADMIN_USER_PASSWORD` or a prompt, never an argument: 12+
+characters, at most 72 bytes. On beta, run it through the SSM bastion tunnel in
+CLAUDE.md.
+
+The migration seeds `vipul@kalpai.in` only if `ADMIN_SEED_PASSWORD` is set when it
+first runs. It never runs again, so setting the variable later does nothing: use the
+script instead.
+
+### SQL recipes
+
+```sql
+-- Unlock an account
+UPDATE admin_users SET failed_login_count = 0, locked_until = NULL WHERE email = '...';
+-- Deactivate (takes effect on the next request)
+UPDATE admin_users SET is_active = false WHERE email = '...';
+-- Change role (takes effect on the next request)
+UPDATE admin_users SET role = 'support' WHERE email = '...';
+-- Lost authenticator: the next login goes through setup again
+UPDATE admin_users SET totp_secret = NULL, totp_enabled_at = NULL WHERE email = '...';
+```
+
+### Actor IDs
+
+`admin_actions` and `payout_audit` have foreign keys to `users.id`, so each
+`admin_users` row links to its own `users` row through `user_id`, and routes get
+that `User` as `admin`. The row has phone `A` + 14 hex and `is_active=false`, so it
+can never log in by phone. `GET /admin/users` hides these rows.
+
+### Who can call what
+
+An old phone-login token counts as `admin`. A consumer or provider token gets 403;
+a challenge token gets 401. `tests/test_admin_console_auth.py::ROUTE_ROLES` holds
+this table and fails if a new `/admin` route isn't in it.
+
+| Roles | Routes |
+|---|---|
+| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros/{id}` |
+| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /services`, `PATCH` + `DELETE /services/{id}` |
+| admin, support | `GET /admin/users`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts` |
+| admin | `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout` + `requeue-failed` + `requeue-reversed`, `POST /admin/pros/{id}/force-remove` + `reassign`, `POST /admin/app-versions/{platform}/release` (also the CI token) |
+
+Support has no write routes yet: its refund comes with SVC-431, and retry-dispatch
+and booking-level reassign don't exist.
+
+---
+
+## IP allowlist config
 
 Two env vars in `.env`:
 
@@ -97,8 +175,9 @@ Non-admin JWT + listed IP: GET → 403 (IP passes, role fails at handler)
 
 ## What this does NOT protect against
 
-- **Compromised admin machine on an allowed network.** Solved separately by
-  Cloudflare Access / short JWT TTL / mandatory 2FA (all post-beta).
+- **Compromised admin machine on an allowed network.** Partly addressed by
+  console TOTP (SVC-422); old phone login has none until SVC-434. Cloudflare
+  Access is still post-beta.
 - **XSS / CSRF on the admin panel.** Different threat, handled at the
   frontend / CORS layer.
 - **Insider abuse.** An admin with legit credentials from a legit network can

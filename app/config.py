@@ -117,6 +117,8 @@ class Settings(BaseSettings):
             "http://localhost:3000",  # React dev server
             "http://localhost:8080",  # Vite dev (alternate port)
             "https://app.eazyserv.com",  # Production web
+            "http://localhost:5174",  # Admin console dev server (SVC-422)
+            "https://admin.eazyserv.com",  # Admin console (SVC-422)
             # Capacitor mobile app origins
             "capacitor://localhost",  # iOS Capacitor WebView
             "https://localhost",  # Android Capacitor WebView (androidScheme=https)

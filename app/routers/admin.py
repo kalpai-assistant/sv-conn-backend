@@ -1,23 +1,25 @@
 """
 Admin router: user management, booking oversight, and KYC approval.
-All endpoints require the "admin" role.
+Each route names its roles with ``require_roles`` (SVC-422; table in ADMIN.md).
 """
 
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
+from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.config import get_settings
 from app.database import get_db
-from app.dependencies import require_role
+from app.dependencies import authorize_admin_token, get_redis, require_roles
 from app.exceptions import BookingNotFound
+from app.models.admin_user import AdminUser
 from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, SettlementStatus
 from app.models.payment import Payment
@@ -47,7 +49,9 @@ from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
-_admin_dep = Depends(require_role("admin"))
+_admin_ops_dep = Depends(require_roles("admin", "ops"))
+_admin_support_dep = Depends(require_roles("admin", "support"))
+_any_admin_role_dep = Depends(require_roles("admin", "ops", "support"))
 
 
 # ---------------------------------------------------------------------------
@@ -55,13 +59,15 @@ _admin_dep = Depends(require_role("admin"))
 # ---------------------------------------------------------------------------
 
 
-@router.get("/users", response_model=list[UserResponse], dependencies=[_admin_dep])
+@router.get("/users", response_model=list[UserResponse], dependencies=[_admin_support_dep])
 async def list_users(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(User).offset((page - 1) * per_page).limit(per_page)
+    # An admin console login's linked row is only an actor id (SVC-422), not a person.
+    linked = select(AdminUser.id).where(AdminUser.user_id == User.id).exists()
+    stmt = select(User).where(~linked).offset((page - 1) * per_page).limit(per_page)
     result = await db.execute(stmt)
     return list(result.scalars().all())
 
@@ -70,7 +76,7 @@ async def list_users(
 async def deactivate_user(
     user_id: UUID,
     body: DeactivateUserRequest | None = None,
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """Deactivate a user. An unknown id is a silent 204. The body (an optional
@@ -91,7 +97,11 @@ async def deactivate_user(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/providers/kyc/pending", response_model=list[KYCQueueRow], dependencies=[_admin_dep])
+@router.get(
+    "/providers/kyc/pending",
+    response_model=list[KYCQueueRow],
+    dependencies=[_any_admin_role_dep],
+)
 async def list_kyc_queue(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
@@ -238,7 +248,7 @@ async def list_kyc_queue(
 @router.get(
     "/providers/{user_id}/kyc",
     response_model=KYCDocsResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def get_provider_kyc_review(user_id: UUID, db: AsyncSession = Depends(get_db)):
     """
@@ -251,7 +261,7 @@ async def get_provider_kyc_review(user_id: UUID, db: AsyncSession = Depends(get_
 @router.post(
     "/providers/{user_id}/kyc/verify",
     response_model=KYCReviewResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_admin_ops_dep],
 )
 async def verify_provider_kyc(user_id: UUID, db: AsyncSession = Depends(get_db)):
     profile = await ProviderService(db).verify_kyc(user_id)
@@ -262,7 +272,7 @@ async def verify_provider_kyc(user_id: UUID, db: AsyncSession = Depends(get_db))
 @router.post(
     "/providers/{user_id}/kyc/reject",
     response_model=KYCReviewResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_admin_ops_dep],
 )
 async def reject_provider_kyc(
     user_id: UUID,
@@ -286,7 +296,7 @@ async def reject_provider_kyc(
 @router.get(
     "/pros/{professional_id}/kyc",
     response_model=ProKYCDocsResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def get_pro_kyc_review(professional_id: UUID, db: AsyncSession = Depends(get_db)):
     """A team Pro's KYC review payload, with which SP they work for."""
@@ -296,7 +306,7 @@ async def get_pro_kyc_review(professional_id: UUID, db: AsyncSession = Depends(g
 @router.post(
     "/pros/{professional_id}/kyc/verify",
     response_model=KYCReviewResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_admin_ops_dep],
 )
 async def verify_pro_kyc(professional_id: UUID, db: AsyncSession = Depends(get_db)):
     pro = await ProviderService(db).verify_pro_kyc(professional_id)
@@ -307,7 +317,7 @@ async def verify_pro_kyc(professional_id: UUID, db: AsyncSession = Depends(get_d
 @router.post(
     "/pros/{professional_id}/kyc/reject",
     response_model=KYCReviewResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_admin_ops_dep],
 )
 async def reject_pro_kyc(
     professional_id: UUID,
@@ -324,7 +334,7 @@ async def reject_pro_kyc(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/bookings", response_model=BookingListResponse, dependencies=[_admin_dep])
+@router.get("/bookings", response_model=BookingListResponse, dependencies=[_any_admin_role_dep])
 async def list_all_bookings(
     booking_status: str | None = Query(None, alias="status"),
     disputed: bool | None = Query(
@@ -440,7 +450,7 @@ async def list_all_bookings(
 async def force_cancel_booking(
     booking_id: UUID,
     body: ForceCancelBookingRequest,
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
     """Cancel a booking on a customer's behalf (SVC-299).
@@ -483,7 +493,7 @@ async def force_cancel_booking(
 @router.get(
     "/bookings/{booking_id}",
     response_model=BookingResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
     responses={404: {"description": "No such booking"}},
 )
 async def get_any_booking(booking_id: UUID, db: AsyncSession = Depends(get_db)):
@@ -515,7 +525,7 @@ async def get_any_booking(booking_id: UUID, db: AsyncSession = Depends(get_db)):
 @router.get(
     "/bookings/{booking_id}/timeline",
     response_model=list[BookingTimelineItem],
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
     responses={404: {"description": "No such booking"}},
 )
 async def get_booking_timeline(booking_id: UUID, db: AsyncSession = Depends(get_db)):
@@ -568,7 +578,7 @@ async def _for_admin_with_parties(db: AsyncSession, booking: Booking) -> Booking
 @router.get(
     "/providers/pending-settlements",
     response_model=PendingSettlementsResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_admin_support_dep],
 )
 async def list_pending_settlements(db: AsyncSession = Depends(get_db)):
     """Providers awaiting settlement, with the amount and booking count owed.
@@ -584,7 +594,7 @@ async def list_pending_settlements(db: AsyncSession = Depends(get_db)):
 @router.get(
     "/providers/{user_id}/payouts",
     response_model=ProviderPayoutHistoryResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_admin_support_dep],
 )
 async def list_provider_payout_history(
     user_id: UUID,
@@ -607,7 +617,7 @@ async def list_provider_payout_history(
 @router.post("/providers/{user_id}/payout", status_code=status.HTTP_202_ACCEPTED)
 async def pay_out_provider(
     user_id: UUID,
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """Enqueue a RazorpayX payout for a provider's completed-but-unsettled bookings.
@@ -668,7 +678,7 @@ async def pay_out_provider(
 @router.post("/providers/{user_id}/payout/requeue-failed", status_code=status.HTTP_200_OK)
 async def requeue_failed_settlements(
     user_id: UUID,
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """Reset a provider's FAILED settlements to PENDING so they can be paid again.
@@ -686,7 +696,7 @@ async def requeue_failed_settlements(
 @router.post("/providers/{user_id}/payout/requeue-reversed", status_code=status.HTTP_200_OK)
 async def requeue_reversed_settlements(
     user_id: UUID,
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """Reset a provider's REVERSED settlements to PENDING so they can be paid again.
@@ -709,9 +719,11 @@ async def requeue_reversed_settlements(
 
 async def _require_admin_or_release_token(
     request: Request,
+    response: Response,
     x_internal_release_token: str | None = Header(default=None),
     credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False)),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> None:
     """Alt-auth for the release endpoint (SVC-227.2).
 
@@ -726,7 +738,7 @@ async def _require_admin_or_release_token(
     entirely; the endpoint then behaves like every other admin route.
 
     Written as one dep (rather than two Depends parameters) because
-    FastAPI runs deps eagerly — a `require_role("admin")` dep alongside
+    FastAPI runs deps eagerly — a `require_roles("admin")` dep alongside
     this one would hard-401 on missing JWT even when the header path
     already succeeded. The `HTTPBearer(auto_error=False)` in this
     signature is the trick that lets us decide the branch ourselves.
@@ -739,7 +751,6 @@ async def _require_admin_or_release_token(
     import hmac
 
     from app.config import get_settings
-    from app.dependencies import _tag_sentry_user
 
     settings = get_settings()
     if (
@@ -750,10 +761,9 @@ async def _require_admin_or_release_token(
         request.state.release_auth = "token"
         return
 
-    # JWT path — inline the check rather than delegating to the standard
-    # `require_role("admin")` dep so we can return a specific 401 when
-    # neither auth method was provided at all (vs 403 for a wrong-role
-    # JWT). Same JWT decode + user lookup as `get_current_user`.
+    # JWT path — not the standard `require_roles("admin")` dep, so we can
+    # return a specific 401 when neither auth method was provided at all
+    # (vs 403 for a wrong-role JWT).
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -763,21 +773,7 @@ async def _require_admin_or_release_token(
             ),
         )
 
-    from app.utils.security import decode_jwt
-
-    payload = decode_jwt(credentials.credentials)
-    if not payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token"
-        )
-    user = await db.get(User, UUID(payload["sub"]))
-    if not user or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive"
-        )
-    if user.role.value != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
-    _tag_sentry_user(str(user.id), user.role.value)
+    await authorize_admin_token(credentials.credentials, ("admin",), response, db, redis)
     request.state.release_auth = "jwt"
 
 
