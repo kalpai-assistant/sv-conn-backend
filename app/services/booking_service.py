@@ -56,6 +56,7 @@ from app.schemas.booking import (
     StatusTimelineItem,
     TimelinePro,
 )
+from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
 from app.services.provider_matching import (
     is_eligible_provider_multi_stmt,
 )
@@ -1723,7 +1724,7 @@ class BookingService:
     async def force_cancel(
         self,
         booking_id: uuid.UUID,
-        admin_id: uuid.UUID,
+        actor: AuditActor,
         reason: str,
     ) -> Booking:
         """Admin-driven cancel on a customer's behalf (SVC-299).
@@ -1751,6 +1752,9 @@ class BookingService:
         also stamped on ``booking.cancellation_reason`` — the ticket asked
         for both, and they answer different questions: the log is the
         audit story, the column is the row's current explanation.
+
+        The ``admin_actions`` row is written here rather than in the route
+        (SVC-423) because ``before`` must be read under the row lock taken below.
         """
         booking = await self.db.get(Booking, booking_id, with_for_update=True)
         if not booking:
@@ -1765,6 +1769,7 @@ class BookingService:
                 f"Cannot force-cancel a booking that is already {booking.status.value}."
             )
 
+        before = snapshot("booking", booking)
         old_status = booking.status
         booking.status = BookingStatus.CANCELLED
         booking.cancellation_reason = reason
@@ -1785,9 +1790,20 @@ class BookingService:
             booking_id=booking.id,
             from_status=old_status.value,
             to_status=BookingStatus.CANCELLED.value,
-            changed_by=admin_id,
+            changed_by=actor.admin_id,
             metadata={"admin_override": True},
             note=reason,
+        )
+        await audit_admin_action(
+            self.db,
+            actor,
+            action="booking.force_cancel",
+            target_type="booking",
+            target_id=booking.id,
+            reason=reason,
+            sp_user_id=booking.provider_id,
+            before=before,
+            after=snapshot("booking", booking),
         )
 
         await self.attach_addresses([booking])

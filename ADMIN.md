@@ -1,4 +1,4 @@
-# Admin Access Runbook (SVC-75, SVC-422)
+# Admin Access Runbook (SVC-75, SVC-422, SVC-423)
 
 `/admin/*` sits behind **two** layers of defence:
 
@@ -83,10 +83,82 @@ this table and fails if a new `/admin` route isn't in it.
 | admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros/{id}` |
 | admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /services`, `PATCH` + `DELETE /services/{id}` |
 | admin, support | `GET /admin/users`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts` |
-| admin | `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout` + `requeue-failed` + `requeue-reversed`, `POST /admin/pros/{id}/force-remove` + `reassign`, `POST /admin/app-versions/{platform}/release` (also the CI token) |
+| admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout` + `requeue-failed` + `requeue-reversed`, `POST /admin/pros/{id}/force-remove` + `reassign`, `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
 Support has no write routes yet: its refund comes with SVC-431, and retry-dispatch
 and booking-level reassign don't exist.
+
+---
+
+## Audit log (SVC-423)
+
+Every admin write writes one `admin_actions` row: who, what, why, before and after,
+IP and User-Agent. Rows are never updated or deleted, and there is no route that
+could.
+
+**Reading it.** `GET /admin/audit` (paginated, newest first; filter by
+`admin_user_id`, `action`, `target_type`, `target_id`, `date_from` inclusive,
+`date_to` exclusive; a date with no offset means UTC) and `GET /admin/audit/filters`.
+Admin role only, because ops shouldn't review their own actions. `GET /admin/actions`
+is the owner history on the Teams screen: admin and support, and only the 3 team
+actions.
+
+**Adding a write route.** Call the helper in the handler, in the same transaction as
+the change, and add a case to `AUDITED_WRITE_ROUTES` in `tests/test_admin_audit.py`,
+which fails until you do. Put a new action name in `app/models/admin_action.py`, in the
+`area.verb` form. No migration is needed.
+
+```python
+before = snapshot("service", service)   # NULL for a create
+...change it...
+await audit_admin_action(
+    db, audit_actor(request, admin),
+    action="service.update", target_type="service", target_id=service.id,
+    before=before, after=snapshot("service", service),   # NULL for a delete
+)
+```
+
+**What can't be in a row.** `before_json` and `after_json` hold the short per-record
+lists in `AUDIT_FIELDS`, never a whole record. These are dropped even if a caller
+passes them: `password_hash`, `totp_secret`, `fcm_token`, every `*_encrypted` column,
+`razorpayx_contact_id`, `razorpayx_fund_account_id`, `kyc_docs`, `kyc_ai_verdict`,
+`doorstep_otp`.
+
+**What each route writes.**
+
+| Action | Target | Routes |
+|---|---|---|
+| `user_deactivated` | `user` | `PATCH /admin/users/{id}/deactivate` |
+| `pro_force_removed`, `pro_reassigned` | `professional` | `POST /admin/pros/{id}/force-remove`, `reassign` |
+| `kyc.approve`, `kyc.reject` | `provider` or `professional` | the 4 KYC verify and reject routes |
+| `booking.force_cancel` | `booking` | `POST /admin/bookings/{id}/cancel` |
+| `payout.enqueue` | `provider` | `POST /admin/providers/{id}/payout` |
+| `payout.requeue_failed`, `payout.requeue_reversed` | `provider` | the 2 requeue routes |
+| `app_version.release` | `app_version` (`target_id` is the platform) | `POST /admin/app-versions/{platform}/release` |
+| `service.create`, `service.update`, `service.delete` | `service` | `POST`, `PATCH`, `DELETE /services` |
+
+**Exceptions worth knowing.**
+
+- **Payout.** One row when the route accepts (202), with the amount and booking count
+  in `details`, committed before the task is enqueued. So a row means "an admin asked",
+  not "money moved": a failed enqueue leaves a row and a 500, and an empty batch is a
+  202 with a row showing 0. Each attempt's outcome stays in `payout_audits`. An unknown
+  provider id is still a 202, with `sp_user_id` NULL.
+- **CI release.** The token path writes no row, because no admin acted. Its record is
+  the `app_version_published` log line with `release_auth=token`. A request sending
+  both the token and a JWT counts as the token.
+- **Actions that write no row.** Refused ones, and deactivating an unknown id (a silent
+  204).
+
+**IP and User-Agent.** Recording them never fails the action: an IP that doesn't parse
+saves NULL, and the User-Agent is cut to 512 characters. The IP comes from
+`appended_client_ip`, the same helper as the login limit. **Before the epic reaches
+beta**, check the real `X-Forwarded-For` there and correct that one helper if needed
+(see SVC-422's operational gaps). Audit rows only start on beta at that deploy.
+
+**Downgrading.** The migration's downgrade deletes every row outside the 3 team
+actions, because the old schema can't hold them. Copy the table first if they matter.
+App Runner's auto-rollback redeploys the old image and never runs a downgrade.
 
 ---
 
@@ -182,7 +254,7 @@ Non-admin JWT + listed IP: GET → 403 (IP passes, role fails at handler)
 - **XSS / CSRF on the admin panel.** Different threat, handled at the
   frontend / CORS layer.
 - **Insider abuse.** An admin with legit credentials from a legit network can
-  still act maliciously. Audit logs (SVC-XX follow-up) are the answer here.
+  still act maliciously. The audit log (SVC-423) records it but doesn't stop it.
 
 ---
 

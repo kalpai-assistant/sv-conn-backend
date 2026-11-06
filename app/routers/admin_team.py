@@ -1,6 +1,6 @@
 """
 Admin team management (SVC-329): owners, their Pros (removed included), invite
-history, force-remove, reassign, and the admin audit log.
+history, force-remove, reassign, and the owner history on the Teams screen.
 
 Mounted under ``/admin`` like ``admin.py``, so ``AdminIPAllowlistMiddleware``
 covers it, and every route requires the admin role. Paths follow the existing
@@ -11,7 +11,7 @@ admin ones: owners at ``/admin/providers/{user_id}``, Pros at
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -28,6 +28,7 @@ from app.schemas.admin_team import (
     ReassignRequest,
     ReassignResponse,
 )
+from app.services.admin_audit import audit_actor
 from app.services.admin_team_service import AdminTeamService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -100,6 +101,7 @@ async def get_pro(professional_id: UUID, db: AsyncSession = Depends(get_db)):
 async def force_remove_pro(
     professional_id: UUID,
     body: ForceRemoveRequest,
+    request: Request,
     admin: User = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -107,7 +109,9 @@ async def force_remove_pro(
     unresponsive. The same removal the owner does: 404 ``PRO_NOT_FOUND`` if
     missing or already removed, 400 ``CANNOT_REMOVE_SELF`` for an owner's own
     Pro-for-self, 409 ``PRO_HAS_ACTIVE_JOB`` while they're on a job. Audited."""
-    self_reenabled = await AdminTeamService(db).force_remove(admin.id, professional_id, body.reason)
+    self_reenabled = await AdminTeamService(db).force_remove(
+        audit_actor(request, admin), professional_id, body.reason
+    )
     await db.commit()
     return ForceRemoveResponse(professional_id=professional_id, self_reenabled=self_reenabled)
 
@@ -116,6 +120,7 @@ async def force_remove_pro(
 async def reassign_pro(
     professional_id: UUID,
     body: ReassignRequest,
+    request: Request,
     admin: User = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -131,7 +136,7 @@ async def reassign_pro(
     ``ALREADY_ON_TEAM``, 409 ``PRO_HAS_ACTIVE_JOB``.
     """
     old_id, pro, reactivated, self_reenabled = await AdminTeamService(db).reassign(
-        admin.id, professional_id, body.target_sp_user_id, body.reason
+        audit_actor(request, admin), professional_id, body.target_sp_user_id, body.reason
     )
     await db.commit()
     return ReassignResponse(
@@ -155,7 +160,8 @@ async def list_admin_actions(
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    """The admin audit log, newest first."""
+    """The 3 team actions, newest first: an owner's history on the Teams screen.
+    The full log is ``GET /admin/audit``, admin only."""
     return await AdminTeamService(db).actions(
         target_type=target_type,
         target_id=target_id,

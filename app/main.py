@@ -18,6 +18,7 @@ from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.request_id import RequestIDMiddleware
 from app.routers import (
     admin,
+    admin_audit,
     admin_auth,
     admin_team,
     auth,
@@ -155,6 +156,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_auth.router, prefix=prefix)
     app.include_router(admin.router, prefix=prefix)
     app.include_router(admin_team.router, prefix=prefix)
+    app.include_router(admin_audit.router, prefix=prefix)
     app.include_router(downloads.router, prefix=prefix)
 
     # -----------------------------------------------------------------------
