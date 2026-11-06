@@ -838,6 +838,106 @@ def test_svc_329_creates_the_admin_actions_table_and_downgrade_drops_it(scratch_
     )
 
 
+# SVC-423 (audit log on admin_actions) and the revision it builds on (SVC-422).
+SVC_423 = "c4e81d07a3f6"
+BEFORE_SVC_423 = "a7c31e90d2b4"
+TEAM_ACTION_NAMES = ("user_deactivated", "pro_force_removed", "pro_reassigned")
+
+
+def _admin_action_checks(url: URL) -> dict:
+    return {
+        row["conname"]: row["def"]
+        for row in _query(
+            url,
+            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint "
+            "WHERE conname LIKE 'ck_admin_actions_%'",
+        )
+    }
+
+
+def test_svc_423_extends_admin_actions_and_downgrade_survives_the_new_rows(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_423)
+    before_shape = _shape(scratch_db, "admin_actions")
+    assert set(_admin_action_checks(scratch_db)) == {
+        "ck_admin_actions_action",
+        "ck_admin_actions_target_type",
+    }
+    admin_id, team_row, team_target = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (id, phone, name, role, is_active) "
+                    "VALUES (:id, '+919000000002', 'An Admin', 'CONSUMER', true)"
+                ),
+                {"id": admin_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO admin_actions (id, admin_user_id, action, target_type, target_id) "
+                    "VALUES (:id, :admin, 'pro_force_removed', 'professional', :target)"
+                ),
+                {"id": team_row, "admin": admin_id, "target": team_target},
+            )
+    finally:
+        engine.dispose()
+
+    _alembic(scratch_db, "upgrade", SVC_423)
+    shape = _shape(scratch_db, "admin_actions")
+    columns = {name: (type_, nullable) for name, type_, nullable in shape["columns"]}
+    assert columns["target_id"] == ("VARCHAR(64)", False)
+    assert columns["admin_user_id"][1] is False
+    assert columns["before_json"][1] is True
+    assert columns["after_json"][1] is True
+    assert columns["ip_address"] == ("INET", True)
+    assert columns["user_agent"] == ("VARCHAR(512)", True)
+    assert _admin_action_checks(scratch_db) == {}
+    assert ("ix_admin_actions_target", ("target_type", "target_id")) in {
+        (name, cols) for name, cols, *_ in shape["indexes"]
+    }
+    index_def = _query(
+        scratch_db,
+        "SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_admin_actions_admin_created'",
+    )[0]["indexdef"]
+    assert "(admin_user_id, created_at DESC)" in index_def
+    assert _query(scratch_db, "SELECT id, target_id FROM admin_actions") == [
+        {"id": team_row, "target_id": str(team_target)}
+    ]
+
+    # What the old schema can't hold: a new action, a new target type, a text id.
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO admin_actions "
+                    "(id, admin_user_id, action, target_type, target_id, before_json, ip_address) "
+                    "VALUES (:id, :admin, 'app_version.release', 'app_version', 'android', "
+                    "'{}'::jsonb, '203.0.113.9')"
+                ),
+                {"id": uuid.uuid4(), "admin": admin_id},
+            )
+    finally:
+        engine.dispose()
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_423)
+    assert _shape(scratch_db, "admin_actions") == before_shape
+    # The team row survives with its uuid; the row the old schema can't hold is gone.
+    assert _query(scratch_db, "SELECT id, target_id FROM admin_actions") == [
+        {"id": team_row, "target_id": team_target}
+    ]
+    checks = _admin_action_checks(scratch_db)
+    for action in TEAM_ACTION_NAMES:
+        assert f"'{action}'" in checks["ck_admin_actions_action"]
+    for target_type in ("user", "professional"):
+        assert f"'{target_type}'" in checks["ck_admin_actions_target_type"]
+
+    # And it can come back up.
+    _alembic(scratch_db, "upgrade", SVC_423)
+    assert _admin_action_checks(scratch_db) == {}
+
+
 # SVC-366 (ios app_versions row) and the revision it builds on (SVC-329).
 SVC_366 = "e721a87d86e1"
 BEFORE_SVC_366 = SVC_329

@@ -642,7 +642,7 @@ async def test_routes_record_the_admin_as_actor(client, db_session):
     )
     assert r.status_code == 204
     action = (
-        await db_session.execute(select(AdminAction).where(AdminAction.target_id == target.id))
+        await db_session.execute(select(AdminAction).where(AdminAction.target_id == str(target.id)))
     ).scalar_one()
     assert action.admin_user_id == admin.id
 
@@ -773,6 +773,9 @@ ROUTE_ROLES = {
     ("POST", "/admin/pros/{professional_id}/force-remove"): ADMIN_ONLY,
     ("POST", "/admin/pros/{professional_id}/reassign"): ADMIN_ONLY,
     ("GET", "/admin/actions"): ADMIN_SUPPORT,
+    # admin_audit.py
+    ("GET", "/admin/audit"): ADMIN_ONLY,
+    ("GET", "/admin/audit/filters"): ADMIN_ONLY,
     # services.py: admin writes outside the /admin prefix
     ("POST", "/services"): ADMIN_OPS,
     ("PATCH", "/services/{service_id}"): ADMIN_OPS,

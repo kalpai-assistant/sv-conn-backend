@@ -1,7 +1,7 @@
 """
 Admin team management (SVC-329): find an owner, see their team (removed Pros
-included) and invite history, force-remove or reassign a Pro, and the audit
-log every admin team mutation writes.
+included) and invite history, force-remove or reassign a Pro, and the owner
+history on the Teams screen. The audit helper itself is ``admin_audit``.
 
 Mutations go through ``TeamService.remove_pro``, the only place a Pro is
 deactivated, so the SVC-326 invariant and the active-job refusal hold for
@@ -17,7 +17,7 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import AppException
-from app.models.admin_action import AdminAction
+from app.models.admin_action import TEAM_ACTIONS, AdminAction
 from app.models.booking import ACTIVE_JOB_STATUSES, Booking
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
@@ -30,6 +30,7 @@ from app.schemas.admin_team import (
     AdminProviderRow,
     AdminTeamPro,
 )
+from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
 from app.services.provider_service import effective_kyc_status, professional_display_name
 from app.services.team_service import ALREADY_ON_TEAM, PRO_NOT_FOUND, TeamService
 
@@ -61,35 +62,6 @@ def _pro_not_found() -> AppException:
     return AppException(
         "Professional not found.", status_code=status.HTTP_404_NOT_FOUND, code=PRO_NOT_FOUND
     )
-
-
-async def record_admin_action(
-    db: AsyncSession,
-    *,
-    admin_id: uuid.UUID,
-    action: str,
-    target_type: str,
-    target_id: uuid.UUID,
-    reason: str | None,
-    details: dict,
-    sp_user_id: uuid.UUID | None = None,
-    to_sp_user_id: uuid.UUID | None = None,
-) -> AdminAction:
-    """Append one ``admin_actions`` row: the only writer. Call it in the same
-    transaction as the change it describes."""
-    row = AdminAction(
-        admin_user_id=admin_id,
-        action=action,
-        target_type=target_type,
-        target_id=target_id,
-        sp_user_id=sp_user_id,
-        to_sp_user_id=to_sp_user_id,
-        reason=reason,
-        details=details,
-    )
-    db.add(row)
-    await db.flush()
-    return row
 
 
 class AdminTeamService:
@@ -292,13 +264,19 @@ class AdminTeamService:
         page: int,
         per_page: int,
     ) -> list[AdminActionRow]:
-        """Audit rows, newest first. ``sp_user_id`` matches an owner on either
-        side of the action, so a reassign shows in both owners' histories."""
-        stmt = select(AdminAction, User.name).join(User, User.id == AdminAction.admin_user_id)
+        """The 3 team actions, newest first: the owner history on the Teams
+        screen, which support reads too, so it must never show more (SVC-423).
+        ``sp_user_id`` matches an owner on either side of the action, so a
+        reassign shows in both owners' histories."""
+        stmt = (
+            select(AdminAction, User.name)
+            .join(User, User.id == AdminAction.admin_user_id)
+            .where(AdminAction.action.in_(TEAM_ACTIONS))
+        )
         if target_type is not None:
             stmt = stmt.where(AdminAction.target_type == target_type)
         if target_id is not None:
-            stmt = stmt.where(AdminAction.target_id == target_id)
+            stmt = stmt.where(AdminAction.target_id == str(target_id))
         if sp_user_id is not None:
             stmt = stmt.where(
                 or_(AdminAction.sp_user_id == sp_user_id, AdminAction.to_sp_user_id == sp_user_id)
@@ -330,7 +308,7 @@ class AdminTeamService:
     # ------------------------------------------------------------------
 
     async def deactivate_user(
-        self, admin_id: uuid.UUID, user_id: uuid.UUID, reason: str | None
+        self, actor: AuditActor, user_id: uuid.UUID, reason: str | None
     ) -> bool:
         """``TeamService.deactivate_user`` plus its audit row. False for an
         unknown user (nothing written).
@@ -339,10 +317,11 @@ class AdminTeamService:
         owner whose team they were removed from, if any. (One person has at
         most one active Pro row, and an owner's is their Pro-for-self.)
         """
+        before = snapshot("user", await self.db.get(User, user_id))
         result = await TeamService(self.db).deactivate_user(user_id)
         if result is None:
             return False
-        _, removed = result
+        user, removed = result
         is_owner = (
             await self.db.scalar(
                 select(ProviderProfile.id).where(ProviderProfile.user_id == user_id)
@@ -352,14 +331,16 @@ class AdminTeamService:
         sp_user_id = (
             user_id if is_owner else (removed[0][0].service_provider_id if removed else None)
         )
-        await record_admin_action(
+        await audit_admin_action(
             self.db,
-            admin_id=admin_id,
+            actor,
             action="user_deactivated",
             target_type="user",
             target_id=user_id,
             reason=reason,
             sp_user_id=sp_user_id,
+            before=before,
+            after=snapshot("user", user),
             details={
                 "removed_professional_ids": [str(pro.id) for pro, _ in removed],
                 "self_reenabled_sp_ids": [
@@ -369,7 +350,7 @@ class AdminTeamService:
         )
         return True
 
-    async def force_remove(self, admin_id: uuid.UUID, pro_id: uuid.UUID, reason: str) -> bool:
+    async def force_remove(self, actor: AuditActor, pro_id: uuid.UUID, reason: str) -> bool:
         """Soft-remove a Pro on the owner's behalf, through ``remove_pro``: so
         404 if missing or already removed, 400 for a Pro-for-self, 409 while on
         a job. Returns ``self_reenabled``."""
@@ -377,27 +358,32 @@ class AdminTeamService:
         if pro is None:
             raise _pro_not_found()
         sp_id = pro.service_provider_id
+        before = snapshot("professional", pro)
         self_reenabled = await TeamService(self.db).remove_pro(sp_id, pro_id)
-        await record_admin_action(
+        await audit_admin_action(
             self.db,
-            admin_id=admin_id,
+            actor,
             action="pro_force_removed",
             target_type="professional",
             target_id=pro_id,
             reason=reason,
             sp_user_id=sp_id,
+            before=before,
+            after=snapshot("professional", pro),
             details={
                 "sp_user_id": str(sp_id),
                 "user_id": str(pro.user_id),
                 "self_reenabled": self_reenabled,
             },
         )
-        logger.info("admin.pro_force_removed pro_id=%s sp=%s admin=%s", pro_id, sp_id, admin_id)
+        logger.info(
+            "admin.pro_force_removed pro_id=%s sp=%s admin=%s", pro_id, sp_id, actor.admin_id
+        )
         return self_reenabled
 
     async def reassign(
         self,
-        admin_id: uuid.UUID,
+        actor: AuditActor,
         pro_id: uuid.UUID,
         target_sp_user_id: uuid.UUID,
         reason: str,
@@ -497,6 +483,7 @@ class AdminTeamService:
                 code=ALREADY_ON_TEAM,
             )
 
+        before = snapshot("professional", source)
         self_reenabled = await TeamService(self.db).remove_pro(from_sp_id, pro_id)
 
         reactivated = existing is not None
@@ -514,15 +501,18 @@ class AdminTeamService:
             self.db.add(new_row)
         await self.db.flush()
 
-        await record_admin_action(
+        await audit_admin_action(
             self.db,
-            admin_id=admin_id,
+            actor,
             action="pro_reassigned",
             target_type="professional",
             target_id=pro_id,
             reason=reason,
             sp_user_id=from_sp_id,
             to_sp_user_id=target_sp_user_id,
+            # The row they left, then the row they're on now.
+            before=before,
+            after=snapshot("professional", new_row),
             details={
                 "user_id": str(person.id),
                 "from_sp_user_id": str(from_sp_id),
@@ -539,6 +529,6 @@ class AdminTeamService:
             from_sp_id,
             target_sp_user_id,
             new_row.id,
-            admin_id,
+            actor.admin_id,
         )
         return pro_id, await self._team_pro_by_id(new_row.id), reactivated, self_reenabled

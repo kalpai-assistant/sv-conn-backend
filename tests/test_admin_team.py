@@ -27,6 +27,7 @@ from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.provider_team_invite import InviteStatus, ProviderTeamInvite
 from app.models.user import User
+from app.services.admin_audit import AuditActor
 from app.services.admin_team_service import AdminTeamService
 from app.services.provider_service import ProviderService
 from tests.conftest import TEST_DATABASE_URL
@@ -77,12 +78,13 @@ async def _actions(db, **where) -> list[AdminAction]:
     assert where
     stmt = select(AdminAction)
     for column, value in where.items():
+        value = str(value) if column == "target_id" else value
         stmt = stmt.where(getattr(AdminAction, column) == value)
     return list((await db.execute(stmt)).scalars().all())
 
 
 async def _actions_on(db, ids) -> list[AdminAction]:
-    stmt = select(AdminAction).where(AdminAction.target_id.in_(list(ids)))
+    stmt = select(AdminAction).where(AdminAction.target_id.in_([str(i) for i in ids]))
     return list((await db.execute(stmt)).scalars().all())
 
 
@@ -533,7 +535,9 @@ async def test_two_admins_reassigning_at_once_produce_one_move(db_session):
                 await first_holds_lock.wait()
             async with sessions() as s:
                 try:
-                    await AdminTeamService(s).reassign(ids["admin"], ids["pro"], target, "merger")
+                    await AdminTeamService(s).reassign(
+                        AuditActor(ids["admin"]), ids["pro"], target, "merger"
+                    )
                     if first:
                         first_holds_lock.set()
                         await asyncio.sleep(0.5)
@@ -565,14 +569,14 @@ async def test_two_admins_reassigning_at_once_produce_one_move(db_session):
             )
             assert [p.service_provider_id for p in active] == [b_id]
             audits = await check.scalars(
-                select(AdminAction).where(AdminAction.target_id == ids["pro"])
+                select(AdminAction).where(AdminAction.target_id == str(ids["pro"]))
             )
             assert len(audits.all()) == 1
     finally:
         if ids:
             async with sessions() as cleanup:
                 await cleanup.execute(
-                    delete(AdminAction).where(AdminAction.target_id == ids["pro"])
+                    delete(AdminAction).where(AdminAction.target_id == str(ids["pro"]))
                 )
                 await cleanup.execute(
                     text("DELETE FROM professionals WHERE user_id = :u AND id <> :p"),

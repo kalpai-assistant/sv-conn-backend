@@ -3307,9 +3307,11 @@ async def test_list_pending_settlements_missing_profile_row_reports_pending_kyc(
 
     report = await PayoutService(db_session).list_pending_settlements()
 
-    assert len(report["providers"]) == 1
-    assert report["providers"][0]["kyc_status"] == "pending"
-    assert report["providers"][0]["payout_set"] is False
+    # Scoped to this provider: the payout route commits for real (SVC-423), so
+    # another test's provider can be in the table too.
+    [row] = [p for p in report["providers"] if p["provider_id"] == provider.id]
+    assert row["kyc_status"] == "pending"
+    assert row["payout_set"] is False
 
 
 # ---------------------------------------------------------------------------
