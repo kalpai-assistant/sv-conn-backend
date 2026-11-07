@@ -192,6 +192,13 @@ UPDATE_AVAILABLE_TEMPLATE: dict[str, str] = {
     "body": "EazyServ v{version} is ready. Tap to update.",
 }
 
+# SVC-444: a rejected KYC, for an SP or a team Pro. The reason is left out on
+# purpose: it can name a document problem, and this shows on a lock screen.
+KYC_REJECTED_TEMPLATE: dict[str, str] = {
+    "title": "Your documents were rejected",
+    "body": "Open the app to see why and submit them again.",
+}
+
 # SVC-374: the events whose push goes out in the recipient's language. They
 # are the provider/Pro ones only: customer copy is always English, so a Pro
 # booking a service for themselves reads "Booking Confirmed" in English
@@ -210,6 +217,7 @@ _PROVIDER_PUSH_ENGLISH: dict[str, dict[str, str]] = {
     **{event: dict(NOTIFICATION_TEMPLATES[event]) for event in PROVIDER_PUSH_EVENTS},
     **{f"payout.{status}": dict(t) for status, t in PAYOUT_NOTIFICATION_TEMPLATES.items()},
     "update_available": dict(UPDATE_AVAILABLE_TEMPLATE),
+    "kyc_rejected": dict(KYC_REJECTED_TEMPLATE),
 }
 _PROVIDER_PUSH_ENGLISH["new_request"]["service_fallback"] = "A new service request"
 _PROVIDER_PUSH_ENGLISH["new_request"]["more_services"] = "{service} + {count} more"
@@ -271,6 +279,10 @@ PROVIDER_PUSH_TRANSLATIONS: dict[str, dict[str, dict[str, str]]] = {
             "title": "अपडेट उपलब्ध है",
             "body": "EazyServ v{version} तैयार है। अपडेट करने के लिए टैप करें।",
         },
+        "kyc_rejected": {
+            "title": "आपके दस्तावेज़ नामंज़ूर हो गए",
+            "body": "कारण देखने और इन्हें फिर से जमा करने के लिए ऐप खोलें।",
+        },
     },
     "mr": {
         "new_request": {
@@ -321,6 +333,10 @@ PROVIDER_PUSH_TRANSLATIONS: dict[str, dict[str, dict[str, str]]] = {
         "update_available": {
             "title": "अपडेट उपलब्ध आहे",
             "body": "EazyServ v{version} तयार आहे. अपडेट करण्यासाठी टॅप करा.",
+        },
+        "kyc_rejected": {
+            "title": "तुमची कागदपत्रे नामंजूर झाली",
+            "body": "कारण पाहण्यासाठी आणि ती पुन्हा सबमिट करण्यासाठी ॲप उघडा.",
         },
     },
 }
@@ -1170,6 +1186,43 @@ def send_payout_notification(
                 # clear once, let the missed push be caught by whatever the
                 # provider looks at next (offers list, payout history screen).
                 _clear_dead_fcm_token(db, provider, dead)
+
+    except Exception as exc:
+        self.retry(exc=exc)
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=5,
+    name="app.tasks.notification_tasks.send_kyc_rejected_notification",
+)
+def send_kyc_rejected_notification(self, user_id: str):
+    """Tell an SP or a team Pro their KYC was rejected (SVC-444).
+
+    No-ops without an FCM token: the app still shows the rejection when they
+    next open it. There's no booking on this push, so a tap just opens the app.
+    """
+    from app.database import SyncSessionLocal
+    from app.models.user import User
+
+    try:
+        with SyncSessionLocal() as db:
+            user = db.get(User, user_id)
+            if not user or not user.fcm_token:
+                return
+
+            title, body = provider_push_copy("kyc_rejected", push_language(user))
+            try:
+                send_push_notification(
+                    token=user.fcm_token,
+                    title=title,
+                    body=body,
+                    data={"type": "kyc", "event": "kyc_rejected"},
+                )
+            except _DEAD_TOKEN_ERRORS as dead:
+                # SVC-301: clear it once, and let the app show the rejection.
+                _clear_dead_fcm_token(db, user, dead)
 
     except Exception as exc:
         self.retry(exc=exc)

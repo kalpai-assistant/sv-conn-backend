@@ -133,6 +133,10 @@ class ProviderResponse(BaseModel):
     avg_rating: float
     total_completed_jobs: int
     kyc_status: KYCStatus
+    # SVC-444: why the last review failed, so the provider can fix it. Only this
+    # schema's own /providers/me routes return it; customers read
+    # NearbyProviderResponse. NULL unless the KYC is currently rejected.
+    kyc_rejection_reason: str | None = None
     is_online: bool
     service_area_radius_km: int
     # SVC-279: the centre, so a provider can see and edit the area they set.

@@ -190,6 +190,24 @@ async def get_provider_kyc_review(user_id: UUID, db: AsyncSession = Depends(get_
     return await ProviderService(db).get_kyc_review_payload(user_id)
 
 
+def _push_kyc_rejected(user_id: UUID) -> None:
+    """Enqueue the rejection push (SVC-444). Call only after the commit, so a worker
+    can't run before the rejection is saved. Best effort: the rejection and its audit
+    row are already saved, and a broker problem shouldn't report them as failed.
+    """
+    # Imported here to keep FastAPI cold start off the Celery broker path.
+    import structlog
+
+    from app.tasks.notification_tasks import send_kyc_rejected_notification
+
+    try:
+        send_kyc_rejected_notification.delay(user_id=str(user_id))
+    except Exception as exc:  # noqa: BLE001
+        structlog.get_logger(__name__).error(
+            "kyc.rejected_push_enqueue_failed", user_id=str(user_id), error=str(exc)
+        )
+
+
 @router.post("/providers/{user_id}/kyc/verify", response_model=KYCReviewResponse)
 async def verify_provider_kyc(
     user_id: UUID,
@@ -237,6 +255,7 @@ async def reject_provider_kyc(
         after=snapshot("provider_profile", profile),
     )
     await db.commit()
+    _push_kyc_rejected(user_id)
     return profile
 
 
@@ -306,6 +325,9 @@ async def reject_pro_kyc(
         after=snapshot("professional", pro),
     )
     await db.commit()
+    # A removed Pro has left the team, though this route can still act on them.
+    if pro.is_active:
+        _push_kyc_rejected(pro.user_id)
     return pro
 
 
