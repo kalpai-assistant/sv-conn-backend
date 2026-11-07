@@ -123,6 +123,12 @@ and reject routes can still act on a removed Pro if called directly.
 A badge that includes team Pros must call the count with `kind=all`, since the
 default is `sp`.
 
+Rejecting a KYC sends one push to that SP or team Pro in their language (SVC-444),
+except a removed Pro. It's enqueued after the commit and is best effort, so a broker
+failure still returns 200. The reason stays out of the push, since it shows on a lock
+screen. The person reads it in the app: `GET /providers/me` for an SP, the Pro's own
+profile for a Pro. Approving sends no push. SMS waits on DLT approval (SVC-225).
+
 ---
 
 ## Audit log (SVC-423)

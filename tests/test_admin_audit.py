@@ -469,6 +469,10 @@ def no_broker():
             "app.tasks.notification_tasks.broadcast_update_available.delay",
             return_value=fake_task,
         ),
+        patch(
+            "app.tasks.notification_tasks.send_kyc_rejected_notification.delay",
+            return_value=fake_task,
+        ),
     ):
         yield payout
 
