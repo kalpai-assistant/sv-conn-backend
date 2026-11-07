@@ -748,6 +748,7 @@ ROUTE_ROLES = {
     ("GET", "/admin/users"): ADMIN_SUPPORT,
     ("PATCH", "/admin/users/{user_id}/deactivate"): ADMIN_ONLY,
     ("GET", "/admin/providers/kyc/pending"): ALL,
+    ("GET", "/admin/providers/kyc/pending/count"): ALL,
     ("GET", "/admin/providers/{user_id}/kyc"): ALL,
     ("POST", "/admin/providers/{user_id}/kyc/verify"): ADMIN_OPS,
     ("POST", "/admin/providers/{user_id}/kyc/reject"): ADMIN_OPS,

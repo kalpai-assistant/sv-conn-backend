@@ -286,19 +286,24 @@ Admin role plus the `/admin/*` IP allowlist (`app/routers/admin_team.py`, `app/s
 CREATE TABLE admin_actions (
   id             UUID PRIMARY KEY,
   admin_user_id  UUID NOT NULL REFERENCES users(id),
-  action         VARCHAR(40) NOT NULL  -- user_deactivated | pro_force_removed | pro_reassigned
-  target_type    VARCHAR(20) NOT NULL  -- user | professional
-  target_id      UUID NOT NULL,        -- no FK: either table
+  action         VARCHAR(40) NOT NULL,  -- ADMIN_ACTIONS in app/models/admin_action.py
+  target_type    VARCHAR(20) NOT NULL,  -- ADMIN_ACTION_TARGET_TYPES, same file
+  target_id      VARCHAR(64) NOT NULL,  -- no FK: many tables, and not every target has a uuid
   sp_user_id     UUID NULL REFERENCES users(id),
   to_sp_user_id  UUID NULL REFERENCES users(id),
   reason         TEXT NULL,
   details        JSONB NOT NULL DEFAULT '{}',
+  before_json    JSONB NULL,            -- allow-listed fields only; NULL on a create
+  after_json     JSONB NULL,            -- allow-listed fields only; NULL on a delete
+  ip_address     INET NULL,
+  user_agent     VARCHAR(512) NULL,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
--- ix (target_type, target_id), ix (created_at), ix (sp_user_id), ix (to_sp_user_id); CHECKs on action + target_type
+-- ix (target_type, target_id), ix (admin_user_id, created_at DESC), ix (created_at), ix (sp_user_id), ix (to_sp_user_id)
+-- No CHECKs on action or target_type since SVC-423: a new admin story adds its names to app/models/admin_action.py, with no migration.
 ```
 
-One row per admin mutation, written by `record_admin_action` (the only writer) in the same transaction as the change; append-only. Target: the user for a deactivation, the Pro row for a force-remove, the *old* Pro row for a reassign (the new row id is in `details.to_professional_id`). `sp_user_id` is the owner affected (the owner a Pro was removed or moved from; for a deactivation, the user themself if they own an SP, else the owner whose team they left), and `to_sp_user_id` the owner a Pro was moved to. `?sp_user_id=` matches either column, so a move shows in both owners' histories.
+One row per admin write, through `audit_admin_action` in `app/services/admin_audit.py`, which calls `record_admin_action` (the only writer), in the same transaction as the change; append-only. `POST /admin/providers/{id}/payout` is the exception: it has no change of its own, so it commits its row and then enqueues the task. `before_json` and `after_json` hold only the fields in `AUDIT_FIELDS`, never a blocked field. New action names use the `area.verb` form. `GET /admin/actions` returns only the three team actions (`TEAM_ACTIONS`); `GET /admin/audit` returns everything. For the team actions the target is the user for a deactivation, the Pro row for a force-remove, the *old* Pro row for a reassign (the new row id is in `details.to_professional_id`). `sp_user_id` is the owner affected (the owner a Pro was removed or moved from; for a deactivation, the user themself if they own an SP, else the owner whose team they left), and `to_sp_user_id` the owner a Pro was moved to. `?sp_user_id=` matches either column, so a move shows in both owners' histories.
 
 ## Booking state machine (updated)
 

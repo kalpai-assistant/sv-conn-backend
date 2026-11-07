@@ -247,6 +247,8 @@ class KYCQueueRow(BaseModel):
     phone: str
     name: str | None
     email: str | None
+    # SVC-424: status=all mixes states, so each row says which one it is in.
+    kyc_status: KYCStatus
     kyc_submitted_at: datetime | None
     kyc_reviewed_at: datetime | None
     kyc_rejection_reason: str | None
@@ -258,6 +260,12 @@ class KYCQueueRow(BaseModel):
     professional_id: UUID | None = None
     sp_user_id: UUID | None = None
     sp_business_name: str | None = None
+
+
+class KYCQueueCountResponse(BaseModel):
+    """How many rows the admin KYC queue has across all pages (SVC-424)."""
+
+    count: int
 
 
 # ---------------------------------------------------------------------------

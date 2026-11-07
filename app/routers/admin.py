@@ -3,8 +3,8 @@ Admin router: user management, booking oversight, and KYC approval.
 Each route names its roles with ``require_roles`` (SVC-422; table in ADMIN.md).
 """
 
-from datetime import UTC, datetime, timedelta
-from typing import Literal
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 
 from app.config import get_settings
 from app.database import get_db
@@ -22,7 +21,6 @@ from app.exceptions import BookingNotFound
 from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, SettlementStatus
 from app.models.payment import Payment
-from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.user import User
 from app.schemas.admin_team import DeactivateUserRequest
@@ -35,6 +33,7 @@ from app.schemas.booking import (
 from app.schemas.payout import PendingSettlementsResponse, ProviderPayoutHistoryResponse
 from app.schemas.provider import (
     KYCDocsResponse,
+    KYCQueueCountResponse,
     KYCQueueRow,
     KYCRejectionRequest,
     KYCReviewResponse,
@@ -44,6 +43,12 @@ from app.schemas.user import UserResponse
 from app.services.admin_audit import audit_actor, audit_admin_action, snapshot
 from app.services.admin_team_service import AdminTeamService
 from app.services.booking_service import BookingService
+from app.services.kyc_queue_service import (
+    KYCQueueFilter,
+    KYCQueueKind,
+    KYCQueueService,
+    kyc_queue_filter,
+)
 from app.services.payout_service import PayoutService
 from app.services.provider_service import ProviderService
 
@@ -95,6 +100,45 @@ async def deactivate_user(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _KYCQueueParams:
+    queue_filter: KYCQueueFilter
+    kind: KYCQueueKind
+
+
+def _kyc_queue_params(
+    status_filter: str = Query(
+        KYCStatus.SUBMITTED.value,
+        alias="status",
+        description=(
+            "Filter: one of the KYCStatus values (submitted/verified/rejected/pending); "
+            "'auto_approved', profiles verified by the AI verifier bot in the last 7 days "
+            "(SVC-307), for the spot-check tab; or 'all' (SVC-424): submitted + verified + "
+            "rejected, never a row with no documents uploaded."
+        ),
+    ),
+    kind: KYCQueueKind = Query(
+        "sp",
+        description=(
+            "SVC-327: which KYC records. 'sp' (default, the queue as it has always "
+            "been): service providers. 'pro': team professionals' Aadhaar KYC, "
+            "reviewed via /admin/pros/{professional_id}/kyc. 'all': both, merged."
+        ),
+    ),
+) -> _KYCQueueParams:
+    """The queue and its count take the same params, so they can't disagree."""
+    try:
+        return _KYCQueueParams(kyc_queue_filter(status_filter), kind)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Unknown status filter {status_filter!r}. Expected one of "
+                f"{[s.value for s in KYCStatus]}, 'auto_approved' or 'all'."
+            ),
+        ) from exc
+
+
 @router.get(
     "/providers/kyc/pending",
     response_model=list[KYCQueueRow],
@@ -103,144 +147,34 @@ async def deactivate_user(
 async def list_kyc_queue(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
-    status_filter: str = Query(
-        KYCStatus.SUBMITTED.value,
-        alias="status",
-        description=(
-            "Filter: one of the KYCStatus values (submitted/verified/rejected/pending), "
-            "OR the virtual value 'auto_approved' — profiles verified by the AI "
-            "verifier bot in the last 7 days (SVC-307), for the admin spot-check tab."
-        ),
-    ),
-    kind: Literal["sp", "pro", "all"] = Query(
-        "sp",
-        description=(
-            "SVC-327: which KYC records. 'sp' (default, the queue as it has always "
-            "been): service providers. 'pro': team professionals' Aadhaar KYC, "
-            "reviewed via /admin/pros/{professional_id}/kyc. 'all': both, merged."
-        ),
-    ),
+    params: _KYCQueueParams = Depends(_kyc_queue_params),
     db: AsyncSession = Depends(get_db),
 ):
-    """List providers filtered by KYC status.
+    """List KYC records by status, leaving out deleted accounts and removed Pros.
 
-    SVC-298: same endpoint answers both the pending review queue (default) and
-    the rejected view — one query param instead of a sibling route keeps the
-    pagination + response shape DRY. Rejected rows sort by most-recent review
-    first (that's the useful order when hunting a specific past rejection);
-    submitted rows keep oldest-first so the admin drains the queue FIFO.
-
-    SVC-307: ``?status=auto_approved`` is a virtual filter (not a KYCStatus
-    enum value) that SVC-308's frontend spot-check tab consumes — profiles
-    the AI verifier bot moved to VERIFIED in the last 7 days. Semantics:
-    ``kyc_status = VERIFIED AND kyc_reviewed_by = <bot_id> AND
-    kyc_reviewed_at > now() - 7d``. Sorted by most-recent-review first, same
-    as the rejected tab.
+    One route for every tab keeps the pagination and response shape in one place.
+    Submitted (and pending) sort oldest submitted first, so the admin drains the
+    queue FIFO. Rejected, verified and auto_approved sort newest review first,
+    which is the useful order when hunting a past decision. ``all`` sorts newest
+    submitted first.
     """
-    settings = get_settings()
+    return await KYCQueueService(db).list_rows(params.queue_filter, params.kind, page, per_page)
 
-    # SVC-327: which rows. "sp" (default) is exactly the old queue, so today's
-    # admin UI, which opens every row through /admin/providers/{id}/kyc, never
-    # receives a Pro id. The admin chip frontend opts in with all / pro.
-    if status_filter == "auto_approved":
-        # SVC-307 spot-check tab. Deliberately not a KYCStatus value — the
-        # profile IS verified; the filter is on who verified it.
-        bot_id = UUID(settings.KYC_VERIFIER_BOT_USER_ID)
-        cutoff = datetime.now(UTC) - timedelta(days=7)
 
-        def where(model):
-            return (
-                model.kyc_status == KYCStatus.VERIFIED,
-                model.kyc_reviewed_by == bot_id,
-                model.kyc_reviewed_at > cutoff,
-            )
-
-        newest_review_first = True
-    else:
-        try:
-            kyc_status_filter = KYCStatus(status_filter)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"Unknown status filter {status_filter!r}. Expected one of "
-                    f"{[s.value for s in KYCStatus]} or 'auto_approved'."
-                ),
-            ) from exc
-
-        def where(model):
-            return (model.kyc_status == kyc_status_filter,)
-
-        newest_review_first = kyc_status_filter == KYCStatus.REJECTED
-
-    def order(model):
-        return model.kyc_reviewed_at.desc() if newest_review_first else model.kyc_submitted_at.asc()
-
-    def sp_stmt():
-        return (
-            select(User, ProviderProfile)
-            .join(ProviderProfile, ProviderProfile.user_id == User.id)
-            .where(*where(ProviderProfile))
-            .order_by(order(ProviderProfile))
-        )
-
-    def pro_stmt():
-        # Team Pros only: a Pro-for-self's KYC is its SP's, reviewed as the SP.
-        sp = aliased(ProviderProfile)
-        return (
-            select(User, Professional, sp.business_name)
-            .join(Professional, Professional.user_id == User.id)
-            .join(sp, sp.user_id == Professional.service_provider_id)
-            .where(Professional.user_id != Professional.service_provider_id)
-            .where(*where(Professional))
-            .order_by(order(Professional))
-        )
-
-    def sp_row(user, profile) -> KYCQueueRow:
-        return KYCQueueRow(
-            id=user.id,
-            phone=user.phone,
-            name=user.name,
-            email=user.email,
-            kyc_submitted_at=profile.kyc_submitted_at,
-            kyc_reviewed_at=profile.kyc_reviewed_at,
-            kyc_rejection_reason=profile.kyc_rejection_reason,
-        )
-
-    def pro_row(user, pro, business_name) -> KYCQueueRow:
-        return KYCQueueRow(
-            id=user.id,
-            phone=user.phone,
-            name=user.name,
-            email=user.email,
-            kyc_submitted_at=pro.kyc_submitted_at,
-            kyc_reviewed_at=pro.kyc_reviewed_at,
-            kyc_rejection_reason=pro.kyc_rejection_reason,
-            kind="pro",
-            professional_id=pro.id,
-            sp_user_id=pro.service_provider_id,
-            sp_business_name=business_name,
-        )
-
-    offset = (page - 1) * per_page
-    if kind == "sp":
-        result = await db.execute(sp_stmt().offset(offset).limit(per_page))
-        return [sp_row(*r) for r in result.all()]
-    if kind == "pro":
-        result = await db.execute(pro_stmt().offset(offset).limit(per_page))
-        return [pro_row(*r) for r in result.all()]
-
-    # all: the first page*per_page of each kind, merged in the same order, then
-    # this page cut out of the merge. Admin-scale volumes, so two bounded reads.
-    head = page * per_page
-    rows = [sp_row(*r) for r in (await db.execute(sp_stmt().limit(head))).all()]
-    rows += [pro_row(*r) for r in (await db.execute(pro_stmt().limit(head))).all()]
-    never = datetime.min.replace(tzinfo=UTC)
-    if newest_review_first:
-        rows.sort(key=lambda r: r.kyc_reviewed_at or never, reverse=True)
-    else:
-        rows.sort(key=lambda r: r.kyc_submitted_at or never)
-    return rows[offset : offset + per_page]
+@router.get(
+    "/providers/kyc/pending/count",
+    response_model=KYCQueueCountResponse,
+    dependencies=[_any_admin_role_dep],
+)
+async def count_kyc_queue(
+    params: _KYCQueueParams = Depends(_kyc_queue_params),
+    db: AsyncSession = Depends(get_db),
+):
+    """How many rows ``GET /providers/kyc/pending`` has across all pages, for the
+    console's sidebar badge (SVC-424). A badge that includes team Pros must ask
+    for ``kind=all``; the default is ``sp``, the same as the queue."""
+    count = await KYCQueueService(db).count(params.queue_filter, params.kind)
+    return KYCQueueCountResponse(count=count)
 
 
 @router.get(
@@ -694,7 +628,6 @@ async def pay_out_provider(
     enqueue. A refused batch writes none, and the task writes none: each
     attempt's outcome stays in ``payout_audits``.
     """
-    from app.config import get_settings
     from app.exceptions import PaymentError
     from app.tasks.payment_tasks import execute_provider_payout
 
@@ -848,8 +781,6 @@ async def _require_admin_or_release_token(
     otherwise.
     """
     import hmac
-
-    from app.config import get_settings
 
     settings = get_settings()
     if (

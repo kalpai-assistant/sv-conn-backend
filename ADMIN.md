@@ -1,4 +1,4 @@
-# Admin Access Runbook (SVC-75, SVC-422, SVC-423)
+# Admin Access Runbook (SVC-75, SVC-422, SVC-423, SVC-424)
 
 `/admin/*` sits behind **two** layers of defence:
 
@@ -80,13 +80,48 @@ this table and fails if a new `/admin` route isn't in it.
 
 | Roles | Routes |
 |---|---|
-| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros/{id}` |
+| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros/{id}` |
 | admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /services`, `PATCH` + `DELETE /services/{id}` |
 | admin, support | `GET /admin/users`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts` |
 | admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout` + `requeue-failed` + `requeue-reversed`, `POST /admin/pros/{id}/force-remove` + `reassign`, `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
 Support has no write routes yet: its refund comes with SVC-431, and retry-dispatch
 and booking-level reassign don't exist.
+
+---
+
+## KYC queue (SVC-424)
+
+`GET /admin/providers/kyc/pending` lists KYC records, and
+`GET /admin/providers/kyc/pending/count` returns `{"count": n}`: how many rows the
+same filters have across all pages. Both take the same params and defaults, and
+read through the same query (`app/services/kyc_queue_service.py`), so the two
+can't disagree.
+
+`kind`: `sp` (default), `pro` (team Pros) or `all`. `status`, default `submitted`:
+
+| `status` | Rows | Order |
+|---|---|---|
+| `submitted` | Waiting for review | Oldest submitted first |
+| `verified` | Approved, by an admin or the AI verifier | Newest review first |
+| `rejected` | Rejected | Newest review first |
+| `pending` | No documents uploaded, so not a review state | Oldest submitted first |
+| `auto_approved` | Approved by the AI verifier in the last 7 days | Newest review first |
+| `all` | `submitted` + `verified` + `rejected`, never `pending` | Newest submitted first |
+
+A missing time sorts last, and the row id breaks ties. Each row's `kyc_status` says
+which state it is in, which `status=all` needs because it mixes them. The console's
+"pending" and "approved" filters are `submitted` and `verified`.
+
+Every status leaves out deleted accounts (`users.deleted_at` set; deletion wipes
+their documents) and removed Pros (`professionals.is_active = false`; re-adding a
+Pro reactivates the same row, so it comes back by itself). A deactivated user stays
+in, unless they are also a removed Pro. A Pro-for-self is never listed or counted:
+its KYC is its SP's. These rules only cover the queue and the count, so the verify
+and reject routes can still act on a removed Pro if called directly.
+
+A badge that includes team Pros must call the count with `kind=all`, since the
+default is `sp`.
 
 ---
 
