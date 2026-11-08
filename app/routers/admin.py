@@ -66,6 +66,16 @@ def _ist_midnight(day: date) -> datetime:
     return datetime.combine(day, time.min, tzinfo=_IST)
 
 
+def _disputed_exists(booking_id):
+    """EXISTS a charged-back payment for this booking (SVC-134). One rule for the
+    list, which correlates on ``Booking.id``, and the detail, which passes an id."""
+    return (
+        select(Payment.id)
+        .where(Payment.booking_id == booking_id, Payment.disputed_at.is_not(None))
+        .exists()
+    )
+
+
 # ---------------------------------------------------------------------------
 # Users
 # ---------------------------------------------------------------------------
@@ -370,11 +380,7 @@ async def list_all_bookings(
     # "is this booking disputed" is an EXISTS over its payments rather than a join —
     # a join would duplicate booking rows once per payment (SVC-134). The phone and
     # name filters below are EXISTS for the same reason (SVC-425).
-    disputed_exists = (
-        select(Payment.id)
-        .where(Payment.booking_id == Booking.id, Payment.disputed_at.is_not(None))
-        .exists()
-    )
+    disputed_exists = _disputed_exists(Booking.id)
 
     # Every filter goes into both the page query and the count query, so `total`
     # always describes the rows the pages walk through.
@@ -618,6 +624,10 @@ async def _for_admin_with_parties(db: AsyncSession, booking: Booking) -> Booking
     booking for +91XXXXXXXXXX" without a follow-up round trip. Assumes
     the ORM relationships (``consumer_address``, ``items``, ``status_logs``)
     are already hydrated by the caller.
+
+    SVC-425 adds what the admin detail panel shows and no other caller gets:
+    ``is_disputed`` (the list's rule, which ``for_viewer`` leaves False),
+    ``cancellation_reason`` and the settlement state.
     """
     ids: set[UUID] = {booking.consumer_id}
     if booking.provider_id is not None:
@@ -626,10 +636,17 @@ async def _for_admin_with_parties(db: AsyncSession, booking: Booking) -> Booking
     users_by_id = {u.id: u for u in rows.scalars()}
     consumer = users_by_id.get(booking.consumer_id)
     provider = users_by_id.get(booking.provider_id) if booking.provider_id else None
+    is_disputed = (await db.execute(select(_disputed_exists(booking.id)))).scalar_one()
     return BookingResponse.for_admin(booking).model_copy(
         update={
             "consumer_phone": consumer.phone if consumer else None,
             "provider_name": provider.name if provider else None,
+            "is_disputed": is_disputed,
+            "cancellation_reason": booking.cancellation_reason,
+            "settlement_status": (
+                booking.settlement_status.value if booking.settlement_status else None
+            ),
+            "settled_at": booking.settled_at,
         }
     )
 
