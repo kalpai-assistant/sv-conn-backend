@@ -5,10 +5,10 @@ Covers:
 - `process_cash_payment` writes a CASH_COMMISSION debit on cash booking completion.
 - `create_provider_payout` auto-nets cash commission via the wallet:
   - Wallet positive → payout the wallet (< booking sum when commission netted).
-  - Wallet negative → no RazorpayX call, statement generated with owed amount.
-- Settlement statements are generated on every payout attempt (paid or owed).
+  - Wallet negative → no RazorpayX call, refused, no statement.
+- A settlement statement is generated for every payout sent; a refusal writes none.
 - Statement columns reflect the ledger window since the last statement.
-- `estimate_pending_payout` returns netted amount (0 when provider owes).
+- `preflight_payout` returns the netted amount, and refuses when the provider owes.
 """
 
 import uuid
@@ -47,6 +47,7 @@ def _stub_payout_audit_io():
             return_value=fake_audit_id,
         ),
         patch.object(PayoutService, "_resolve_audit", new_callable=AsyncMock),
+        patch.object(PayoutService, "_record_refused_audit", new_callable=AsyncMock),
     ):
         yield fake_audit_id
 
@@ -246,8 +247,12 @@ async def test_payout_nets_cash_commission_against_online_earnings(db_session):
 
 @pytest.mark.asyncio
 async def test_payout_refused_when_cash_commission_exceeds_earnings(db_session):
-    """Wallet ≤ 0 → no RazorpayX call. Statement generated showing amount
-    owed to platform. Raises PaymentError so the admin sees it.
+    """Wallet ≤ 0 → no RazorpayX call and no statement. Raises PaymentError
+    so the admin sees it.
+
+    The statement used to be built here and named in the message, but the
+    refusal rolled it back every time. Saving one would hide that cycle's cash
+    commission from the next real statement, which windows from the newest one.
     """
     from app.exceptions import PaymentError
 
@@ -265,20 +270,18 @@ async def test_payout_refused_when_cash_commission_exceeds_earnings(db_session):
     assert await ledger_service.wallet_balance_paise(db_session, provider.id) == -4000
 
     with patch("app.services.payout_service.create_payout", new_callable=AsyncMock) as mock_payout:
-        with pytest.raises(PaymentError, match="owes platform"):
+        with pytest.raises(PaymentError, match="owes platform") as exc_info:
             await PayoutService(db_session).create_provider_payout(provider.id, admin.id)
 
     mock_payout.assert_not_called()
+    assert "statement" not in exc_info.value.message.lower()
 
-    # Statement still generated — the invoice for the owed amount.
-    stmt = (
+    statements = (
         await db_session.execute(
             select(SettlementStatement).where(SettlementStatement.provider_id == provider.id)
         )
-    ).scalar_one()
-    assert stmt.payout_audit_id is None
-    assert stmt.net_paid_paise == 0
-    assert stmt.platform_balance_owed_paise == 4000
+    ).all()
+    assert statements == []
 
     # Wallet unchanged — nothing paid, nothing debited.
     assert await ledger_service.wallet_balance_paise(db_session, provider.id) == -4000
@@ -365,12 +368,12 @@ async def test_second_statement_windows_from_previous(db_session):
 
 
 # ---------------------------------------------------------------------------
-# estimate_pending_payout reflects the netted amount
+# preflight_payout reflects the netted amount
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_estimate_returns_wallet_balance_not_booking_sum(db_session):
+async def test_preflight_returns_wallet_balance_not_booking_sum(db_session):
     """Endpoint's estimate is the netted amount so the admin sees the real
     payout total, not the pre-netting booking sum.
     """
@@ -384,16 +387,18 @@ async def test_estimate_returns_wallet_balance_not_booking_sum(db_session):
         db_session, consumer=consumer, provider=provider, platform_commission=20.0
     )
 
-    est = await PayoutService(db_session).estimate_pending_payout(provider.id)
+    est = await PayoutService(db_session).preflight_payout(provider.id)
     assert est["amount_paise"] == 6000  # netted, not 8000
     assert est["booking_count"] == 1  # only the online booking is PENDING
 
 
 @pytest.mark.asyncio
-async def test_estimate_returns_zero_when_provider_owes_platform(db_session):
-    """Wallet ≤ 0 shows amount_paise = 0 (not negative), matching what the
-    UI expects and avoiding a scary-looking negative on the admin screen.
+async def test_preflight_refuses_when_provider_owes_platform(db_session):
+    """Wallet ≤ 0 is refused before queuing, with the owed amount in the
+    message, instead of a 202 "queued ₹0" the task then drops.
     """
+    from app.exceptions import PayoutRefused
+
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await _seed_provider(db_session)
 
@@ -404,5 +409,5 @@ async def test_estimate_returns_zero_when_provider_owes_platform(db_session):
         db_session, consumer=consumer, provider=provider, platform_commission=50.0
     )
 
-    est = await PayoutService(db_session).estimate_pending_payout(provider.id)
-    assert est["amount_paise"] == 0
+    with pytest.raises(PayoutRefused, match="owes platform 4000 paise"):
+        await PayoutService(db_session).preflight_payout(provider.id)

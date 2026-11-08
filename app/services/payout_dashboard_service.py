@@ -32,8 +32,9 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 # A payout attempt whose latest audit row says one of these didn't pay the SP.
 # "unknown" is a lost RazorpayX response: worth showing, since it blocks the next
-# attempt until it is reconciled.
-_FAILED_OUTCOMES = ("failed", "rejected", "reversed", "unknown")
+# attempt until it is reconciled. "refused" is a payout the task turned down
+# before RazorpayX (KYC, no payout details, the cap...); its error says why.
+_FAILED_OUTCOMES = ("failed", "rejected", "reversed", "unknown", "refused")
 
 CSV_COLUMNS = (
     "sp_id",
@@ -144,8 +145,8 @@ class PayoutDashboardService:
                 earned_paise += paise
             entry["earned_count"] = earned_count
             entry["earned_paise"] = earned_paise
-            # max(0, wallet) is exactly estimate_pending_payout's amount_paise, without
-            # its extra count query per row.
+            # max(0, wallet): what the wallet could pay right now. The Pay out button's
+            # preflight sends min(wallet, pending batch), and refuses at wallet <= 0.
             entry["payable_paise"] = max(0, await wallet_balance_paise(self.db, row.id))
             entry["latest_failure_reason"] = reasons.get(row.id)
             providers.append(entry)

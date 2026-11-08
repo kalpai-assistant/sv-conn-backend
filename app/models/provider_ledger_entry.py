@@ -27,7 +27,7 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, String, func
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -62,6 +62,15 @@ class LedgerEntryType(str, enum.Enum):
     # Debit: RazorpayX payout succeeded, provider was paid.
     PAYOUT = "payout"
 
+    # Credit: a PAYOUT debit given back, because its bookings are owed again. Written
+    # when a payout.rejected webhook returns them to PENDING, or when an admin
+    # requeues FAILED/REVERSED ones. Not on payout.failed/reversed themselves: that
+    # would let the next payout pay for those bookings without the requeue an admin
+    # has to choose. References the PAYOUT entry it undoes (``LEDGER_ENTRY``), at most
+    # one per debit (a partial unique index). Not the payout audit: a retried batch
+    # reuses its audit row, so one audit can carry several debits.
+    PAYOUT_RETURNED = "payout_returned"
+
     # Debit: chargeback lost. The provider had already been paid; wallet
     # goes negative until the next credit or the balance is cleared out of
     # band.
@@ -91,6 +100,8 @@ class LedgerReferenceType(str, enum.Enum):
     BOOKING = "booking"
     PAYOUT_AUDIT = "payout_audit"
     PAYMENT = "payment"
+    # Another row of this table: the PAYOUT debit a PAYOUT_RETURNED credit undoes.
+    LEDGER_ENTRY = "ledger_entry"
 
 
 class ProviderLedgerEntry(Base):
@@ -107,6 +118,14 @@ class ProviderLedgerEntry(Base):
         # and the settlement-statement query which reads entries by provider,
         # newest-first. Composite index serves both.
         Index("idx_provider_ledger_provider_created", "provider_id", "created_at"),
+        # One PAYOUT_RETURNED per PAYOUT debit, so a repeated webhook or a second
+        # requeue can't credit the same payout twice. The enum stores member names.
+        Index(
+            "uq_provider_ledger_payout_returned_ref",
+            "reference_id",
+            unique=True,
+            postgresql_where=text("entry_type = 'PAYOUT_RETURNED'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

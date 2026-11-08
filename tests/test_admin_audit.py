@@ -33,6 +33,7 @@ from starlette.requests import Request
 from app.config import get_settings
 from app.database import get_db
 from app.dependencies import get_redis
+from app.exceptions import PayoutRefused
 from app.main import create_app
 from app.models.admin_action import (
     ADMIN_ACTION_TARGET_TYPES,
@@ -323,7 +324,7 @@ async def _payout(db) -> Case:
         target_type="provider",
         target_id=sp.id,
         sp_user_id=sp.id,
-        details={"amount_paise": 0, "booking_count": 0},
+        details={"amount_paise": 16000, "booking_count": 2},
     )
 
 
@@ -455,6 +456,19 @@ def test_every_admin_write_route_has_an_audit_case():
 
 
 @pytest.fixture
+def payable_plan():
+    """The payout preflight, passing with a fixed plan.
+
+    These tests are about the audit row, not the money checks (those live in
+    tests/test_payout_refusals.py). A really payable SP would need owed bookings,
+    and the payout handler commits, so they would leak into other files' tests.
+    """
+    plan = AsyncMock(return_value={"amount_paise": 16000, "booking_count": 2})
+    with patch("app.services.payout_service.PayoutService.preflight_payout", plan):
+        yield plan
+
+
+@pytest.fixture
 def no_broker():
     fake_task = type("T", (), {"id": "task_audit"})()
     with (
@@ -478,7 +492,9 @@ def no_broker():
 
 
 @pytest.mark.parametrize("route", sorted(AUDITED_WRITE_ROUTES))
-async def test_write_route_writes_exactly_one_correct_row(client, db_session, no_broker, route):
+async def test_write_route_writes_exactly_one_correct_row(
+    client, db_session, no_broker, payable_plan, route
+):
     admin = await _admin(db_session)
     case = await AUDITED_WRITE_ROUTES[route](db_session)
 
@@ -546,6 +562,9 @@ async def test_refused_actions_write_no_row(client, db_session, no_broker):
         ("DELETE", f"{V1}/services/{missing}", None, 404),
         # Nothing to requeue.
         ("POST", f"{A}/providers/{pending_sp.id}/payout/requeue-failed", None, None),
+        # Refused by the payout preflight: nothing payable, and no provider at all.
+        ("POST", f"{A}/providers/{pending_sp.id}/payout", None, 402),
+        ("POST", f"{A}/providers/{missing}/payout", None, 404),
     ]
     for method, url, body, expected in refused:
         kwargs = {"json": body} if body is not None else {}
@@ -655,7 +674,9 @@ async def test_a_committed_action_keeps_its_row_under_the_real_session(real_tx_c
 # ---------------------------------------------------------------------------
 
 
-async def test_payout_row_is_committed_before_the_task_is_enqueued(client, db_session):
+async def test_payout_row_is_committed_before_the_task_is_enqueued(
+    client, db_session, payable_plan
+):
     admin = await _admin(db_session)
     sp = await _eligible_provider(db_session, await _service(db_session))
     await db_session.commit()
@@ -688,7 +709,7 @@ async def test_payout_row_is_committed_before_the_task_is_enqueued(client, db_se
     assert [tuple(row) for row in seen[0]] == [("payout.enqueue",)]
 
 
-async def test_a_failed_enqueue_keeps_the_row(real_tx_client, db_session):
+async def test_a_failed_enqueue_keeps_the_row(real_tx_client, db_session, payable_plan):
     admin = await _admin(db_session)
     sp = await _eligible_provider(db_session, await _service(db_session))
     await db_session.commit()
@@ -704,39 +725,42 @@ async def test_a_failed_enqueue_keeps_the_row(real_tx_client, db_session):
     assert (row.action, row.target_id) == ("payout.enqueue", str(sp.id))
 
 
-async def test_payout_details_carry_the_amount_and_booking_count(client, db_session, no_broker):
+async def test_payout_details_carry_the_amount_and_booking_count(
+    client, db_session, no_broker, payable_plan
+):
     admin = await _admin(db_session)
     sp = await _eligible_provider(db_session, await _service(db_session))
-    estimate = AsyncMock(return_value={"amount_paise": 16000, "booking_count": 2})
-    with patch("app.services.payout_service.PayoutService.estimate_pending_payout", estimate):
-        r = await client.post(f"{A}/providers/{sp.id}/payout", headers=_headers(admin))
+    r = await client.post(f"{A}/providers/{sp.id}/payout", headers=_headers(admin))
     assert r.status_code == 202, r.text
     [row] = await _rows(db_session, admin_user_id=admin.id)
     assert row.details == {"amount_paise": 16000, "booking_count": 2}
+    payable_plan.assert_awaited_once_with(sp.id)
 
 
 async def test_a_refused_batch_writes_no_row_and_enqueues_nothing(client, db_session, no_broker):
     admin = await _admin(db_session)
     sp = await _eligible_provider(db_session, await _service(db_session))
-    over_cap = get_settings().PAYOUT_MAX_BATCH_PAISE + 1
-    estimate = AsyncMock(return_value={"amount_paise": over_cap, "booking_count": 1})
-    with patch("app.services.payout_service.PayoutService.estimate_pending_payout", estimate):
+    over_cap = PayoutRefused("Payout batch of 1 paise exceeds cap of 0 paise")
+    with patch(
+        "app.services.payout_service.PayoutService.preflight_payout",
+        AsyncMock(side_effect=over_cap),
+    ):
         r = await client.post(f"{A}/providers/{sp.id}/payout", headers=_headers(admin))
-    assert r.status_code >= 400
+    assert r.status_code == 402, r.text
     assert await _rows(db_session, admin_user_id=admin.id) == []
     no_broker.assert_not_called()
 
 
-async def test_payout_for_an_unknown_id_is_still_202_with_no_owner_on_the_row(
-    client, db_session, no_broker
-):
-    """sp_user_id has an FK to users, so an unknown id there would be a 500."""
+async def test_payout_for_an_unknown_id_is_a_404_with_no_row(client, db_session, no_broker):
+    """The preflight 404s an id with no provider profile, before the row: it used
+    to be a 202 with a NULL sp_user_id (an FK to users) and a task that paid
+    nothing."""
     admin = await _admin(db_session)
     unknown = uuid.uuid4()
     r = await client.post(f"{A}/providers/{unknown}/payout", headers=_headers(admin))
-    assert r.status_code == 202, r.text
-    [row] = await _rows(db_session, admin_user_id=admin.id)
-    assert (row.target_id, row.sp_user_id) == (str(unknown), None)
+    assert r.status_code == 404, r.text
+    assert await _rows(db_session, admin_user_id=admin.id) == []
+    no_broker.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
