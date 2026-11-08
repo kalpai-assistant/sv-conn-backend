@@ -9,6 +9,7 @@ service pays the provider their share afterwards.
 
 import hashlib
 import logging
+from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID
 
@@ -17,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import AsyncSessionLocal
-from app.exceptions import PaymentError, UserNotFound
+from app.exceptions import PaymentError, PayoutRefused, UserNotFound
 from app.models.booking import (
     Booking,
     BookingStatus,
@@ -43,6 +44,18 @@ _RECONCILE_MAP = {
     "failed": SettlementStatus.FAILED,
     "reversed": SettlementStatus.REVERSED,
 }
+
+
+@dataclass
+class _Payable:
+    """What ``_check_payable`` found: the batch, where it goes, and how much."""
+
+    profile: ProviderProfile
+    vpa: str | None
+    account_number: str | None
+    ifsc: str | None
+    bookings: list[Booking]
+    amount_paise: int
 
 
 class PayoutService:
@@ -392,42 +405,130 @@ class PayoutService:
             "per_page": per_page,
         }
 
-    async def estimate_pending_payout(self, provider_id: UUID) -> dict:
-        """Booking count + net payable for a single provider's PENDING bookings.
+    async def preflight_payout(self, provider_id: UUID) -> dict:
+        """Refuse a payout the task would refuse, before the admin route queues it.
 
-        SVC-188 (G30): the admin endpoint returns 202 with this estimate so
-        the UI can show "queued ₹X for N bookings" immediately. Deliberately
-        does not take ``FOR UPDATE``: the authoritative lock lives inside
-        ``_pending_settlements`` (called from ``create_provider_payout`` in
-        the task). Cheap enough to run on the request path even under
-        contention.
-
-        SVC-180: ``amount_paise`` is now the **net** amount — the wallet
-        balance (positive part), which auto-nets cash commission +
-        adjustments against the booking-sum credits. Shown as 0 when the
-        provider actually owes the platform more than they've earned; the
-        admin sees the accurate wire-amount rather than the pre-netting
-        booking sum.
+        Read-only and lock-free: ``_check_payable`` with ``lock=False``, the same
+        checks and messages ``create_provider_payout`` runs under the row lock, so
+        the two can't drift. Before this the route checked only the batch cap,
+        returned 202 "queued", and the task's refusal was rolled back with no audit
+        row: the admin saw "queued" and nothing happened. Raises ``PayoutRefused``
+        (402); returns the amount and booking count the task will pay.
         """
-        result = await self.db.execute(
-            select(func.count(Booking.id)).where(
-                Booking.provider_id == provider_id, *self._owed_filter()
-            )
-        )
-        booking_count = result.scalar_one() or 0
+        payable = await self._check_payable(provider_id, lock=False)
+        return {
+            "amount_paise": payable.amount_paise,
+            "booking_count": len(payable.bookings),
+        }
 
-        # Wallet balance is the source of truth post-SVC-180; the booking
-        # sum was only a proxy before the ledger existed. Show max(0, wallet)
-        # so a negative wallet doesn't render as a scary negative amount on
-        # the admin screen — it means "no payout this cycle" and the task
-        # will surface the exact owed number via PaymentError.
+    async def _check_payable(self, provider_id: UUID, *, lock: bool) -> _Payable:
+        """Every reason to refuse a payout, in one place. Raises ``PayoutRefused``.
+
+        ``lock=True`` (the task) selects the batch ``FOR UPDATE SKIP LOCKED``, so a
+        second concurrent payout finds nothing pending. ``lock=False`` (the route)
+        takes no locks and writes nothing.
+        """
+        profile = await self._get_provider_profile(provider_id)
+
+        # SVC-189 (G16): re-check KYC at payout time even though the write
+        # path is gated. Two independent gates because the two events happen
+        # in different sessions (a provider whose KYC is REJECTED after their
+        # payout details were saved would otherwise still be payable), and
+        # because the payout call is the last chance to catch a pre-existing
+        # profile that predates the write-side gate. Distinct error from the
+        # "no payout details" 402 so the admin knows exactly which fix
+        # unblocks the payout.
+        if profile.kyc_status is not KYCStatus.VERIFIED:
+            raise PayoutRefused(
+                "Provider KYC is not verified — cannot pay out. "
+                f"Current KYC status: {profile.kyc_status.value}."
+            )
+
+        vpa, account_number, ifsc = self._decrypt_payout_details(profile)
+
+        bookings = await self._pending_settlements(provider_id, lock=lock)
+        if not bookings:
+            raise PayoutRefused("No pending settlements for this provider")
+        count = len(bookings)
+
+        # SVC-172 (G28): refuse a new attempt while a previous one is unresolved.
+        # Before this, a payout that RazorpayX accepted but whose response was
+        # lost (timeout / transport error) resolved the audit to "failed" and
+        # left the bookings PENDING. Days later — after another booking B3
+        # completes — the retry saw a *different* batch, derived a different
+        # idempotency key, and RazorpayX created a second payout: B1/B2 got
+        # paid twice. The refuse-on-open-attempt gate closes that door, and the
+        # exception path in create_provider_payout records "unknown" so
+        # reconciliation (or an admin) can resolve against RazorpayX first.
+        open_attempt = await self._find_open_attempt(provider_id)
+        if open_attempt is not None:
+            raise PayoutRefused(
+                "Previous payout attempt is unresolved (audit "
+                f"{open_attempt.id}, reference_id={open_attempt.reference_id}). "
+                "Reconcile against RazorpayX before triggering another payout.",
+                booking_count=count,
+            )
+
+        # Decimal throughout: the columns are Numeric, so this sum is exact and
+        # to_paise rounds half up instead of dropping a paisa (SVC-150).
+        # ``_owed_amount`` folds in tip_amount too (SVC-39 G23).
+        total_rupees = sum((self._owed_amount(b) for b in bookings), Decimal("0"))
+        booking_sum_paise = to_paise(total_rupees)
+
+        # SVC-180 (§11 Q5): auto-net cash commission against the payout.
+        # Wallet balance is the source of truth for "what do we actually
+        # owe this provider right now" — booking-sum credits already
+        # landed in the wallet, cash-commission debits from `process_cash_payment`
+        # are also there, so the wallet reflects the net.
         from app.services.ledger_service import wallet_balance_paise
 
         wallet = await wallet_balance_paise(self.db, provider_id)
-        return {
-            "booking_count": booking_count,
-            "amount_paise": max(0, wallet),
-        }
+
+        if wallet <= 0:
+            # No money to pay out. The bookings stay PENDING and roll into the
+            # next cycle once the wallet goes positive again.
+            #
+            # No settlement statement: this branch used to build one and claim it
+            # in the message, but the refusal rolled it back every time, so none
+            # was ever saved. Saving one would do harm: the next real statement
+            # windows from the newest statement, so a zero-pay one in between
+            # would hide that period's cash commission from it.
+            raise PayoutRefused(
+                f"No payout: provider owes platform {-wallet} paise "
+                "(cash commission > online earnings this cycle).",
+                booking_count=count,
+            )
+
+        # net_paise for the RazorpayX call: whichever is smaller between the
+        # wallet balance and the current booking sum. In practice the wallet
+        # will typically equal booking_sum − cash_commission, so this is
+        # `wallet`. Capping at booking_sum defends against paying more than
+        # the current-cycle credits cover (a historical over-credit shouldn't
+        # be paid out in one big chunk against a small current batch).
+        amount_paise = min(wallet, booking_sum_paise)
+
+        # SVC-191 (G18 half): hard cap on the batch amount. Distinct message
+        # names both the cap and the batch so an admin can act — either wait
+        # for natural drain, split manually via requeue-then-pay, or ask ops to
+        # lift the cap.
+        if amount_paise > settings.PAYOUT_MAX_BATCH_PAISE:
+            raise PayoutRefused(
+                f"Payout batch of {amount_paise} paise exceeds cap of "
+                f"{settings.PAYOUT_MAX_BATCH_PAISE} paise "
+                "(PAYOUT_MAX_BATCH_PAISE). Wait for the backlog to drain or "
+                "ask ops to lift the cap.",
+                amount_paise=amount_paise,
+                booking_count=count,
+            )
+
+        return _Payable(
+            profile=profile,
+            vpa=vpa,
+            account_number=account_number,
+            ifsc=ifsc,
+            bookings=bookings,
+            amount_paise=amount_paise,
+        )
 
     async def create_provider_payout(self, provider_id: UUID, admin_user_id: UUID) -> dict:
         """
@@ -449,116 +550,33 @@ class PayoutService:
         RazorpayX call and resolved to the final outcome, so a crash mid-flight still
         leaves a locatable record for reconciliation.
         """
-        profile = await self._get_provider_profile(provider_id)
-
-        # SVC-189 (G16): re-check KYC at payout time even though the write
-        # path is gated. Two independent gates because the two events happen
-        # in different sessions (a provider whose KYC is REJECTED after their
-        # payout details were saved would otherwise still be payable), and
-        # because the payout call is the last chance to catch a pre-existing
-        # profile that predates the write-side gate. Distinct error from the
-        # "no payout details" 402 so the admin knows exactly which fix
-        # unblocks the payout.
-        if profile.kyc_status is not KYCStatus.VERIFIED:
-            raise PaymentError(
-                "Provider KYC is not verified — cannot pay out. "
-                f"Current KYC status: {profile.kyc_status.value}."
+        try:
+            payable = await self._check_payable(provider_id, lock=True)
+        except PayoutRefused as exc:
+            # The route ran the same checks before queuing, so reaching here means
+            # something changed in between: a second click whose batch the first
+            # one has locked, a booking settled, KYC revoked. Without this row the
+            # admin saw "queued" and then nothing at all.
+            logger.warning(
+                "payout.refused admin=%s provider=%s error=%s",
+                admin_user_id,
+                provider_id,
+                exc.message,
             )
-
-        vpa, account_number, ifsc = self._decrypt_payout_details(profile)
-
-        bookings = await self._pending_settlements(provider_id)
-        if not bookings:
-            raise PaymentError("No pending settlements for this provider")
-
-        # SVC-172 (G28): refuse a new attempt while a previous one is unresolved.
-        # Before this, a payout that RazorpayX accepted but whose response was
-        # lost (timeout / transport error) resolved the audit to "failed" and
-        # left the bookings PENDING. Days later — after another booking B3
-        # completes — the retry saw a *different* batch, derived a different
-        # idempotency key, and RazorpayX created a second payout: B1/B2 got
-        # paid twice. The refuse-on-open-attempt gate closes that door, and the
-        # exception path below now records "unknown" so reconciliation (or an
-        # admin) can resolve against RazorpayX before another attempt fires.
-        open_attempt = await self._find_open_attempt(provider_id)
-        if open_attempt is not None:
-            raise PaymentError(
-                "Previous payout attempt is unresolved (audit "
-                f"{open_attempt.id}, reference_id={open_attempt.reference_id}). "
-                "Reconcile against RazorpayX before triggering another payout."
-            )
-
-        # Decimal throughout: the columns are Numeric, so this sum is exact and
-        # to_paise rounds half up instead of dropping a paisa (SVC-150).
-        # ``_owed_amount`` folds in tip_amount too (SVC-39 G23).
-        total_rupees = sum((self._owed_amount(b) for b in bookings), Decimal("0"))
-        booking_sum_paise = to_paise(total_rupees)
-
-        # SVC-180 (§11 Q5): auto-net cash commission against the payout.
-        # Wallet balance is the source of truth for "what do we actually
-        # owe this provider right now" — booking-sum credits already
-        # landed in the wallet, cash-commission debits from `process_cash_payment`
-        # are also there, so the wallet reflects the net.
-        #
-        # Two cases:
-        # - wallet > 0: pay the wallet (may be less than booking sum if
-        #   cash commission has accumulated). Statement records the split.
-        # - wallet <= 0: provider owes the platform more than they've
-        #   earned. No RazorpayX call; still generate a statement so the
-        #   provider gets a continuous artifact stream + knows what they
-        #   owe.
-        from app.services.ledger_service import wallet_balance_paise
-
-        wallet = await wallet_balance_paise(self.db, provider_id)
-
-        if wallet <= 0:
-            # No money to pay out. Generate the "invoice" statement so the
-            # provider sees the deducted commission and any leftover
-            # balance owed. Does NOT mark bookings PROCESSING — they stay
-            # PENDING and will roll into the next cycle when the wallet
-            # goes positive again.
-            statement = await self._generate_settlement_statement(
-                provider_id=provider_id,
-                payout_audit_id=None,
-                net_paid_paise=0,
-                platform_balance_owed_paise=-wallet,
-            )
-            raise PaymentError(
-                f"No payout: provider owes platform {-wallet} paise "
-                f"(cash commission > online earnings this cycle). "
-                f"Settlement statement {statement.id} generated."
-            )
-
-        # net_paise for the RazorpayX call: whichever is smaller between the
-        # wallet balance and the current booking sum. In practice the wallet
-        # will typically equal booking_sum − cash_commission, so this is
-        # `wallet`. Capping at booking_sum defends against paying more than
-        # the current-cycle credits cover (a historical over-credit shouldn't
-        # be paid out in one big chunk against a small current batch).
-        amount_paise = min(wallet, booking_sum_paise)
-
-        # SVC-191 (G18 half): hard cap on the batch amount. The endpoint
-        # already refuses before enqueuing (see admin router); this is the
-        # defence-in-depth check for a caller that bypasses the endpoint
-        # (tests, a future queued-elsewhere entry point, or a bug in the
-        # endpoint gate). Distinct message names both the cap and the batch
-        # so an admin can act — either wait for natural drain, split
-        # manually via requeue-then-pay, or ask ops to lift the cap.
-        if amount_paise > settings.PAYOUT_MAX_BATCH_PAISE:
-            raise PaymentError(
-                f"Payout batch of {amount_paise} paise exceeds cap of "
-                f"{settings.PAYOUT_MAX_BATCH_PAISE} paise "
-                "(PAYOUT_MAX_BATCH_PAISE). Wait for the backlog to drain or "
-                "ask ops to lift the cap."
-            )
+            await self._record_refused_audit(admin_user_id, provider_id, exc)
+            raise
+        profile = payable.profile
+        bookings = payable.bookings
+        amount_paise = payable.amount_paise
+        vpa, account_number, ifsc = payable.vpa, payable.account_number, payable.ifsc
 
         # Key derived from the exact batch (sorted booking ids), so the same batch
         # always produces the same key. If create_payout succeeds but the DB write
         # below fails, retrying this batch reuses the key and RazorpayX returns the
         # existing payout rather than creating a duplicate. The same key is also sent
         # as the RazorpayX reference_id so reconciliation can map a payout back to its
-        # exact batch. The batch-key-change race is closed at the audit gate above,
-        # not here — see SVC-172.
+        # exact batch. The batch-key-change race is closed at the audit gate in
+        # ``_check_payable``, not here — see SVC-172.
         idempotency_key = self._batch_idempotency_key(bookings)
 
         logger.info(
@@ -727,9 +745,17 @@ class PayoutService:
         if not stuck:
             raise PaymentError(f"No {from_status.value} settlements to re-queue for this provider")
 
+        # Read before the loop clears them: each payout these bookings came back
+        # from gets its debit credited back, once. Not done on the failed/reversed
+        # webhook itself, so this admin requeue stays the only way those bookings
+        # become payable again.
+        returned_payout_ids = {b.settlement_payout_id for b in stuck if b.settlement_payout_id}
         for booking in stuck:
             booking.settlement_status = SettlementStatus.PENDING
             booking.settlement_payout_id = None
+        from app.services.ledger_service import credit_payout_returned
+
+        await credit_payout_returned(self.db, returned_payout_ids)
 
         amount_paise = to_paise(sum((self._owed_amount(b) for b in stuck), Decimal("0")))
         self.db.add(
@@ -838,6 +864,13 @@ class PayoutService:
                 booking.settlement_payout_id = None
                 booking.settlement_failure_reason = reason
             await self.db.flush()
+            # The bookings are owed again, so the payout's debit goes back on the
+            # wallet; otherwise the next payout sends min(wallet, batch) short.
+            # Keyed on the event's payout id, so it doesn't need the cleared
+            # link, and a redelivery is a no-op (one credit per debit).
+            from app.services.ledger_service import credit_payout_returned
+
+            await credit_payout_returned(self.db, [payout_id])
             logger.info(
                 "payout.webhook event=rejected payout_id=%s returned_to_pending=%s reason=%s",
                 payout_id,
@@ -1008,9 +1041,9 @@ class PayoutService:
         into positive columns (a -₹20 CASH_COMMISSION debit is stored as
         ``cash_commission_deducted_paise = 20`` on the statement).
 
-        ``payout_audit_id`` is None on the no-payout branch (wallet ≤ 0)
-        — statement is still generated so the provider keeps a continuous
-        artifact stream and knows what they owe.
+        Only called for a payout RazorpayX accepted. The wallet ≤ 0 refusal
+        writes none (see ``_check_payable``), so ``payout_audit_id`` is always
+        set in practice.
         """
         from app.services.ledger_service import statement_window_sum_paise
 
@@ -1141,6 +1174,42 @@ class PayoutService:
             session.add(audit)
             await session.commit()
             return audit.id
+
+    @staticmethod
+    async def _record_refused_audit(
+        admin_user_id: UUID, provider_id: UUID, exc: PayoutRefused
+    ) -> None:
+        """Write a ``refused`` audit row in its own committed transaction.
+
+        The task rolls its session back on the refusal, so the row needs its own
+        session to survive, like the attempting/resolve writers. ``reference_id`` and
+        ``payout_id`` stay NULL: nothing was sent, and a NULL reference can never
+        be matched by reconciliation or reused by ``_record_attempting_audit``.
+        ``refused`` isn't an open attempt, so it never blocks the next payout.
+        A failed write is logged, never raised: the refusal is the error to report.
+        """
+        try:
+            async with AsyncSessionLocal() as session:
+                session.add(
+                    PayoutAudit(
+                        admin_user_id=admin_user_id,
+                        provider_id=provider_id,
+                        source="admin",
+                        amount_paise=exc.amount_paise,
+                        booking_count=exc.booking_count,
+                        reference_id=None,
+                        payout_id=None,
+                        outcome="refused",
+                        error=exc.message[:500],
+                    )
+                )
+                await session.commit()
+        except Exception:
+            logger.exception(
+                "payout.refused_audit_write_failed admin=%s provider=%s",
+                admin_user_id,
+                provider_id,
+            )
 
     @staticmethod
     async def _resolve_audit(
@@ -1361,6 +1430,8 @@ class PayoutService:
         # Resolve the breadcrumb so a later run doesn't reprocess it.
         audit.outcome = target.value
         audit.payout_id = payout_id
+        if target is SettlementStatus.COMPLETED:
+            await self._debit_orphan_payout(audit, payout)
         self._add_reconciliation_audit(
             provider_id=audit.provider_id,
             payout=payout,
@@ -1376,6 +1447,52 @@ class PayoutService:
             payout_id,
         )
         return len(pending)
+
+    async def _debit_orphan_payout(self, audit: PayoutAudit, payout: dict) -> None:
+        """Write the PAYOUT debit an orphaned, completed payout never got.
+
+        An orphan is a payout RazorpayX accepted while our create path raised: the
+        debit rolled back with that transaction and the audit ended ``unknown``.
+        Re-linking it as COMPLETED without a debit left the wallet overstated for
+        good, so later cash commission and dispute losses were absorbed by the
+        surplus instead of reducing payouts. (Not a double pay: each payout is
+        capped at its batch sum.) A FAILED or REVERSED orphan sent nothing net, so
+        it gets no debit, and its later requeue then credits nothing back.
+
+        Runs once per orphan, because the re-link only matches bookings still
+        PENDING under ``FOR UPDATE``. A second guard skips it when this audit already
+        has a live debit, meaning one no PAYOUT_RETURNED has undone: a retried batch
+        reuses its audit, so an earlier attempt's credited-back debit doesn't count.
+        """
+        from sqlalchemy.orm import aliased
+
+        from app.models.provider_ledger_entry import ProviderLedgerEntry
+        from app.services.ledger_service import debit_payout
+
+        returned = aliased(ProviderLedgerEntry)
+        live = await self.db.scalar(
+            select(ProviderLedgerEntry.id).where(
+                ProviderLedgerEntry.entry_type == LedgerEntryType.PAYOUT,
+                ProviderLedgerEntry.reference_id == audit.id,
+                ~select(returned.id)
+                .where(
+                    returned.entry_type == LedgerEntryType.PAYOUT_RETURNED,
+                    returned.reference_id == ProviderLedgerEntry.id,
+                )
+                .exists(),
+            )
+        )
+        if live is not None:
+            return
+        # The orphan check already required RazorpayX's amount to equal the audit's.
+        amount = payout.get("amount") or audit.amount_paise
+        await debit_payout(
+            self.db,
+            provider_id=audit.provider_id,
+            payout_audit_id=audit.id,
+            amount_paise=amount,
+            note=f"payout {payout.get('id')} (reconciled orphan)",
+        )
 
     def _add_reconciliation_audit(
         self, *, provider_id: UUID, payout: dict, target: SettlementStatus, count: int
@@ -1421,7 +1538,7 @@ class PayoutService:
         if profile.payout_method is PayoutMethod.UPI:
             vpa = decrypt(profile.payout_vpa_encrypted) if profile.payout_vpa_encrypted else None
             if not vpa:
-                raise PaymentError("Provider has no payout details on file")
+                raise PayoutRefused("Provider has no payout details on file")
             return vpa, None, None
 
         if profile.payout_method is PayoutMethod.BANK:
@@ -1432,10 +1549,10 @@ class PayoutService:
             )
             ifsc = decrypt(profile.payout_ifsc_encrypted) if profile.payout_ifsc_encrypted else None
             if not (account_number and ifsc):
-                raise PaymentError("Provider has no payout details on file")
+                raise PayoutRefused("Provider has no payout details on file")
             return None, account_number, ifsc
 
-        raise PaymentError("Provider has no payout details on file")
+        raise PayoutRefused("Provider has no payout details on file")
 
     @staticmethod
     def _owed_amount(booking: Booking) -> Decimal:
@@ -1501,15 +1618,15 @@ class PayoutService:
             Booking.payment_method != PaymentMethod.CASH,
         )
 
-    async def _pending_settlements(self, provider_id: UUID) -> list[Booking]:
+    async def _pending_settlements(self, provider_id: UUID, *, lock: bool = True) -> list[Booking]:
         # Lock the selected rows for the duration of the transaction so two
         # concurrent payouts for the same provider can't both read the same
         # PENDING bookings and issue divergent batches (→ two payouts, double-pay).
         # skip_locked: a second concurrent click doesn't block — it skips the
         # locked rows, finds nothing PENDING, and raises "No pending settlements".
-        result = await self.db.execute(
-            select(Booking)
-            .where(Booking.provider_id == provider_id, *self._owed_filter())
-            .with_for_update(skip_locked=True)
-        )
+        # ``lock=False`` is the route's preflight, which must not hold locks.
+        stmt = select(Booking).where(Booking.provider_id == provider_id, *self._owed_filter())
+        if lock:
+            stmt = stmt.with_for_update(skip_locked=True)
+        result = await self.db.execute(stmt)
         return list(result.scalars().all())

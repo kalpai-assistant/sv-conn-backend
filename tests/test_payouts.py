@@ -87,6 +87,7 @@ def stub_payout_audit_io():
             "_resolve_audit",
             new_callable=AsyncMock,
         ) as res,
+        patch.object(PayoutService, "_record_refused_audit", new_callable=AsyncMock),
     ):
         yield rec, res, fake_audit_id
 
@@ -3106,11 +3107,11 @@ async def test_payout_history_endpoint_rejects_non_admin(client, db_session, aut
 
 
 @pytest.mark.asyncio
-async def test_estimate_pending_payout_returns_batch_summary(db_session):
-    """`estimate_pending_payout` sums PENDING bookings + tip without a row lock.
+async def test_preflight_payout_returns_batch_summary(db_session):
+    """`preflight_payout` sums PENDING bookings + tip without a row lock.
 
     Powers the 202 response body — must agree with what the payout task
-    ultimately charges (same _owed_filter, same rupees→paise conversion).
+    ultimately charges (same _check_payable, same rupees→paise conversion).
     """
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
@@ -3126,7 +3127,7 @@ async def test_estimate_pending_payout_returns_batch_summary(db_session):
         tip_amount=_Decimal("5.00"),
     )
 
-    est = await PayoutService(db_session).estimate_pending_payout(provider.id)
+    est = await PayoutService(db_session).preflight_payout(provider.id)
 
     assert est["booking_count"] == 2
     # (80 + 80 + 5) * 100 — matches the batch total create_provider_payout would send.
@@ -3134,18 +3135,20 @@ async def test_estimate_pending_payout_returns_batch_summary(db_session):
 
 
 @pytest.mark.asyncio
-async def test_estimate_pending_payout_empty_provider(db_session):
-    """A provider with nothing pending returns zero — not None, not an error."""
+async def test_preflight_payout_refuses_empty_provider(db_session):
+    """Nothing pending is a refusal up front, not a 202 the task then drops."""
+    from app.exceptions import PayoutRefused
+
     provider = await UserFactory.create(db_session, role="provider")
+    await _provider_with_payout_vpa(db_session, provider)
 
-    est = await PayoutService(db_session).estimate_pending_payout(provider.id)
-
-    assert est == {"booking_count": 0, "amount_paise": 0}
+    with pytest.raises(PayoutRefused, match="No pending settlements"):
+        await PayoutService(db_session).preflight_payout(provider.id)
 
 
 @pytest.mark.asyncio
 async def test_admin_payout_endpoint_returns_202_and_enqueues_task(
-    client, db_session, auth_headers
+    client, db_session, auth_headers, monkeypatch
 ):
     """POST /admin/providers/{id}/payout enqueues the payout task and returns 202.
 
@@ -3153,6 +3156,9 @@ async def test_admin_payout_endpoint_returns_202_and_enqueues_task(
     the response body carries the queued estimate + Celery task id, and the
     actual money movement happens in the worker.
     """
+    # The route commits its admin_actions row before queuing (SVC-423); a real
+    # commit would leave these owed bookings behind for later tests.
+    monkeypatch.setattr(db_session, "commit", db_session.flush)
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     admin = await UserFactory.create(db_session, role="admin")
@@ -3185,19 +3191,19 @@ async def test_admin_payout_endpoint_returns_202_and_enqueues_task(
 
 
 @pytest.mark.asyncio
-async def test_admin_payout_endpoint_still_enqueues_when_estimate_is_empty(
+async def test_admin_payout_endpoint_refuses_when_nothing_is_pending(
     client, db_session, auth_headers
 ):
-    """Endpoint returns 202 even for zero pending — matches the existing behaviour
-    that the task itself raises "No pending settlements" (surfaced via reconcile
-    / the audit trail), not the request.
+    """Zero pending is a 402 at the route and nothing is queued.
 
-    Rejecting on empty here would be defensible, but would also mean the endpoint
-    has to lock or re-read the same rows the task will read — which is exactly
-    the coupling this ticket exists to break.
+    This used to be a 202 "queued ₹0": the task then raised "No pending
+    settlements", rolled back, and left no trace anywhere. The route's preflight
+    reads without locks, so refusing here doesn't couple the request to the
+    task's row lock (the SVC-188 concern).
     """
     provider = await UserFactory.create(db_session, role="provider")
     admin = await UserFactory.create(db_session, role="admin")
+    await _provider_with_payout_vpa(db_session, provider)
     await db_session.flush()
 
     headers = auth_headers(str(admin.id), "admin")
@@ -3205,13 +3211,12 @@ async def test_admin_payout_endpoint_still_enqueues_when_estimate_is_empty(
     with patch(
         "app.tasks.payment_tasks.execute_provider_payout.delay",
         return_value=fake_task,
-    ):
+    ) as mock_delay:
         resp = await client.post(f"/api/v1/admin/providers/{provider.id}/payout", headers=headers)
 
-    assert resp.status_code == 202
-    body = resp.json()
-    assert body["amount_paise"] == 0
-    assert body["booking_count"] == 0
+    assert resp.status_code == 402, resp.text
+    assert "No pending settlements" in resp.json()["message"]
+    mock_delay.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -3379,7 +3384,7 @@ async def test_create_provider_payout_at_cap_succeeds(db_session, monkeypatch):
 async def test_admin_payout_endpoint_refuses_over_cap_before_enqueue(
     client, db_session, auth_headers, monkeypatch
 ):
-    """Endpoint returns 402 (PaymentError) when the estimate exceeds the cap
+    """Endpoint returns 402 (PaymentError) when the batch exceeds the cap
     and does NOT enqueue the task. Immediate feedback beats delayed
     audit-only failure the admin only finds later.
     """
@@ -3394,12 +3399,12 @@ async def test_admin_payout_endpoint_refuses_over_cap_before_enqueue(
     await _booking_for(db_session, consumer, provider, provider_payout=2000.0)
     await db_session.flush()
 
-    # The endpoint reads settings via ``get_settings()`` inline; monkeypatching
-    # the router's imported module is a no-op. Patch the settings object the
-    # freshly-imported get_settings will return.
-    from app.config import get_settings
+    # The endpoint's preflight reads the cap from the payout service's module
+    # settings. Patch that object: a test elsewhere clears the get_settings
+    # cache, so get_settings() may hand back a different one.
+    from app.services import payout_service as payout_service_module
 
-    monkeypatch.setattr(get_settings(), "PAYOUT_MAX_BATCH_PAISE", 100_000)  # ₹1000
+    monkeypatch.setattr(payout_service_module.settings, "PAYOUT_MAX_BATCH_PAISE", 100_000)
 
     headers = auth_headers(str(admin.id), "admin")
 

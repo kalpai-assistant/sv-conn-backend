@@ -10,7 +10,7 @@ import io
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import and_, select
 
@@ -32,7 +32,7 @@ from app.models.provider_ledger_entry import (
 )
 from app.models.provider_profile import KYCStatus, PayoutMethod, ProviderProfile
 from app.models.user import AdminRole
-from app.services.ledger_service import credit_booking_completed
+from app.services.ledger_service import credit_booking_completed, wallet_balance_paise
 from app.services.payout_dashboard_service import CSV_COLUMNS
 from app.services.payout_service import PayoutService
 from app.utils.encryption import encrypt
@@ -235,14 +235,15 @@ async def test_pending_matches_pending_settlements_and_payable_matches_estimate(
     row = _mine(await _all_rows(client, headers), sp)[str(sp.id)]
     r = await client.get(f"{A}/providers/pending-settlements", headers=headers)
     [legacy] = [p for p in r.json()["providers"] if p["provider_id"] == str(sp.id)]
-    estimate = await PayoutService(db_session).estimate_pending_payout(sp.id)
+    wallet = await wallet_balance_paise(db_session, sp.id)
 
     assert (row["pending_count"], row["pending_paise"]) == (
         legacy["pending_booking_count"],
         legacy["pending_payout_paise"],
     )
-    assert row["pending_count"] == estimate["booking_count"]
-    assert row["payable_paise"] == estimate["amount_paise"] == 40000 + 27025 - 2000
+    # payable is max(0, wallet): the SP has no payout method, so the Pay out
+    # preflight would refuse, but the dashboard still shows what is owed.
+    assert row["payable_paise"] == max(0, wallet) == 40000 + 27025 - 2000
     assert row["pending_paise"] == 67025
     assert row["payout_set"] is False
 
@@ -303,6 +304,9 @@ async def test_failure_reason_falls_back_to_a_failed_latest_attempt(
     # A failed attempt, then a later good one: nothing shows.
     fixed = await _sp(db_session)
     await _job(db_session, fixed)
+    # A payout the task refused before RazorpayX: its reason shows too.
+    refused = await _sp(db_session)
+    await _job(db_session, refused)
     # A failed booking beats a newer failed attempt.
     both = await _sp(db_session)
     await _job(
@@ -314,6 +318,8 @@ async def test_failure_reason_falls_back_to_a_failed_latest_attempt(
         (fixed, "failed", "Old error", BASE),
         (fixed, "processed", None, BASE + timedelta(hours=1)),
         (both, "failed", "Attempt error", BASE + timedelta(days=1)),
+        (refused, "processed", None, BASE),
+        (refused, "refused", "Provider has no payout details on file", BASE + timedelta(hours=1)),
     ):
         db_session.add(
             PayoutAudit(
@@ -327,10 +333,13 @@ async def test_failure_reason_falls_back_to_a_failed_latest_attempt(
         )
     await db_session.flush()
 
-    mine = _mine(await _all_rows(client, headers), kyc_hold, fixed, both)
+    mine = _mine(await _all_rows(client, headers), kyc_hold, fixed, both, refused)
     assert mine[str(kyc_hold.id)]["latest_failure_reason"] == "Provider KYC is not verified"
     assert mine[str(fixed.id)]["latest_failure_reason"] is None
     assert mine[str(both.id)]["latest_failure_reason"] == "Beneficiary bank offline"
+    assert (
+        mine[str(refused.id)]["latest_failure_reason"] == "Provider has no payout details on file"
+    )
 
 
 # --- GET /admin/providers/{id}/payout-bookings ------------------------------------
@@ -515,13 +524,18 @@ async def test_csv_range_validation(client, db_session, auth_headers):
 async def test_ops_trigger_writes_payout_enqueue_with_ops_as_actor(client, db_session):
     ops = await _admin(db_session, AdminRole.OPS)
     # No bookings: the handler commits, and a committed owed booking would show up in
-    # other files' pending-settlements tests. An empty batch is still a 202 + a row.
+    # other files' pending-settlements tests. So the preflight is stubbed to pass;
+    # the money checks themselves are in tests/test_payout_refusals.py.
     sp = await _sp(db_session)
 
     fake_task = type("T", (), {"id": "task_ops"})()
-    with patch(
-        "app.tasks.payment_tasks.execute_provider_payout.delay", return_value=fake_task
-    ) as delay:
+    plan = AsyncMock(return_value={"amount_paise": 0, "booking_count": 0})
+    with (
+        patch("app.services.payout_service.PayoutService.preflight_payout", plan),
+        patch(
+            "app.tasks.payment_tasks.execute_provider_payout.delay", return_value=fake_task
+        ) as delay,
+    ):
         r = await client.post(f"{A}/providers/{sp.id}/payout", headers=_session(ops))
     assert r.status_code == 202, r.text
     assert r.json()["booking_count"] == 0
@@ -539,6 +553,24 @@ async def test_ops_trigger_writes_payout_enqueue_with_ops_as_actor(client, db_se
         sp.id,
     )
     assert row.details == {"amount_paise": 0, "booking_count": 0}
+
+
+async def test_ops_refused_payout_is_a_402_with_no_row(client, db_session):
+    """The real preflight: an SP with nothing payable is refused before the
+    admin_actions write, so there's no row and nothing queued."""
+    ops = await _admin(db_session, AdminRole.OPS)
+    sp = await _sp(db_session)
+
+    with patch("app.tasks.payment_tasks.execute_provider_payout.delay") as delay:
+        r = await client.post(f"{A}/providers/{sp.id}/payout", headers=_session(ops))
+    assert r.status_code == 402, r.text
+    delay.assert_not_called()
+    rows = (
+        (await db_session.execute(select(AdminAction).where(AdminAction.admin_user_id == ops.id)))
+        .scalars()
+        .all()
+    )
+    assert rows == []
 
 
 async def test_ops_can_requeue_failed_but_not_reversed(client, db_session):
