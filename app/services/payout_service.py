@@ -727,9 +727,17 @@ class PayoutService:
         if not stuck:
             raise PaymentError(f"No {from_status.value} settlements to re-queue for this provider")
 
+        # Read before the loop clears them: each payout these bookings came back
+        # from gets its debit credited back, once. Not done on the failed/reversed
+        # webhook itself, so this admin requeue stays the only way those bookings
+        # become payable again.
+        returned_payout_ids = {b.settlement_payout_id for b in stuck if b.settlement_payout_id}
         for booking in stuck:
             booking.settlement_status = SettlementStatus.PENDING
             booking.settlement_payout_id = None
+        from app.services.ledger_service import credit_payout_returned
+
+        await credit_payout_returned(self.db, returned_payout_ids)
 
         amount_paise = to_paise(sum((self._owed_amount(b) for b in stuck), Decimal("0")))
         self.db.add(
@@ -838,6 +846,13 @@ class PayoutService:
                 booking.settlement_payout_id = None
                 booking.settlement_failure_reason = reason
             await self.db.flush()
+            # The bookings are owed again, so the payout's debit goes back on the
+            # wallet; otherwise the next payout sends min(wallet, batch) short.
+            # Keyed on the event's payout id, so it doesn't need the cleared
+            # link, and a redelivery is a no-op (one credit per debit).
+            from app.services.ledger_service import credit_payout_returned
+
+            await credit_payout_returned(self.db, [payout_id])
             logger.info(
                 "payout.webhook event=rejected payout_id=%s returned_to_pending=%s reason=%s",
                 payout_id,
@@ -1361,6 +1376,8 @@ class PayoutService:
         # Resolve the breadcrumb so a later run doesn't reprocess it.
         audit.outcome = target.value
         audit.payout_id = payout_id
+        if target is SettlementStatus.COMPLETED:
+            await self._debit_orphan_payout(audit, payout)
         self._add_reconciliation_audit(
             provider_id=audit.provider_id,
             payout=payout,
@@ -1376,6 +1393,52 @@ class PayoutService:
             payout_id,
         )
         return len(pending)
+
+    async def _debit_orphan_payout(self, audit: PayoutAudit, payout: dict) -> None:
+        """Write the PAYOUT debit an orphaned, completed payout never got.
+
+        An orphan is a payout RazorpayX accepted while our create path raised: the
+        debit rolled back with that transaction and the audit ended ``unknown``.
+        Re-linking it as COMPLETED without a debit left the wallet overstated for
+        good, so later cash commission and dispute losses were absorbed by the
+        surplus instead of reducing payouts. (Not a double pay: each payout is
+        capped at its batch sum.) A FAILED or REVERSED orphan sent nothing net, so
+        it gets no debit, and its later requeue then credits nothing back.
+
+        Runs once per orphan, because the re-link only matches bookings still
+        PENDING under ``FOR UPDATE``. A second guard skips it when this audit already
+        has a live debit, meaning one no PAYOUT_RETURNED has undone: a retried batch
+        reuses its audit, so an earlier attempt's credited-back debit doesn't count.
+        """
+        from sqlalchemy.orm import aliased
+
+        from app.models.provider_ledger_entry import ProviderLedgerEntry
+        from app.services.ledger_service import debit_payout
+
+        returned = aliased(ProviderLedgerEntry)
+        live = await self.db.scalar(
+            select(ProviderLedgerEntry.id).where(
+                ProviderLedgerEntry.entry_type == LedgerEntryType.PAYOUT,
+                ProviderLedgerEntry.reference_id == audit.id,
+                ~select(returned.id)
+                .where(
+                    returned.entry_type == LedgerEntryType.PAYOUT_RETURNED,
+                    returned.reference_id == ProviderLedgerEntry.id,
+                )
+                .exists(),
+            )
+        )
+        if live is not None:
+            return
+        # The orphan check already required RazorpayX's amount to equal the audit's.
+        amount = payout.get("amount") or audit.amount_paise
+        await debit_payout(
+            self.db,
+            provider_id=audit.provider_id,
+            payout_audit_id=audit.id,
+            amount_paise=amount,
+            note=f"payout {payout.get('id')} (reconciled orphan)",
+        )
 
     def _add_reconciliation_audit(
         self, *, provider_id: UUID, payout: dict, target: SettlementStatus, count: int
