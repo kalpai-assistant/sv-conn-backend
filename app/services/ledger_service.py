@@ -86,6 +86,76 @@ async def debit_payout(
     )
 
 
+async def credit_payout_returned(db: AsyncSession, payout_ids) -> int:
+    """Give back the PAYOUT debit of each payout whose bookings are owed again.
+
+    Called when a ``payout.rejected`` webhook returns a payout's bookings to
+    PENDING, and when an admin requeues FAILED/REVERSED ones. Without it the
+    debit stays, and the next payout (``min(wallet, batch)``) underpays or
+    refuses with "provider owes platform".
+
+    One ``INSERT … SELECT`` from the debits themselves: the credit is the exact
+    amount the debit took and references that debit's row (``LEDGER_ENTRY``). A
+    debit is found through its payout audit's ``payout_id``. A payout with no debit
+    (rejected before acceptance, or an ``unknown`` outcome) writes nothing.
+    ``ON CONFLICT DO NOTHING`` on the partial unique index makes a repeated
+    webhook or a second requeue a no-op, as a database guarantee rather than a
+    check-then-insert.
+
+    Keyed on the debit, not the audit: a retried batch reuses its audit row
+    (``_record_attempting_audit`` is idempotent on the batch key), so after a
+    rejection and a retry one audit carries two debits, and the second rejection
+    must still credit the second one. Returns how many credits were written.
+    """
+    from sqlalchemy import literal, text
+    from sqlalchemy.dialects.postgresql import insert
+
+    from app.models.payout_audit import PayoutAudit
+
+    payout_ids = [p for p in set(payout_ids) if p]
+    if not payout_ids:
+        return 0
+    table = ProviderLedgerEntry.__table__
+    debits = select(
+        func.gen_random_uuid(),
+        ProviderLedgerEntry.provider_id,
+        -ProviderLedgerEntry.amount_paise,
+        literal(LedgerEntryType.PAYOUT_RETURNED, table.c.entry_type.type),
+        literal(LedgerReferenceType.LEDGER_ENTRY, table.c.reference_type.type),
+        ProviderLedgerEntry.id,
+        literal("payout returned", table.c.note.type),
+        # Distinct per row, like the ORM's _now_utc; NOW() is transaction start.
+        func.clock_timestamp(),
+    ).where(
+        ProviderLedgerEntry.entry_type == LedgerEntryType.PAYOUT,
+        ProviderLedgerEntry.reference_id.in_(
+            select(PayoutAudit.id).where(PayoutAudit.payout_id.in_(payout_ids))
+        ),
+    )
+    stmt = (
+        insert(ProviderLedgerEntry)
+        .from_select(
+            [
+                "id",
+                "provider_id",
+                "amount_paise",
+                "entry_type",
+                "reference_type",
+                "reference_id",
+                "note",
+                "created_at",
+            ],
+            debits,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["reference_id"],
+            index_where=text("entry_type = 'PAYOUT_RETURNED'"),
+        )
+        .returning(ProviderLedgerEntry.id)
+    )
+    return len((await db.execute(stmt)).all())
+
+
 async def debit_dispute_loss(
     db: AsyncSession,
     *,
