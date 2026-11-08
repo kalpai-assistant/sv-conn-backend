@@ -62,6 +62,7 @@ def _stub_payout_audit_io():
             "_resolve_audit",
             new_callable=AsyncMock,
         ),
+        patch.object(PayoutService, "_record_refused_audit", new_callable=AsyncMock),
     ):
         yield fake_audit_id
 

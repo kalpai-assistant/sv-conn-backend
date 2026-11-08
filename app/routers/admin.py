@@ -619,49 +619,32 @@ async def pay_out_provider(
     puts pool pressure on the same workers serving consumer traffic during a
     RazorpayX slowdown.
 
-    The upfront reads compute the batch total + booking count without a row
-    lock, so the admin gets an accurate estimate immediately. The task then
-    runs the full flow (record audit → lock rows → RazorpayX → resolve audit
-    → update bookings → drain pushes) — every guarantee from the synchronous
-    path is preserved because the task calls the same
-    ``PayoutService.create_provider_payout``.
+    Before queuing, ``PayoutService.preflight_payout`` runs every check the task
+    would refuse on (KYC, payout details, nothing pending, an unresolved
+    attempt, wallet ≤ 0, the batch cap) with the same messages, read-only and
+    lock-free. A refusal is a 402 and nothing is queued. Before this only the cap
+    was checked here, and the rest came back as a 202 "queued" the task then
+    rolled back without a trace. The task runs the full flow (record audit → lock
+    rows → RazorpayX → resolve audit → update bookings → drain pushes) through
+    the same ``PayoutService.create_provider_payout``, which re-runs the checks
+    under the row lock and writes a ``refused`` audit row if one fails there.
 
     Every attempt is still recorded in ``payout_audits`` before the RazorpayX
     call fires; the admin payouts screen surfaces the outcome from there, and
     ``reconcile_payouts`` (nightly) resolves any breadcrumb whose task
     process died mid-flight.
     """
-    from app.config import get_settings
-    from app.exceptions import PaymentError
     from app.tasks.payment_tasks import execute_provider_payout
 
-    settings = get_settings()
-
-    service = PayoutService(db)
-    # Cheap read-only estimate — no FOR UPDATE, so no lock is held across the
-    # enqueue. The task's own SELECT is the authoritative one; this is only for
-    # the 202 response body so the UI can show "queued ₹X for N bookings"
-    # rather than "queued ...something".
-    estimate = await service.estimate_pending_payout(user_id)
-
-    # SVC-191 (G18 half): refuse over-cap batches at the wire, before enqueue.
-    # The task also enforces the same cap (defence in depth), but catching
-    # here gives the admin immediate feedback instead of a delayed
-    # audit-only failure they only see later on the audits screen.
-    if estimate["amount_paise"] > settings.PAYOUT_MAX_BATCH_PAISE:
-        raise PaymentError(
-            f"Payout batch of {estimate['amount_paise']} paise exceeds cap of "
-            f"{settings.PAYOUT_MAX_BATCH_PAISE} paise "
-            "(PAYOUT_MAX_BATCH_PAISE). Wait for the backlog to drain or "
-            "ask ops to lift the cap."
-        )
+    # The 202 body's amount is what the task will send: min(wallet, batch sum).
+    plan = await PayoutService(db).preflight_payout(user_id)
 
     task = execute_provider_payout.delay(str(user_id), str(admin.id))
     return {
         "status": "queued",
         "task_id": task.id,
-        "amount_paise": estimate["amount_paise"],
-        "booking_count": estimate["booking_count"],
+        "amount_paise": plan["amount_paise"],
+        "booking_count": plan["booking_count"],
     }
 
 

@@ -225,8 +225,7 @@ async def test_owing_the_platform_reports_balance_owed_not_negative_pending(
 ):
     """A run of cash work can leave the provider owing us.
 
-    ``create_provider_payout`` pays nothing in that case and writes a statement
-    instead. The figure must not go negative on screen: pending clamps to zero
+    ``create_provider_payout`` refuses to pay in that case. The figure must not go negative on screen: pending clamps to zero
     and the debt is reported in its own field, so the UI can explain it plainly
     rather than rendering "-₹200 coming to you".
     """

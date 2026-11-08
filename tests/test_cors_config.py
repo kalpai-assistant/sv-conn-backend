@@ -147,3 +147,24 @@ async def test_expose_headers_includes_ratelimit_triplet(monkeypatch):
             f"Access-Control-Expose-Headers missing {required!r}; "
             f"browser JS can't read the SVC-159 rate-limit headers. Got: {exposed!r}"
         )
+
+
+@pytest.mark.asyncio
+async def test_expose_headers_includes_content_disposition(monkeypatch):
+    """Content-Disposition must be exposed: the admin app runs on another origin
+    and reads the CSV filename from it (GET /admin/payouts/export.csv). Without
+    it the browser hides the header and the download falls back to a nameless
+    blob."""
+    from app import main as main_mod
+
+    monkeypatch.setattr(main_mod.settings, "CORS_ALLOWED_ORIGINS", "https://admin.example.com")
+
+    app = create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        r = await ac.get("/health", headers={"Origin": "https://admin.example.com"})
+
+    assert r.headers.get("access-control-allow-origin") == "https://admin.example.com"
+    exposed = {
+        h.strip().lower() for h in r.headers.get("access-control-expose-headers", "").split(",")
+    }
+    assert "content-disposition" in exposed, exposed

@@ -64,6 +64,7 @@ def in_session_audits(db_session):
     with (
         patch.object(PayoutService, "_record_attempting_audit", staticmethod(record)),
         patch.object(PayoutService, "_resolve_audit", staticmethod(resolve)),
+        patch.object(PayoutService, "_record_refused_audit", new_callable=AsyncMock),
         patch("app.tasks.notification_tasks.send_payout_notification.delay"),
     ):
         yield

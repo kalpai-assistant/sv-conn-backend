@@ -56,6 +56,7 @@ def stub_payout_audit_io():
             return_value=uuid.uuid4(),
         ),
         patch.object(PayoutService, "_resolve_audit", new_callable=AsyncMock),
+        patch.object(PayoutService, "_record_refused_audit", new_callable=AsyncMock),
     ):
         yield
 
