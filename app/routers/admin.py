@@ -31,7 +31,12 @@ from app.schemas.booking import (
     BookingTimelineItem,
     ForceCancelBookingRequest,
 )
-from app.schemas.payout import PendingSettlementsResponse, ProviderPayoutHistoryResponse
+from app.schemas.payout import (
+    PayoutBookingsResponse,
+    PayoutDashboardResponse,
+    PendingSettlementsResponse,
+    ProviderPayoutHistoryResponse,
+)
 from app.schemas.provider import (
     KYCDocsResponse,
     KYCQueueCountResponse,
@@ -50,6 +55,7 @@ from app.services.kyc_queue_service import (
     KYCQueueService,
     kyc_queue_filter,
 )
+from app.services.payout_dashboard_service import PayoutDashboardService
 from app.services.payout_service import PayoutService
 from app.services.provider_service import ProviderService
 
@@ -662,7 +668,7 @@ async def _for_admin_with_parties(db: AsyncSession, booking: Booking) -> Booking
 @router.get(
     "/providers/pending-settlements",
     response_model=PendingSettlementsResponse,
-    dependencies=[_admin_support_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def list_pending_settlements(db: AsyncSession = Depends(get_db)):
     """Providers awaiting settlement, with the amount and booking count owed.
@@ -678,7 +684,7 @@ async def list_pending_settlements(db: AsyncSession = Depends(get_db)):
 @router.get(
     "/providers/{user_id}/payouts",
     response_model=ProviderPayoutHistoryResponse,
-    dependencies=[_admin_support_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def list_provider_payout_history(
     user_id: UUID,
@@ -702,7 +708,7 @@ async def list_provider_payout_history(
 async def pay_out_provider(
     user_id: UUID,
     request: Request,
-    admin: User = Depends(require_roles("admin")),
+    admin: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
     """Enqueue a RazorpayX payout for a provider's completed-but-unsettled bookings.
@@ -787,7 +793,7 @@ async def pay_out_provider(
 async def requeue_failed_settlements(
     user_id: UUID,
     request: Request,
-    admin: User = Depends(require_roles("admin")),
+    admin: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
     """Reset a provider's FAILED settlements to PENDING so they can be paid again.
@@ -844,6 +850,84 @@ async def requeue_reversed_settlements(
         details={"booking_count": result["requeued"]},
     )
     return result
+
+
+# The 3 dashboard reads (SVC-426). Read-only, so not audited; open to every admin
+# role, since support reads payouts too.
+_EXPORT_MAX_DAYS = 366
+
+
+@router.get(
+    "/payouts/providers",
+    response_model=PayoutDashboardResponse,
+    dependencies=[_any_admin_role_dep],
+)
+async def list_payout_providers(
+    status_: SettlementStatus | None = Query(None, alias="status"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """One row per SP with any payout-scope booking (completed, PAID, not cash).
+
+    Count + paise per settlement status, ``earned_paise`` across all five, and
+    ``payable_paise``, the net a payout would send now. ``status`` keeps SPs with a
+    booking in that bucket; omit it for all. Largest pending amount first.
+    """
+    return await PayoutDashboardService(db).list_providers(
+        status=status_, page=page, per_page=per_page
+    )
+
+
+@router.get(
+    "/providers/{user_id}/payout-bookings",
+    response_model=PayoutBookingsResponse,
+    dependencies=[_any_admin_role_dep],
+)
+async def list_provider_payout_bookings(
+    user_id: UUID,
+    settlement_status: SettlementStatus | None = Query(None),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bookings behind an SP's payout figures, newest completion first, with the
+    price, commission and payout split each one contributed."""
+    return await PayoutDashboardService(db).list_bookings(
+        user_id, settlement_status=settlement_status, page=page, per_page=per_page
+    )
+
+
+@router.get(
+    "/payouts/export.csv",
+    dependencies=[_any_admin_role_dep],
+    response_class=Response,
+    responses={200: {"content": {"text/csv": {}}, "description": "Payout CSV"}},
+)
+async def export_payouts_csv(
+    from_: date = Query(..., alias="from"),
+    to: date = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Payout-scope bookings completed on IST days ``from``..``to`` inclusive, as CSV
+    for the accounting import. At most 366 days. Cash bookings are left out."""
+    if from_ > to:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "`from` is after `to`")
+    if (to - from_).days + 1 > _EXPORT_MAX_DAYS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Range is longer than {_EXPORT_MAX_DAYS} days",
+        )
+    body = await PayoutDashboardService(db).export_csv(from_, to)
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="payouts_{from_.isoformat()}_{to.isoformat()}.csv"'
+            )
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

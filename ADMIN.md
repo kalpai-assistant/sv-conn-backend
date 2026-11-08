@@ -80,10 +80,10 @@ this table and fails if a new `/admin` route isn't in it.
 
 | Roles | Routes |
 |---|---|
-| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros/{id}` |
-| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /services`, `PATCH` + `DELETE /services/{id}` |
-| admin, support | `GET /admin/users`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts` |
-| admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout` + `requeue-failed` + `requeue-reversed`, `POST /admin/pros/{id}/force-remove` + `reassign`, `POST /admin/app-versions/{platform}/release` (also the CI token) |
+| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros/{id}`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv` |
+| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /services`, `PATCH` + `DELETE /services/{id}` |
+| admin, support | `GET /admin/users`, `/actions` |
+| admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/pros/{id}/force-remove` + `reassign`, `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
 Support has no write routes yet: its refund comes with SVC-431, and retry-dispatch
 and booking-level reassign don't exist.
@@ -128,6 +128,47 @@ except a removed Pro. It's enqueued after the commit and is best effort, so a br
 failure still returns 200. The reason stays out of the push, since it shows on a lock
 screen. The person reads it in the app: `GET /providers/me` for an SP, the Pro's own
 profile for a Pro. Approving sends no push. SMS waits on DLT approval (SVC-225).
+
+---
+
+## Payouts dashboard (SVC-426)
+
+Read-only, in `app/services/payout_dashboard_service.py`. **Payout scope** means a
+booking that is completed, PAID and not cash: `PayoutService._payout_scope_filter`,
+which is `_owed_filter` without its `settlement_status = pending` clause. Cash
+bookings never appear, because the SP already holds that money.
+
+- `GET /admin/payouts/providers?status=&page=&per_page=` (25, max 100): one row per
+  SP with a payout-scope booking. Each row has a count and paise for each settlement
+  status, `earned_paise` (all five summed), `payable_paise` and `latest_failure_reason`.
+  `status` keeps SPs with a booking in that bucket. Sorted by pending paise desc,
+  then id. `pending_*` is `_owed_filter`, so it equals the
+  `/providers/pending-settlements` row.
+- **`pending_paise` is not what gets sent.** `payable_paise` is: the wallet balance,
+  floored at 0, which is also the trigger's 202 `amount_paise`. The wallet takes cash
+  commission off and only counts bookings Razorpay has settled to us (T+1), so it can
+  be lower.
+- `latest_failure_reason` is RazorpayX's reason from the newest failed or reversed
+  booking. Without one, it's the error of the SP's latest payout attempt, if that
+  attempt failed. Otherwise it is null.
+- `GET /admin/providers/{id}/payout-bookings?settlement_status=&page=&per_page=`:
+  the SP's payout-scope bookings, newest completion first, with the money split in
+  paise. `service_amount_paise` is the price fixed at booking time.
+- `GET /admin/payouts/export.csv?from=YYYY-MM-DD&to=YYYY-MM-DD`: both dates are
+  required, and they are IST days, inclusive, on the completion time. `from > to` or
+  a range over 366 days returns 422. Columns, in order: `sp_id, sp_name, booking_id,
+  locked_price, commission, sp_payout, booking_completed_at, payout_status`.
+  - `locked_price` is `service_amount`, and SVC-410 must keep that meaning.
+  - `sp_payout` is `provider_payout + tip_amount`, gross per booking. A range's total
+    won't match RazorpayX for the reason above.
+  - `sp_name` is the business name, else the user's name.
+  - A booking with no completion log row is left out.
+  - A cell that starts with `=`, `+`, `-`, `@`, tab or CR gets a leading `'`, so a
+    spreadsheet doesn't run it as a formula.
+
+Completion time is the booking's first `booking_status_logs` row with
+`to_status = completed`. It is not `settled_at`, which is when Razorpay paid the
+customer's money to us.
 
 ---
 
