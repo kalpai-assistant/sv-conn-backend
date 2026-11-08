@@ -3,8 +3,9 @@ Admin router: user management, booking oversight, and KYC approval.
 Each route names its roles with ``require_roles`` (SVC-422; table in ADMIN.md).
 """
 
+import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
@@ -56,6 +57,13 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 
 _admin_support_dep = Depends(require_roles("admin", "support"))
 _any_admin_role_dep = Depends(require_roles("admin", "ops", "support"))
+
+# India has no DST, so a fixed offset is exact (same as provider_service._IST).
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_midnight(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=_IST)
 
 
 # ---------------------------------------------------------------------------
@@ -342,37 +350,93 @@ async def list_all_bookings(
     disputed: bool | None = Query(
         None, description="Filter to bookings with (or without) a charged-back payment"
     ),
+    created_from: date | None = Query(
+        None, description="Created on or after this day, in IST (YYYY-MM-DD)"
+    ),
+    created_to: date | None = Query(
+        None, description="Created on or before this day, in IST (YYYY-MM-DD)"
+    ),
+    consumer_phone: str | None = Query(
+        None, description="Customer phone; any format, the last 10 digits must match exactly"
+    ),
+    provider_name: str | None = Query(
+        None, description="Case-insensitive substring of the SP's name"
+    ),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
     # A booking can have several payment rows (failed attempts + the captured one), so
     # "is this booking disputed" is an EXISTS over its payments rather than a join —
-    # a join would duplicate booking rows once per payment (SVC-134).
+    # a join would duplicate booking rows once per payment (SVC-134). The phone and
+    # name filters below are EXISTS for the same reason (SVC-425).
     disputed_exists = (
         select(Payment.id)
         .where(Payment.booking_id == Booking.id, Payment.disputed_at.is_not(None))
         .exists()
     )
 
-    stmt = select(Booking, disputed_exists.label("is_disputed"))
-    count_stmt = select(func.count()).select_from(Booking)
+    # Every filter goes into both the page query and the count query, so `total`
+    # always describes the rows the pages walk through.
+    filters = []
 
     if booking_status:
         try:
-            status_enum = BookingStatus(booking_status)
-            stmt = stmt.where(Booking.status == status_enum)
-            count_stmt = count_stmt.where(Booking.status == status_enum)
+            filters.append(Booking.status == BookingStatus(booking_status))
         except ValueError:
+            # Unknown status is ignored, not a 422: the legacy screen relies on it.
             pass
 
     if disputed is not None:
-        clause = disputed_exists if disputed else ~disputed_exists
-        stmt = stmt.where(clause)
-        count_stmt = count_stmt.where(clause)
+        filters.append(disputed_exists if disputed else ~disputed_exists)
+
+    # SVC-425: dates are IST calendar days, both ends inclusive, so `created_to`
+    # is "before the next IST midnight".
+    if created_from and created_to and created_from > created_to:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="created_from must be on or before created_to",
+        )
+    if created_from:
+        filters.append(Booking.created_at >= _ist_midnight(created_from))
+    if created_to:
+        filters.append(Booking.created_at < _ist_midnight(created_to + timedelta(days=1)))
+
+    if consumer_phone is not None:
+        digits = re.sub(r"\D", "", consumer_phone)
+        if len(digits) < 10:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="consumer_phone needs at least 10 digits",
+            )
+        # users.phone is stored as +91XXXXXXXXXX, so an exact match keeps the index.
+        filters.append(
+            select(User.id)
+            .where(User.id == Booking.consumer_id, User.phone == f"+91{digits[-10:]}")
+            .exists()
+        )
+
+    name = (provider_name or "").strip()
+    if name:
+        # The admin types a name, not a pattern: % and _ match themselves.
+        pattern = "%" + re.sub(r"([\\%_])", r"\\\1", name) + "%"
+        filters.append(
+            select(User.id)
+            .where(User.id == Booking.provider_id, User.name.ilike(pattern, escape="\\"))
+            .exists()
+        )
+
+    stmt = select(Booking, disputed_exists.label("is_disputed")).where(*filters)
+    count_stmt = select(func.count()).select_from(Booking).where(*filters)
 
     total = (await db.execute(count_stmt)).scalar_one()
-    stmt = stmt.offset((page - 1) * per_page).limit(per_page)
+    # Newest first; `id` breaks created_at ties so a row never shows on two pages
+    # or on none (SVC-425).
+    stmt = (
+        stmt.order_by(Booking.created_at.desc(), Booking.id.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
     result = await db.execute(stmt)
     rows = list(result.all())
     bookings = [booking for booking, _ in rows]
