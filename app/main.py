@@ -107,11 +107,14 @@ def create_app() -> FastAPI:
         # + Retry-After are exactly the ones a client would want to read to
         # back off before hitting 429 — without this list, they're on the
         # response but the browser hides them from fetch()/XHR.
+        # Content-Disposition carries the filename of a CSV download
+        # (GET /admin/payouts/export.csv); the admin app reads it cross-origin.
         expose_headers=[
             "X-RateLimit-Limit",
             "X-RateLimit-Remaining",
             "X-RateLimit-Reset",
             "Retry-After",
+            "Content-Disposition",
         ],
     )
 

@@ -131,6 +131,20 @@ class PaymentError(AppException):
         super().__init__(message, status_code=status.HTTP_402_PAYMENT_REQUIRED)
 
 
+class PayoutRefused(PaymentError):
+    """A provider payout refused before any money moves (still a 402).
+
+    Carries what was known when the check failed, so a refusal at task time can
+    be written to ``payout_audits`` with an amount and a booking count; 0 means
+    the check failed before that figure was worked out.
+    """
+
+    def __init__(self, message: str, *, amount_paise: int = 0, booking_count: int = 0):
+        super().__init__(message)
+        self.amount_paise = amount_paise
+        self.booking_count = booking_count
+
+
 class InvalidPayoutMethod(AppException):
     """Asked to activate a payout method the provider has nothing stored for.
 
