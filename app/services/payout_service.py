@@ -1486,6 +1486,21 @@ class PayoutService:
             Booking.settlement_status == SettlementStatus.PENDING,
         )
 
+    @staticmethod
+    def _payout_scope_filter() -> tuple:
+        """Bookings a payout can ever cover, whatever their settlement state (SVC-426).
+
+        ``_owed_filter`` without its ``settlement_status == PENDING`` clause: the
+        admin payouts dashboard buckets these by settlement status, and its pending
+        bucket is ``_owed_filter`` itself. A test pins the two together, so a
+        change to one that isn't made to the other fails.
+        """
+        return (
+            Booking.status == BookingStatus.COMPLETED,
+            Booking.payment_status == PaymentStatus.PAID,
+            Booking.payment_method != PaymentMethod.CASH,
+        )
+
     async def _pending_settlements(self, provider_id: UUID) -> list[Booking]:
         # Lock the selected rows for the duration of the transaction so two
         # concurrent payouts for the same provider can't both read the same
