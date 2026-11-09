@@ -1,6 +1,6 @@
 """SVC-448: call-masking schema (virtual_number_pool, call_mappings, call_records)
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: 943ec493119e
 Revises: d7e3b5a9c1f2
 Create Date: 2026-11-09
 
@@ -35,7 +35,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "a1b2c3d4e5f6"
+revision: str = "943ec493119e"
 down_revision: str | None = "d7e3b5a9c1f2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
