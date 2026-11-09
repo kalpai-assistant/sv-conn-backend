@@ -1,4 +1,4 @@
-# Admin Access Runbook (SVC-75, SVC-422, SVC-423, SVC-424)
+# Admin Access Runbook (SVC-75, SVC-422, SVC-423, SVC-424, SVC-429)
 
 `/admin/*` sits behind **two** layers of defence:
 
@@ -80,8 +80,8 @@ this table and fails if a new `/admin` route isn't in it.
 
 | Roles | Routes |
 |---|---|
-| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config` |
-| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428) |
+| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config`, `/coupons`, `/coupons/{code}` |
+| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428), `POST /admin/coupons`, `PATCH /admin/coupons/{code}`, `POST /admin/coupons/{code}/deactivate` + `activate` (SVC-429) |
 | admin, support | `GET /admin/users` |
 | admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
@@ -172,6 +172,28 @@ customer's money to us.
 
 ---
 
+## Coupons (SVC-429)
+
+`/admin/coupons` replaces the SQL inserts. A coupon is never deleted: deactivate is
+the kill switch and activate undoes it, since `code` is UNIQUE and a mistaken
+deactivate would otherwise burn it. The code can't change after create. Admin creates
+are always global; personal (referral) coupons are listed with their owner and can be
+edited and switched, but not created here.
+
+- **Code:** trimmed and uppercased, then `^[A-Z0-9]{3,20}$`. Stored lowercase (the
+  consumer lookups match on `lower()`), shown uppercase, and matched in any case in the
+  URL. A code taken in any case is a 409 `COUPON_CODE_TAKEN`.
+- **Usage** is the count of `coupon_redemptions` rows, which the limits also count. A
+  redemption is never deleted, so a cancelled booking still uses up one use.
+- **Status:** each coupon has exactly one, the first that matches: `inactive`
+  (`is_active` false), `expired` (`valid_until` passed), `exhausted` (the global
+  `usage_limit` reached; the per-user limit isn't a coupon status), `scheduled`
+  (`valid_from` in the future), else `active`.
+- **Refusals:** 422 `COUPON_INVALID` with `details.field`. A flat coupon has no
+  `max_discount` (sent: 422; switching to flat clears it). `valid_until` must be after
+  `valid_from`, and in the future on create (a PATCH may end a coupon early).
+  `usage_limit` can't be set below the uses so far.
+
 ## Audit log (SVC-423)
 
 Every admin write writes one `admin_actions` row: who, what, why, before and after,
@@ -223,6 +245,8 @@ passes them: `password_hash`, `totp_secret`, `fcm_token`, every `*_encrypted` co
 | `service.create`, `service.update`, `service.delete` | `service` | `POST`, `PATCH`, `DELETE /services` |
 | `pricing.category_update` | `category` | `PATCH /admin/pricing/categories/{id}` |
 | `pricing.config_update` | `pricing_config` (`target_id` is the key) | `PATCH /admin/pricing/config/{key}` |
+| `coupon.create`, `coupon.update` | `coupon` | `POST /admin/coupons`, `PATCH /admin/coupons/{code}` |
+| `coupon.deactivate`, `coupon.activate` | `coupon` | `POST /admin/coupons/{code}/deactivate`, `activate` |
 
 **Exceptions worth knowing.**
 

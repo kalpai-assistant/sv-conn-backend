@@ -12,7 +12,8 @@ The coupon domain is deliberately kept small for beta. What lives here:
 What does *not* live here yet:
 * No stacking. One coupon per booking, enforced by ``UNIQUE(booking_id)``
   on ``coupon_redemptions``.
-* No user-visible admin surface — coupon rows are inserted by hand or by
+* No consumer-side writes. Global coupons are created and switched off in
+  the admin console (``/admin/coupons``, SVC-429); personal ones come from
   the (future) referral job. The consumer endpoints only list what a user
   can use and validate a specific code.
 * No cash-refund of unused coupon value. If the customer's cart total drops

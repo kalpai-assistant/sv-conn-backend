@@ -28,6 +28,10 @@ ADMIN_ACTIONS = (
     "service.delete",
     "pricing.category_update",
     "pricing.config_update",
+    "coupon.create",
+    "coupon.update",
+    "coupon.deactivate",
+    "coupon.activate",
 )
 ADMIN_ACTION_TARGET_TYPES = (
     "user",
@@ -38,6 +42,7 @@ ADMIN_ACTION_TARGET_TYPES = (
     "service",
     "category",
     "pricing_config",
+    "coupon",
 )
 
 USER_AGENT_MAX_LENGTH = 512
