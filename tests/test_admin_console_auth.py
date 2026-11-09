@@ -786,6 +786,13 @@ ROUTE_ROLES = {
     ("PATCH", "/admin/pricing/categories/{category_id}"): ADMIN_OPS,
     ("GET", "/admin/pricing/config"): ALL,
     ("PATCH", "/admin/pricing/config/{key}"): ADMIN_OPS,
+    # admin_coupons.py (SVC-429)
+    ("GET", "/admin/coupons"): ALL,
+    ("POST", "/admin/coupons"): ADMIN_OPS,
+    ("GET", "/admin/coupons/{code}"): ALL,
+    ("PATCH", "/admin/coupons/{code}"): ADMIN_OPS,
+    ("POST", "/admin/coupons/{code}/deactivate"): ADMIN_OPS,
+    ("POST", "/admin/coupons/{code}/activate"): ADMIN_OPS,
     # services.py: admin writes outside the /admin prefix
     ("POST", "/services"): ADMIN_OPS,
     ("PATCH", "/services/{service_id}"): ADMIN_OPS,
@@ -817,6 +824,7 @@ def _concrete(path: str) -> str:
         "category_id",
     ):
         out = out.replace("{" + name + "}", str(uuid.uuid4()))
+    out = out.replace("{code}", f"NOPE{uuid.uuid4().hex[:8]}")
     return out.replace("{platform}", "android").replace("{key}", "ranking_weights")
 
 

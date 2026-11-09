@@ -85,6 +85,20 @@ AUDIT_FIELDS: dict[str, tuple[str, ...]] = {
         "commission_gst_pct",
     ),
     "pricing_config": ("value_json",),
+    # SVC-429: a create records all of these, an update only the ones it changed.
+    "coupon": (
+        "code",
+        "discount_type",
+        "discount_value",
+        "max_discount",
+        "min_order_amount",
+        "valid_from",
+        "valid_until",
+        "usage_limit",
+        "usage_limit_per_user",
+        "is_active",
+        "user_id",
+    ),
 }
 
 # Never in an audit row, whatever a caller passes. So is every ``*_encrypted``

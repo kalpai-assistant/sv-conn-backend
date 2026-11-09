@@ -44,6 +44,7 @@ from app.models.admin_action import (
 from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, PaymentStatus, SettlementStatus
 from app.models.category import Category
+from app.models.coupon import Coupon
 from app.models.pricing_config import PricingConfig
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
@@ -61,6 +62,7 @@ from tests.conftest import TEST_DATABASE_URL
 from tests.factories.user_factory import UserFactory
 from tests.test_accept_contract import _eligible_provider, _service
 from tests.test_admin_console_auth import _admin, _session
+from tests.test_admin_coupons import _coupon as _seed_coupon
 from tests.test_admin_force_cancel import _seed_booking
 from tests.test_admin_pricing import category as _pricing_category
 from tests.test_admin_pricing import seed_config
@@ -94,6 +96,7 @@ RECORD_MODELS = {
     "service": Service,
     "category": Category,
     "pricing_config": PricingConfig,
+    "coupon": Coupon,
 }
 
 
@@ -453,6 +456,60 @@ async def _pricing_config_update(db) -> Case:
     )
 
 
+async def _coupon_create(db) -> Case:
+    code = f"AUD{uuid.uuid4().hex[:8].upper()}"
+    return Case(
+        url=f"{A}/coupons",
+        body={
+            "code": code,
+            "discount_type": "percent",
+            "discount_value": 15,
+            "valid_until": (datetime.now(UTC) + timedelta(days=30)).isoformat(),
+        },
+        status=201,
+        action="coupon.create",
+        target_type="coupon",
+        after={"code": code.lower(), "discount_value": 15.0, "is_active": True},
+    )
+
+
+async def _coupon_update(db) -> Case:
+    coupon = await _seed_coupon(db, f"AUD{uuid.uuid4().hex[:8]}")
+    return Case(
+        url=f"{A}/coupons/{coupon.code}",
+        body={"discount_value": 25},
+        action="coupon.update",
+        target_type="coupon",
+        target_id=coupon.id,
+        before={"discount_value": 10.0},
+        after={"discount_value": 25.0},
+    )
+
+
+async def _coupon_deactivate(db) -> Case:
+    coupon = await _seed_coupon(db, f"AUD{uuid.uuid4().hex[:8]}")
+    return Case(
+        url=f"{A}/coupons/{coupon.code}/deactivate",
+        action="coupon.deactivate",
+        target_type="coupon",
+        target_id=coupon.id,
+        before={"is_active": True},
+        after={"is_active": False},
+    )
+
+
+async def _coupon_activate(db) -> Case:
+    coupon = await _seed_coupon(db, f"AUD{uuid.uuid4().hex[:8]}", is_active=False)
+    return Case(
+        url=f"{A}/coupons/{coupon.code}/activate",
+        action="coupon.activate",
+        target_type="coupon",
+        target_id=coupon.id,
+        before={"is_active": False},
+        after={"is_active": True},
+    )
+
+
 AUDITED_WRITE_ROUTES = {
     ("PATCH", "/admin/users/{user_id}/deactivate"): _deactivate,
     ("POST", "/admin/pros/{professional_id}/force-remove"): _force_remove,
@@ -471,6 +528,10 @@ AUDITED_WRITE_ROUTES = {
     ("DELETE", "/services/{service_id}"): _service_delete,
     ("PATCH", "/admin/pricing/categories/{category_id}"): _pricing_category_update,
     ("PATCH", "/admin/pricing/config/{key}"): _pricing_config_update,
+    ("POST", "/admin/coupons"): _coupon_create,
+    ("PATCH", "/admin/coupons/{code}"): _coupon_update,
+    ("POST", "/admin/coupons/{code}/deactivate"): _coupon_deactivate,
+    ("POST", "/admin/coupons/{code}/activate"): _coupon_activate,
 }
 
 
@@ -486,7 +547,7 @@ def test_every_admin_write_route_has_an_audit_case():
             if is_admin or path.startswith("/services"):
                 found.add((method, path))
     assert found == set(AUDITED_WRITE_ROUTES)
-    assert len(found) == 17
+    assert len(found) == 21
 
 
 @pytest.fixture
