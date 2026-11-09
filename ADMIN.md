@@ -80,10 +80,10 @@ this table and fails if a new `/admin` route isn't in it.
 
 | Roles | Routes |
 |---|---|
-| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros/{id}`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv` |
-| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /services`, `PATCH` + `DELETE /services/{id}` |
-| admin, support | `GET /admin/users`, `/actions` |
-| admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/pros/{id}/force-remove` + `reassign`, `POST /admin/app-versions/{platform}/release` (also the CI token) |
+| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv` |
+| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}` |
+| admin, support | `GET /admin/users` |
+| admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
 Support has no write routes yet: its refund comes with SVC-431, and retry-dispatch
 and booking-level reassign don't exist.
@@ -182,8 +182,8 @@ could.
 `admin_user_id`, `action`, `target_type`, `target_id`, `date_from` inclusive,
 `date_to` exclusive; a date with no offset means UTC) and `GET /admin/audit/filters`.
 Admin role only, because ops shouldn't review their own actions. `GET /admin/actions`
-is the owner history on the Teams screen: admin and support, and only the 3 team
-actions.
+is the owner history on the Teams screen and the SP/Pro pages: all three roles
+(SVC-427), and only the 3 team actions.
 
 **Adding a write route.** Call the helper in the handler, in the same transaction as
 the change, and add a case to `AUDITED_WRITE_ROUTES` in `tests/test_admin_audit.py`,

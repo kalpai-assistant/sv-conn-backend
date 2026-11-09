@@ -3,9 +3,11 @@ Admin team management (SVC-329): owners, their Pros (removed included), invite
 history, force-remove, reassign, and the owner history on the Teams screen.
 
 Mounted under ``/admin`` like ``admin.py``, so ``AdminIPAllowlistMiddleware``
-covers it, and every route requires the admin role. Paths follow the existing
-admin ones: owners at ``/admin/providers/{user_id}``, Pros at
-``/admin/pros/{professional_id}``.
+covers it. Paths follow the existing admin ones: owners at
+``/admin/providers/{user_id}``, Pros at ``/admin/pros/{professional_id}``.
+
+SVC-427 (SP + Pro directories): every read is open to all three console roles,
+the two team writes to admin and ops. Deactivating a user stays admin only.
 """
 
 from typing import Literal
@@ -16,11 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import require_roles
+from app.models.provider_profile import KYCStatus
 from app.models.user import User
 from app.schemas.admin_team import (
     AdminActionRow,
     AdminInviteRow,
     AdminProDetail,
+    AdminProListResponse,
+    AdminProviderDetail,
     AdminProviderRow,
     AdminTeamPro,
     ForceRemoveRequest,
@@ -34,7 +39,6 @@ from app.services.admin_team_service import AdminTeamService
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 _any_admin_role_dep = Depends(require_roles("admin", "ops", "support"))
-_admin_support_dep = Depends(require_roles("admin", "support"))
 
 
 @router.get("/providers", response_model=list[AdminProviderRow], dependencies=[_any_admin_role_dep])
@@ -46,22 +50,29 @@ async def search_providers(
         description="Matches phone (any part, spaces/dashes ignored), name or business name. "
         "Omit to list every owner.",
     ),
+    is_active: bool | None = Query(None, description="The owner's account is (or isn't) active"),
+    kyc_status: KYCStatus | None = Query(None, description="The SP's payout KYC status"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    """Owners (users with a provider profile), newest first."""
-    return await AdminTeamService(db).search_providers(q, page, per_page)
+    """Owners (users with a provider profile), newest first. A bare list: the
+    old Teams screen reads this shape, so it has no ``total``."""
+    return await AdminTeamService(db).search_providers(
+        q, page, per_page, is_active=is_active, kyc_status=kyc_status
+    )
 
 
 @router.get(
     "/providers/{sp_user_id}",
-    response_model=AdminProviderRow,
+    response_model=AdminProviderDetail,
     dependencies=[_any_admin_role_dep],
 )
 async def get_provider(sp_user_id: UUID, db: AsyncSession = Depends(get_db)):
-    """One owner: the same row the search returns, for the owner page header.
-    404 ``SP_NOT_FOUND`` for an unknown id or a user who isn't an owner."""
+    """One owner: the row the search returns plus (SVC-427) the SP page's
+    aggregates: service area, rating, completed jobs, services offered and the
+    bookings created in the last 30 IST days. 404 ``SP_NOT_FOUND`` for an
+    unknown id or a user who isn't an owner."""
     return await AdminTeamService(db).provider(sp_user_id)
 
 
@@ -89,11 +100,47 @@ async def get_provider_invites(sp_user_id: UUID, db: AsyncSession = Depends(get_
     return invites
 
 
+@router.get("/pros", response_model=AdminProListResponse, dependencies=[_any_admin_role_dep])
+async def list_pros(
+    q: str | None = Query(
+        None,
+        min_length=2,
+        max_length=100,
+        description="Matches the Pro's phone (any part, spaces/dashes ignored) or display "
+        "name. Omit to list every Pro.",
+    ),
+    sp_user_id: UUID | None = Query(None, description="Only this owner's Pros"),
+    is_active: bool | None = Query(
+        None, description="On a team (true) or removed (false); omit for both"
+    ),
+    kyc_status: KYCStatus | None = Query(
+        None, description="The KYC each row shows: a Pro-for-self's is its owner's"
+    ),
+    is_online: bool | None = Query(None),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Every Pro row across all owners, newest first, with the owner each
+    belongs to and the total matching the filters (SVC-427)."""
+    items, total = await AdminTeamService(db).search_pros(
+        q=q,
+        sp_user_id=sp_user_id,
+        is_active=is_active,
+        kyc_status=kyc_status,
+        is_online=is_online,
+        page=page,
+        per_page=per_page,
+    )
+    return AdminProListResponse(items=items, total=total, page=page, per_page=per_page)
+
+
 @router.get(
     "/pros/{professional_id}", response_model=AdminProDetail, dependencies=[_any_admin_role_dep]
 )
 async def get_pro(professional_id: UUID, db: AsyncSession = Depends(get_db)):
-    """One Pro row, removed or not, and the owner it belongs to."""
+    """One Pro row, removed or not, the owner it belongs to, and (SVC-427) its
+    rating (null with no reviews) and completed jobs."""
     return await AdminTeamService(db).pro_detail(professional_id)
 
 
@@ -102,7 +149,7 @@ async def force_remove_pro(
     professional_id: UUID,
     body: ForceRemoveRequest,
     request: Request,
-    admin: User = Depends(require_roles("admin")),
+    admin: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
     """Remove a Pro from their owner's team (soft), e.g. when the owner is
@@ -121,7 +168,7 @@ async def reassign_pro(
     professional_id: UUID,
     body: ReassignRequest,
     request: Request,
-    admin: User = Depends(require_roles("admin")),
+    admin: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
     """Move a person to another owner's team by admin authority: no invite or
@@ -147,7 +194,7 @@ async def reassign_pro(
     )
 
 
-@router.get("/actions", response_model=list[AdminActionRow], dependencies=[_admin_support_dep])
+@router.get("/actions", response_model=list[AdminActionRow], dependencies=[_any_admin_role_dep])
 async def list_admin_actions(
     target_type: Literal["user", "professional"] | None = Query(None),
     target_id: UUID | None = Query(None),
