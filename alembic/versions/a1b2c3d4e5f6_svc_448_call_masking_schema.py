@@ -31,6 +31,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "a1b2c3d4e5f6"
@@ -39,16 +40,30 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
-# Enum type descriptors — single source of truth for upgrade + downgrade so
-# the two can't disagree about the value list.
-_PROVIDER_ENUM = sa.Enum("exotel", name="virtualnumberprovider")
-_NUMBER_STATUS_ENUM = sa.Enum(
-    "active", "disabled", "retired", name="virtualnumberstatus"
+# Shared enum instances — single ``postgresql.ENUM`` object per Postgres type,
+# used by both the explicit ``.create()`` at the top of upgrade and by the
+# columns that reference it. ``create_type=False`` on the column prevents
+# ``op.create_table`` from re-emitting ``CREATE TYPE`` (which would blow up on
+# the duplicate). Keeping them at module scope also means upgrade and
+# downgrade can't disagree about the value list.
+_PROVIDER_ENUM = postgresql.ENUM(
+    "exotel", name="virtualnumberprovider", create_type=False
 )
-_DIRECTION_ENUM = sa.Enum(
-    "customer_to_sp", "sp_to_customer", "unmatched", name="calldirection"
+_NUMBER_STATUS_ENUM = postgresql.ENUM(
+    "active",
+    "disabled",
+    "retired",
+    name="virtualnumberstatus",
+    create_type=False,
 )
-_CALL_STATUS_ENUM = sa.Enum(
+_DIRECTION_ENUM = postgresql.ENUM(
+    "customer_to_sp",
+    "sp_to_customer",
+    "unmatched",
+    name="calldirection",
+    create_type=False,
+)
+_CALL_STATUS_ENUM = postgresql.ENUM(
     "ringing",
     "in_progress",
     "completed",
@@ -56,6 +71,7 @@ _CALL_STATUS_ENUM = sa.Enum(
     "no_answer",
     "busy",
     name="callstatus",
+    create_type=False,
 )
 
 
@@ -73,21 +89,13 @@ def upgrade() -> None:
         sa.Column("e164", sa.String(length=16), nullable=False),
         sa.Column(
             "provider",
-            sa.Enum(
-                "exotel", name="virtualnumberprovider", create_type=False
-            ),
+            _PROVIDER_ENUM,
             nullable=False,
             server_default="exotel",
         ),
         sa.Column(
             "status",
-            sa.Enum(
-                "active",
-                "disabled",
-                "retired",
-                name="virtualnumberstatus",
-                create_type=False,
-            ),
+            _NUMBER_STATUS_ENUM,
             nullable=False,
             server_default="active",
         ),
@@ -162,31 +170,8 @@ def upgrade() -> None:
         sa.Column("from_e164", sa.String(length=16), nullable=False),
         sa.Column("to_e164", sa.String(length=16), nullable=False),
         sa.Column("bridged_to_e164", sa.String(length=16), nullable=True),
-        sa.Column(
-            "direction",
-            sa.Enum(
-                "customer_to_sp",
-                "sp_to_customer",
-                "unmatched",
-                name="calldirection",
-                create_type=False,
-            ),
-            nullable=False,
-        ),
-        sa.Column(
-            "status",
-            sa.Enum(
-                "ringing",
-                "in_progress",
-                "completed",
-                "failed",
-                "no_answer",
-                "busy",
-                name="callstatus",
-                create_type=False,
-            ),
-            nullable=False,
-        ),
+        sa.Column("direction", _DIRECTION_ENUM, nullable=False),
+        sa.Column("status", _CALL_STATUS_ENUM, nullable=False),
         sa.Column("duration_sec", sa.Integer(), nullable=True),
         sa.Column("recording_url", sa.Text(), nullable=True),
         sa.Column(
