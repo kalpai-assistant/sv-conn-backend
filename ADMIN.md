@@ -183,7 +183,10 @@ could.
 `date_to` exclusive; a date with no offset means UTC) and `GET /admin/audit/filters`.
 Admin role only, because ops shouldn't review their own actions. `GET /admin/actions`
 is the owner history on the Teams screen and the SP/Pro pages: all three roles
-(SVC-427), and only the 3 team actions.
+(SVC-427), and only the 3 team actions. A Pro row's history
+(`target_type=professional&target_id=X`) also lists a reassign that landed the
+person on row X (stored against the row they left) and a deactivation that removed
+row X (stored against the user).
 
 **Adding a write route.** Call the helper in the handler, in the same transaction as
 the change, and add a case to `AUDITED_WRITE_ROUTES` in `tests/test_admin_audit.py`,

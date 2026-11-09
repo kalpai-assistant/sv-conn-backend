@@ -197,7 +197,11 @@ async def reassign_pro(
 @router.get("/actions", response_model=list[AdminActionRow], dependencies=[_any_admin_role_dep])
 async def list_admin_actions(
     target_type: Literal["user", "professional"] | None = Query(None),
-    target_id: UUID | None = Query(None),
+    target_id: UUID | None = Query(
+        None,
+        description="With target_type=professional: a Pro row's full history, including a "
+        "reassign that landed the person on this row and a deactivation that removed it.",
+    ),
     sp_user_id: UUID | None = Query(
         None,
         description="An owner's history: actions on them or their team, including a "

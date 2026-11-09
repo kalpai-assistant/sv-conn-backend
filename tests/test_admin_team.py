@@ -688,6 +688,95 @@ async def test_actions_filter_by_target_and_by_either_owner(client, db_session, 
     assert row["to_sp_user_id"] == str(b.id)
 
 
+# --- A Pro row's history includes incoming actions (SVC-427 follow-up) -------------
+
+
+async def _history(client, headers, **params) -> list[tuple[str, str]]:
+    resp = await client.get(f"{A}/actions", params=params, headers=headers)
+    assert resp.status_code == 200, resp.text
+    return [(r["action"], r["target_id"]) for r in resp.json()]
+
+
+def _pro_history(client, headers, pro_id):
+    return _history(client, headers, target_type="professional", target_id=str(pro_id))
+
+
+@pytest.mark.asyncio
+async def test_pro_history_includes_the_reassign_that_landed_on_a_new_row(
+    client, db_session, as_admin
+):
+    service = await _service(db_session)
+    a, _, member = await _team_sp(db_session, service)
+    b = await _owner(db_session, service)
+    _, _, bystander = await _team_sp(db_session, service)
+
+    resp = await _reassign(client, as_admin, member.id, b.id)
+    assert resp.status_code == 200, resp.text
+    new_id = resp.json()["professional"]["id"]
+
+    move = ("pro_reassigned", str(member.id))
+    # The row they landed on now shows the move in, stored against the old row.
+    assert await _pro_history(client, as_admin, new_id) == [move]
+    # The row they left shows it exactly once (it doesn't match two ways).
+    assert await _pro_history(client, as_admin, member.id) == [move]
+    assert await _pro_history(client, as_admin, bystander.id) == []
+    # Every other filter is still an exact match on the stored target.
+    assert await _history(client, as_admin, target_id=new_id) == []
+    # Owner histories are unchanged: one row each.
+    assert await _history(client, as_admin, sp_user_id=str(a.id)) == [move]
+    assert await _history(client, as_admin, sp_user_id=str(b.id)) == [move]
+
+
+@pytest.mark.asyncio
+async def test_a_reactivated_rows_history_has_the_move_back_and_its_own_older_rows(
+    client, db_session, as_admin
+):
+    service = await _service(db_session)
+    b, _, original = await _team_sp(db_session, service)
+    a = await _owner(db_session, service)
+
+    # B -> A creates a row under A; A -> B reactivates the original row.
+    first = await _reassign(client, as_admin, original.id, a.id)
+    assert first.status_code == 200, first.text
+    a_row = first.json()["professional"]["id"]
+    back = await _reassign(client, as_admin, a_row, b.id)
+    assert back.status_code == 200, back.text
+    assert (back.json()["reactivated"], back.json()["professional"]["id"]) == (
+        True,
+        str(original.id),
+    )
+
+    # Newest first: the move back in (stored against the A row), then its own move out.
+    assert await _pro_history(client, as_admin, original.id) == [
+        ("pro_reassigned", a_row),
+        ("pro_reassigned", str(original.id)),
+    ]
+    assert await _pro_history(client, as_admin, a_row) == [
+        ("pro_reassigned", a_row),
+        ("pro_reassigned", str(original.id)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pro_history_includes_the_deactivation_that_removed_the_row(
+    client, db_session, as_admin
+):
+    service = await _service(db_session)
+    _, _, member = await _team_sp(db_session, service)
+    _, _, bystander = await _team_sp(db_session, service)
+
+    resp = await client.patch(f"{A}/users/{member.user_id}/deactivate", headers=as_admin)
+    assert resp.status_code == 204, resp.text
+
+    deactivated = ("user_deactivated", str(member.user_id))
+    assert await _pro_history(client, as_admin, member.id) == [deactivated]
+    assert await _pro_history(client, as_admin, bystander.id) == []
+    # The user's own history is unchanged.
+    assert await _history(client, as_admin, target_type="user", target_id=str(member.user_id)) == [
+        deactivated
+    ]
+
+
 # --- RBAC ---------------------------------------------------------------------------
 
 
