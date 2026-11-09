@@ -378,6 +378,8 @@ async def list_all_bookings(
     provider_name: str | None = Query(
         None, description="Case-insensitive substring of the SP's name"
     ),
+    provider_id: UUID | None = Query(None, description="Exactly this SP (its user id)"),
+    professional_id: UUID | None = Query(None, description="Exactly this Pro row"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -437,6 +439,12 @@ async def list_all_bookings(
             .where(User.id == Booking.provider_id, User.name.ilike(pattern, escape="\\"))
             .exists()
         )
+
+    # SVC-427: the SP page's "last 30 days" link and the Pro page's recent jobs.
+    if provider_id is not None:
+        filters.append(Booking.provider_id == provider_id)
+    if professional_id is not None:
+        filters.append(Booking.professional_id == professional_id)
 
     stmt = select(Booking, disputed_exists.label("is_disputed")).where(*filters)
     count_stmt = select(func.count()).select_from(Booking).where(*filters)

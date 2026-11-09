@@ -96,7 +96,10 @@ async def test_owner_detail_is_the_search_row(client, db_session, as_admin):
     search = await client.get(f"{A}/providers", params={"q": sp.phone}, headers=as_admin)
 
     assert detail.status_code == 200, detail.text
-    assert [detail.json()] == search.json()
+    # SVC-427: the detail is a superset (the SP page's aggregates), but every
+    # field of the search row is there and unchanged.
+    [row] = search.json()
+    assert {key: detail.json()[key] for key in row} == row
     assert detail.json()["active_pro_count"] == 2
 
 
