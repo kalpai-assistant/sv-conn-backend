@@ -75,6 +75,16 @@ AUDIT_FIELDS: dict[str, tuple[str, ...]] = {
         "duration_minutes",
         "is_active",
     ),
+    # SVC-428: a pricing save records only the fields it changed, from these.
+    "category": (
+        "is_sensitive",
+        "reference_price",
+        "bounds_pct",
+        "platform_commission_pct",
+        "platform_commission_min",
+        "commission_gst_pct",
+    ),
+    "pricing_config": ("value_json",),
 }
 
 # Never in an audit row, whatever a caller passes. So is every ``*_encrypted``

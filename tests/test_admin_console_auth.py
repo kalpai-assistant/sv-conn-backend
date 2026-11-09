@@ -781,6 +781,11 @@ ROUTE_ROLES = {
     # admin_audit.py
     ("GET", "/admin/audit"): ADMIN_ONLY,
     ("GET", "/admin/audit/filters"): ADMIN_ONLY,
+    # admin_pricing.py (SVC-428)
+    ("GET", "/admin/pricing/categories"): ALL,
+    ("PATCH", "/admin/pricing/categories/{category_id}"): ADMIN_OPS,
+    ("GET", "/admin/pricing/config"): ALL,
+    ("PATCH", "/admin/pricing/config/{key}"): ADMIN_OPS,
     # services.py: admin writes outside the /admin prefix
     ("POST", "/services"): ADMIN_OPS,
     ("PATCH", "/services/{service_id}"): ADMIN_OPS,
@@ -803,9 +808,16 @@ def test_route_table_covers_every_admin_route():
 
 def _concrete(path: str) -> str:
     out = path
-    for name in ("user_id", "professional_id", "booking_id", "sp_user_id", "service_id"):
+    for name in (
+        "user_id",
+        "professional_id",
+        "booking_id",
+        "sp_user_id",
+        "service_id",
+        "category_id",
+    ):
         out = out.replace("{" + name + "}", str(uuid.uuid4()))
-    return out.replace("{platform}", "android")
+    return out.replace("{platform}", "android").replace("{key}", "ranking_weights")
 
 
 # Every call sends an empty JSON body, so a write with a required body stops at 422
