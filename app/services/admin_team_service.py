@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, time, timedelta, timezone
 
 from fastapi import status
-from sqlalchemy import Select, case, func, or_, select
+from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -450,16 +450,46 @@ class AdminTeamService:
         """The 3 team actions, newest first: the owner history on the Teams
         screen, which support reads too, so it must never show more (SVC-423).
         ``sp_user_id`` matches an owner on either side of the action, so a
-        reassign shows in both owners' histories."""
+        reassign shows in both owners' histories.
+
+        A Pro row's history (``target_type="professional"`` and ``target_id``
+        both given) also includes the two actions stored under another target
+        (SVC-427 follow-up): a reassign that landed the person on this row (new
+        or reactivated; the target is the row they left, this row is
+        ``details.to_professional_id``), and a deactivation that removed this
+        row (target is the user; this row is in
+        ``details.removed_professional_ids``). One ``WHERE`` with ``OR``, so a
+        row matching two ways comes back once. Every other combination of
+        filters is an exact match on the stored target, as before.
+        """
         stmt = (
             select(AdminAction, User.name)
             .join(User, User.id == AdminAction.admin_user_id)
             .where(AdminAction.action.in_(TEAM_ACTIONS))
         )
-        if target_type is not None:
-            stmt = stmt.where(AdminAction.target_type == target_type)
-        if target_id is not None:
-            stmt = stmt.where(AdminAction.target_id == str(target_id))
+        if target_type == "professional" and target_id is not None:
+            pro_id = str(target_id)
+            stmt = stmt.where(
+                or_(
+                    and_(
+                        AdminAction.target_type == "professional",
+                        AdminAction.target_id == pro_id,
+                    ),
+                    and_(
+                        AdminAction.action == "pro_reassigned",
+                        AdminAction.details["to_professional_id"].astext == pro_id,
+                    ),
+                    and_(
+                        AdminAction.action == "user_deactivated",
+                        AdminAction.details.contains({"removed_professional_ids": [pro_id]}),
+                    ),
+                )
+            )
+        else:
+            if target_type is not None:
+                stmt = stmt.where(AdminAction.target_type == target_type)
+            if target_id is not None:
+                stmt = stmt.where(AdminAction.target_id == str(target_id))
         if sp_user_id is not None:
             stmt = stmt.where(
                 or_(AdminAction.sp_user_id == sp_user_id, AdminAction.to_sp_user_id == sp_user_id)
