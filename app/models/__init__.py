@@ -18,6 +18,12 @@ from app.models.booking_assignment_event import BookingAssignmentEvent  # noqa: 
 from app.models.booking_item import BookingItem  # noqa: F401
 from app.models.booking_offer import BookingOffer, OfferResponse  # noqa: F401
 from app.models.booking_status_log import BookingStatusLog  # noqa: F401
+from app.models.call_mapping import CallMapping  # noqa: F401
+from app.models.call_record import (  # noqa: F401
+    CallDirection,
+    CallRecord,
+    CallStatus,
+)
 from app.models.category import Category  # noqa: F401
 from app.models.coupon import Coupon, CouponRedemption, DiscountType  # noqa: F401
 from app.models.payment import Payment  # noqa: F401
@@ -37,3 +43,8 @@ from app.models.service_relationship import RelationshipType, ServiceRelationshi
 from app.models.service_variant import ServiceVariant  # noqa: F401
 from app.models.settlement_statement import SettlementStatement  # noqa: F401
 from app.models.user import User, UserRole  # noqa: F401
+from app.models.virtual_number_pool import (  # noqa: F401
+    VirtualNumberPool,
+    VirtualNumberProvider,
+    VirtualNumberStatus,
+)
