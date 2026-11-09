@@ -30,8 +30,9 @@ unreferenced at DROP TYPE time.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "a1b2c3d4e5f6"
@@ -46,9 +47,7 @@ depends_on: str | Sequence[str] | None = None
 # ``op.create_table`` from re-emitting ``CREATE TYPE`` (which would blow up on
 # the duplicate). Keeping them at module scope also means upgrade and
 # downgrade can't disagree about the value list.
-_PROVIDER_ENUM = postgresql.ENUM(
-    "exotel", name="virtualnumberprovider", create_type=False
-)
+_PROVIDER_ENUM = postgresql.ENUM("exotel", name="virtualnumberprovider", create_type=False)
 _NUMBER_STATUS_ENUM = postgresql.ENUM(
     "active",
     "disabled",
@@ -132,9 +131,7 @@ def upgrade() -> None:
         ),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("released_at", sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(
-            ["virtual_number_id"], ["virtual_number_pool.id"]
-        ),
+        sa.ForeignKeyConstraint(["virtual_number_id"], ["virtual_number_pool.id"]),
         sa.ForeignKeyConstraint(["booking_id"], ["bookings.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -174,16 +171,12 @@ def upgrade() -> None:
         sa.Column("status", _CALL_STATUS_ENUM, nullable=False),
         sa.Column("duration_sec", sa.Integer(), nullable=True),
         sa.Column("recording_url", sa.Text(), nullable=True),
-        sa.Column(
-            "recording_expires_at", sa.DateTime(timezone=True), nullable=True
-        ),
+        sa.Column("recording_expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["call_mapping_id"], ["call_mappings.id"]),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "provider_call_sid", name="uq_call_records_provider_call_sid"
-        ),
+        sa.UniqueConstraint("provider_call_sid", name="uq_call_records_provider_call_sid"),
     )
     op.create_index(
         "ix_call_records_call_mapping_id",
@@ -208,18 +201,12 @@ def downgrade() -> None:
     op.drop_index("ix_call_records_call_mapping_id", table_name="call_records")
     op.drop_table("call_records")
 
-    op.drop_index(
-        "ix_call_mappings_expires_at_active", table_name="call_mappings"
-    )
+    op.drop_index("ix_call_mappings_expires_at_active", table_name="call_mappings")
     op.drop_index("ix_call_mappings_booking_id", table_name="call_mappings")
-    op.drop_index(
-        "uq_call_mappings_virtual_number_active", table_name="call_mappings"
-    )
+    op.drop_index("uq_call_mappings_virtual_number_active", table_name="call_mappings")
     op.drop_table("call_mappings")
 
-    op.drop_index(
-        "ix_virtual_number_pool_status", table_name="virtual_number_pool"
-    )
+    op.drop_index("ix_virtual_number_pool_status", table_name="virtual_number_pool")
     op.drop_table("virtual_number_pool")
 
     bind = op.get_bind()
