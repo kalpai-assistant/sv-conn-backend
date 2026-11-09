@@ -22,6 +22,7 @@ from app.models.category import Category  # noqa: F401
 from app.models.coupon import Coupon, CouponRedemption, DiscountType  # noqa: F401
 from app.models.payment import Payment  # noqa: F401
 from app.models.payout_audit import PayoutAudit  # noqa: F401
+from app.models.pricing_config import PricingConfig  # noqa: F401
 from app.models.professional import Professional  # noqa: F401
 from app.models.provider_ledger_entry import (  # noqa: F401
     LedgerEntryType,

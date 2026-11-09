@@ -43,6 +43,8 @@ from app.models.admin_action import (
 )
 from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, PaymentStatus, SettlementStatus
+from app.models.category import Category
+from app.models.pricing_config import PricingConfig
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.service import Service
@@ -60,6 +62,8 @@ from tests.factories.user_factory import UserFactory
 from tests.test_accept_contract import _eligible_provider, _service
 from tests.test_admin_console_auth import _admin, _session
 from tests.test_admin_force_cancel import _seed_booking
+from tests.test_admin_pricing import category as _pricing_category
+from tests.test_admin_pricing import seed_config
 from tests.test_two_level_dispatch import _team_pro, _team_sp
 
 V1 = "/api/v1"
@@ -88,6 +92,8 @@ RECORD_MODELS = {
     "booking": Booking,
     "app_version": AppVersion,
     "service": Service,
+    "category": Category,
+    "pricing_config": PricingConfig,
 }
 
 
@@ -421,6 +427,32 @@ async def _service_delete(db) -> Case:
     )
 
 
+async def _pricing_category_update(db) -> Case:
+    cat = await _pricing_category(db)
+    return Case(
+        url=f"{A}/pricing/categories/{cat.id}",
+        body={"is_sensitive": True, "bounds_pct": 25},
+        action="pricing.category_update",
+        target_type="category",
+        target_id=cat.id,
+        before={"is_sensitive": False, "bounds_pct": None},
+        after={"is_sensitive": True, "bounds_pct": 25.0},
+    )
+
+
+async def _pricing_config_update(db) -> Case:
+    await seed_config(db)
+    return Case(
+        url=f"{A}/pricing/config/sheet_ttl_seconds",
+        body={"value": 300},
+        action="pricing.config_update",
+        target_type="pricing_config",
+        target_id="sheet_ttl_seconds",
+        before={"value_json": 600},
+        after={"value_json": 300},
+    )
+
+
 AUDITED_WRITE_ROUTES = {
     ("PATCH", "/admin/users/{user_id}/deactivate"): _deactivate,
     ("POST", "/admin/pros/{professional_id}/force-remove"): _force_remove,
@@ -437,6 +469,8 @@ AUDITED_WRITE_ROUTES = {
     ("POST", "/services"): _service_create,
     ("PATCH", "/services/{service_id}"): _service_update,
     ("DELETE", "/services/{service_id}"): _service_delete,
+    ("PATCH", "/admin/pricing/categories/{category_id}"): _pricing_category_update,
+    ("PATCH", "/admin/pricing/config/{key}"): _pricing_config_update,
 }
 
 
@@ -452,7 +486,7 @@ def test_every_admin_write_route_has_an_audit_case():
             if is_admin or path.startswith("/services"):
                 found.add((method, path))
     assert found == set(AUDITED_WRITE_ROUTES)
-    assert len(found) == 15
+    assert len(found) == 17
 
 
 @pytest.fixture

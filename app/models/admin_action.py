@@ -26,6 +26,8 @@ ADMIN_ACTIONS = (
     "service.create",
     "service.update",
     "service.delete",
+    "pricing.category_update",
+    "pricing.config_update",
 )
 ADMIN_ACTION_TARGET_TYPES = (
     "user",
@@ -34,6 +36,8 @@ ADMIN_ACTION_TARGET_TYPES = (
     "booking",
     "app_version",
     "service",
+    "category",
+    "pricing_config",
 )
 
 USER_AGENT_MAX_LENGTH = 512

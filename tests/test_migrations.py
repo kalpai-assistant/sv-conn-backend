@@ -1235,3 +1235,108 @@ def test_retire_first20_coupon_round_trip(scratch_db):
 
     _alembic(scratch_db, "downgrade", BEFORE_RETIRE_FIRST20)
     assert _coupon_states(scratch_db) == {"First20": True, "EXPO25": True, "FIRST100": True}
+
+
+# --- SVC-428: category pricing columns + pricing_config ------------------------
+
+SVC_428 = "d762e3df6aa5"
+BEFORE_SVC_428 = "9d31d9715e0e"
+SVC_428_COLUMNS = {
+    ("is_sensitive", "BOOLEAN", False),
+    ("reference_price", "NUMERIC(10, 2)", True),
+    ("bounds_pct", "NUMERIC(5, 2)", True),
+    ("platform_commission_pct", "NUMERIC(5, 2)", False),
+    ("platform_commission_min", "NUMERIC(10, 2)", False),
+    ("commission_gst_pct", "NUMERIC(5, 2)", False),
+}
+
+
+def _seed_before_svc_428(url: URL) -> None:
+    """Three of the four sensitive slugs (no pest-control), plus one that isn't."""
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            for slug in ("ac", "plumber", "electrician", "cleaning"):
+                conn.execute(
+                    text(
+                        "INSERT INTO categories (id, name, slug, is_active, sort_order) "
+                        "VALUES (:id, :name, :slug, true, 1)"
+                    ),
+                    {"id": uuid.uuid4(), "name": f"SVC-428 {slug}", "slug": slug},
+                )
+    finally:
+        engine.dispose()
+
+
+def test_svc_428_adds_pricing_columns_seeds_config_and_round_trips(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_428)
+    _seed_before_svc_428(scratch_db)
+    before = _shape(scratch_db, "categories")
+
+    _alembic(scratch_db, "upgrade", SVC_428)
+    upgraded = _shape(scratch_db, "categories")
+    assert set(upgraded["columns"]) - set(before["columns"]) == SVC_428_COLUMNS
+
+    pricing = {
+        row["slug"]: dict(row)
+        for row in _query(
+            scratch_db,
+            "SELECT slug, is_sensitive, bounds_pct, reference_price, platform_commission_pct, "
+            "platform_commission_min, commission_gst_pct FROM categories",
+        )
+    }
+    # pest-control isn't in this DB: skipped, not an error. The L1 tiles come from
+    # an earlier migration and stay at the defaults.
+    seeded = {"ac", "plumber", "electrician", "cleaning"}
+    assert {
+        slug: (r["is_sensitive"], r["bounds_pct"]) for slug, r in pricing.items() if slug in seeded
+    } == {
+        "ac": (True, 25),
+        "plumber": (True, 20),
+        "electrician": (True, 20),
+        "cleaning": (False, None),
+    }
+    assert not [slug for slug, r in pricing.items() if slug not in seeded and r["is_sensitive"]]
+    for row in pricing.values():
+        assert row["reference_price"] is None
+        assert (
+            row["platform_commission_pct"],
+            row["platform_commission_min"],
+            row["commission_gst_pct"],
+        ) == (20, 30, 18)
+
+    config = {
+        row["key"]: dict(row)
+        for row in _query(scratch_db, "SELECT key, value_json, updated_by FROM pricing_config")
+    }
+    assert {key: row["value_json"] for key, row in config.items()} == {
+        "ranking_weights": {
+            "rating": 0.35,
+            "price_vs_ref": 0.25,
+            "distance": 0.20,
+            "reliability": 0.15,
+            "activity": 0.05,
+        },
+        "boost_window_days": 14,
+        "boost_window_jobs": 10,
+        "sheet_ttl_seconds": 600,
+    }
+    assert all(row["updated_by"] is None for row in config.values())
+
+    # A sensitive row without bounds can't be saved.
+    engine = create_engine(scratch_db)
+    try:
+        with pytest.raises(Exception, match="ck_categories_sensitive_needs_bounds"):
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE categories SET bounds_pct = NULL WHERE slug = 'ac'"))
+    finally:
+        engine.dispose()
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_428)
+    assert _shape(scratch_db, "categories") == before
+    [table] = _query(scratch_db, "SELECT to_regclass('pricing_config') AS t")
+    assert table["t"] is None
+    assert not _query(
+        scratch_db,
+        "SELECT 1 FROM pg_constraint WHERE conname = 'ck_categories_sensitive_needs_bounds'",
+    )

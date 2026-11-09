@@ -80,8 +80,8 @@ this table and fails if a new `/admin` route isn't in it.
 
 | Roles | Routes |
 |---|---|
-| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv` |
-| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}` |
+| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config` |
+| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428) |
 | admin, support | `GET /admin/users` |
 | admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
@@ -221,6 +221,8 @@ passes them: `password_hash`, `totp_secret`, `fcm_token`, every `*_encrypted` co
 | `payout.requeue_failed`, `payout.requeue_reversed` | `provider` | the 2 requeue routes |
 | `app_version.release` | `app_version` (`target_id` is the platform) | `POST /admin/app-versions/{platform}/release` |
 | `service.create`, `service.update`, `service.delete` | `service` | `POST`, `PATCH`, `DELETE /services` |
+| `pricing.category_update` | `category` | `PATCH /admin/pricing/categories/{id}` |
+| `pricing.config_update` | `pricing_config` (`target_id` is the key) | `PATCH /admin/pricing/config/{key}` |
 
 **Exceptions worth knowing.**
 
@@ -234,6 +236,9 @@ passes them: `password_hash`, `totp_secret`, `fcm_token`, every `*_encrypted` co
   both the token and a JWT counts as the token.
 - **Actions that write no row.** Refused ones, and deactivating an unknown id (a silent
   204).
+- **Pricing (SVC-428).** `before_json` / `after_json` hold only the fields the save
+  changed, including `bounds_pct` when turning `is_sensitive` off clears it. A save
+  that changes nothing is a 200 with no row.
 
 **IP and User-Agent.** Recording them never fails the action: an IP that doesn't parse
 saves NULL, and the User-Agent is cut to 512 characters. The IP comes from

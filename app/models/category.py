@@ -1,7 +1,19 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -21,6 +33,12 @@ class Category(Base):
     """
 
     __tablename__ = "categories"
+    __table_args__ = (
+        CheckConstraint(
+            "is_sensitive = false OR bounds_pct IS NOT NULL",
+            name="ck_categories_sensitive_needs_bounds",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
@@ -38,6 +56,28 @@ class Category(Base):
         ForeignKey("categories.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
+    )
+
+    # SVC-428: pricing config, edited at /admin/pricing/categories. Set on every
+    # row, L1 and L2 alike; the console groups L2 under L1. Inert until the
+    # marketplace stories read it: commission (SVC-410) and the sensitive-category
+    # price bounds (SVC-406). Booking commission still comes from
+    # service_variants.platform_commission / settings.PLATFORM_COMMISSION_PERCENT.
+    # Never on the public GET /categories.
+    is_sensitive: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    reference_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    # Required while is_sensitive (the CHECK above), NULL otherwise.
+    bounds_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    platform_commission_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), nullable=False, default=Decimal("20.00"), server_default=text("20.00")
+    )
+    platform_commission_min: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=Decimal("30.00"), server_default=text("30.00")
+    )
+    commission_gst_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), nullable=False, default=Decimal("18.00"), server_default=text("18.00")
     )
 
     # Relationships
