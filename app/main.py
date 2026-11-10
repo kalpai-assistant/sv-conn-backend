@@ -32,6 +32,7 @@ from app.routers import (
     tracking,
     users,
 )
+from app.routers.webhooks import exotel as exotel_webhooks
 from app.utils.gcp_wif import bootstrap_gcp_credentials
 
 settings = get_settings()
@@ -155,6 +156,13 @@ def create_app() -> FastAPI:
     app.include_router(admin.router, prefix=prefix)
     app.include_router(admin_team.router, prefix=prefix)
     app.include_router(downloads.router, prefix=prefix)
+
+    # SVC-450: Exotel webhooks are provider-initiated, so they live outside
+    # the API_V1_PREFIX namespace. Exotel's dashboard points at
+    # ``https://.../webhooks/exotel/incoming`` and ``/call-ended``; moving
+    # them later would mean asking Exotel support to update every pool
+    # number, so pin the path now.
+    app.include_router(exotel_webhooks.router)
 
     # -----------------------------------------------------------------------
     # Health probes (SVC-48) — /health = liveness, /healthz = readiness.
