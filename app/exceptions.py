@@ -278,6 +278,24 @@ class IdempotencyInProgress(AppException):
         )
 
 
+class NoVirtualNumbersAvailable(AppException):
+    """SVC-449: call-masking pool is exhausted at allocate time.
+
+    503 (not 500) because the booking state machine is fine — only the
+    privacy-layer side effect could not be performed. The caller converts
+    this into a user-facing "service briefly degraded" response; the booking
+    confirmation itself is never blocked by it. Loud log + metric at the
+    service layer so pool shortage pages ops before many bookings land.
+    """
+
+    def __init__(self, message: str = "No virtual numbers available in the pool"):
+        super().__init__(
+            message,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="NO_VIRTUAL_NUMBERS_AVAILABLE",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Handler registration
 # ---------------------------------------------------------------------------

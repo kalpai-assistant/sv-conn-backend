@@ -1068,6 +1068,15 @@ class BookingService:
         )
         if pro is not None:
             await self.record_assignment(booking, "claimed", None, pro.id, actor_id=sp_id)
+        # SVC-449: ACCEPTED is "booking confirmed" in call-masking terms. Hook
+        # the allocator in here so both the solo-accept path (via
+        # ``accept_booking``) and the team-assign path (via ``assign``) get
+        # a mapping — the two call sites share ``_claim``. Hook-safe wrapper:
+        # a pool-exhausted or allocator failure logs loudly but does NOT roll
+        # back the claim (see ``allocate_for_booking`` docstring).
+        from app.services.call_masking import allocate_for_booking
+
+        await allocate_for_booking(self.db, booking.id)
         return booking
 
     # ------------------------------------------------------------------
@@ -1583,6 +1592,18 @@ class BookingService:
             metadata=metadata,
         )
 
+        # SVC-449: complete / cancel starts the 48 h grace on the call
+        # mapping. Idempotent — no-op if there is no mapping (e.g. pool was
+        # exhausted at accept time, or allocate hadn't run yet), and
+        # no-op on a second fire (first stamp wins). Does NOT run on a
+        # provider-initiated cancel-from-ACCEPTED, which ``cancel`` routes
+        # through ``reopen`` instead (the mapping stays active so the
+        # next SP that accepts gets the same number).
+        if new_status in (BookingStatus.COMPLETED, BookingStatus.CANCELLED):
+            from app.services.call_masking import release_for_booking
+
+            await release_for_booking(self.db, booking.id)
+
         # Every transition route answers with a BookingResponse, which now
         # renders `address` (SVC-170), `items`, and `status_history` (SVC-248).
         # The history hydrator runs last and deliberately after
@@ -1789,6 +1810,13 @@ class BookingService:
             metadata={"admin_override": True},
             note=reason,
         )
+
+        # SVC-449: admin force-cancel path bypasses ``transition_status``'s
+        # own hook; mirror the release here so an admin cancel starts the
+        # 48 h grace exactly like a consumer/provider cancel would.
+        from app.services.call_masking import release_for_booking
+
+        await release_for_booking(self.db, booking.id)
 
         await self.attach_addresses([booking])
         await self.attach_items([booking])
