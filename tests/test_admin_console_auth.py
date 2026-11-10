@@ -793,6 +793,18 @@ ROUTE_ROLES = {
     ("PATCH", "/admin/coupons/{code}"): ADMIN_OPS,
     ("POST", "/admin/coupons/{code}/deactivate"): ADMIN_OPS,
     ("POST", "/admin/coupons/{code}/activate"): ADMIN_OPS,
+    # admin_catalog.py (SVC-430)
+    ("GET", "/admin/catalog"): ALL,
+    ("GET", "/admin/catalog/categories/{category_id}"): ALL,
+    ("POST", "/admin/catalog/categories"): ADMIN_OPS,
+    ("PATCH", "/admin/catalog/categories/{category_id}"): ADMIN_OPS,
+    ("POST", "/admin/catalog/categories/{category_id}/deactivate"): ADMIN_OPS,
+    ("POST", "/admin/catalog/categories/{category_id}/activate"): ADMIN_OPS,
+    ("GET", "/admin/catalog/services/{service_id}"): ALL,
+    ("POST", "/admin/catalog/services"): ADMIN_OPS,
+    ("PATCH", "/admin/catalog/services/{service_id}"): ADMIN_OPS,
+    ("POST", "/admin/catalog/services/{service_id}/deactivate"): ADMIN_OPS,
+    ("POST", "/admin/catalog/services/{service_id}/activate"): ADMIN_OPS,
     # services.py: admin writes outside the /admin prefix
     ("POST", "/services"): ADMIN_OPS,
     ("PATCH", "/services/{service_id}"): ADMIN_OPS,

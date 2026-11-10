@@ -74,9 +74,20 @@ AUDIT_FIELDS: dict[str, tuple[str, ...]] = {
         "base_price",
         "duration_minutes",
         "is_active",
+        # SVC-430
+        "icon_key",
+        "price_unit",
+        "min_qty",
     ),
-    # SVC-428: a pricing save records only the fields it changed, from these.
+    # SVC-428 pricing and SVC-430 catalog saves each record only the fields they
+    # changed, from these. A catalog create records the catalog ones.
     "category": (
+        "name",
+        "slug",
+        "icon_key",
+        "sort_order",
+        "is_active",
+        "parent_id",
         "is_sensitive",
         "reference_price",
         "bounds_pct",

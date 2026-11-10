@@ -510,6 +510,149 @@ async def _coupon_activate(db) -> Case:
     )
 
 
+async def _catalog_l1(db, *, is_active: bool = True) -> Category:
+    tag = uuid.uuid4().hex[:10]
+    row = Category(name=f"Aud L1 {tag}", slug=f"aud-l1-{tag}", is_active=is_active, sort_order=0)
+    db.add(row)
+    await db.flush()
+    return row
+
+
+async def _catalog_service(db, *, is_active: bool = True) -> Service:
+    category = await _catalog_l1(db)
+    service = Service(
+        category_id=category.id,
+        name="Aud Service",
+        base_price=499,
+        duration_minutes=60,
+        is_active=is_active,
+    )
+    db.add(service)
+    await db.flush()
+    return service
+
+
+async def _catalog_category_create(db) -> Case:
+    tag = uuid.uuid4().hex[:10]
+    return Case(
+        url=f"{A}/catalog/categories",
+        body={"name": f"Aud Create {tag}", "icon_key": "sparkles", "sort_order": 3},
+        status=201,
+        action="category.create",
+        target_type="category",
+        after={
+            "name": f"Aud Create {tag}",
+            "slug": f"aud-create-{tag}",
+            "icon_key": "sparkles",
+            "sort_order": 3,
+            "is_active": True,
+            "parent_id": None,
+        },
+    )
+
+
+async def _catalog_category_update(db) -> Case:
+    cat = await _catalog_l1(db)
+    return Case(
+        url=f"{A}/catalog/categories/{cat.id}",
+        body={"sort_order": 7},
+        action="category.update",
+        target_type="category",
+        target_id=cat.id,
+        before={"sort_order": 0},
+        after={"sort_order": 7},
+    )
+
+
+async def _catalog_category_deactivate(db) -> Case:
+    cat = await _catalog_l1(db)
+    return Case(
+        url=f"{A}/catalog/categories/{cat.id}/deactivate",
+        action="category.deactivate",
+        target_type="category",
+        target_id=cat.id,
+        before={"is_active": True},
+        after={"is_active": False},
+    )
+
+
+async def _catalog_category_activate(db) -> Case:
+    cat = await _catalog_l1(db, is_active=False)
+    return Case(
+        url=f"{A}/catalog/categories/{cat.id}/activate",
+        action="category.activate",
+        target_type="category",
+        target_id=cat.id,
+        before={"is_active": False},
+        after={"is_active": True},
+    )
+
+
+async def _catalog_service_create(db) -> Case:
+    cat = await _catalog_l1(db)
+    return Case(
+        url=f"{A}/catalog/services",
+        body={
+            "category_id": str(cat.id),
+            "name": "Floor Polishing",
+            "base_price": 12.5,
+            "price_unit": "PER_SQFT",
+            "min_qty": 200,
+            "icon_key": "brush",
+        },
+        status=201,
+        action="service.create",
+        target_type="service",
+        after={
+            "name": "Floor Polishing",
+            "base_price": 12.5,
+            "price_unit": "PER_SQFT",
+            "min_qty": 200,
+            "icon_key": "brush",
+            "is_active": True,
+        },
+    )
+
+
+async def _catalog_service_update(db) -> Case:
+    service = await _catalog_service(db)
+    return Case(
+        url=f"{A}/catalog/services/{service.id}",
+        body={"price_unit": "PER_HOUR", "min_qty": 2},
+        action="service.update",
+        target_type="service",
+        target_id=service.id,
+        before={"price_unit": "PER_VISIT", "min_qty": None},
+        after={"price_unit": "PER_HOUR", "min_qty": 2},
+    )
+
+
+async def _catalog_service_deactivate(db) -> Case:
+    service = await _catalog_service(db)
+    return Case(
+        url=f"{A}/catalog/services/{service.id}/deactivate",
+        body={"confirm": False},
+        action="service.deactivate",
+        target_type="service",
+        target_id=service.id,
+        before={"is_active": True},
+        after={"is_active": False},
+        details={"active_bookings": 0, "confirm": False},
+    )
+
+
+async def _catalog_service_activate(db) -> Case:
+    service = await _catalog_service(db, is_active=False)
+    return Case(
+        url=f"{A}/catalog/services/{service.id}/activate",
+        action="service.activate",
+        target_type="service",
+        target_id=service.id,
+        before={"is_active": False},
+        after={"is_active": True},
+    )
+
+
 AUDITED_WRITE_ROUTES = {
     ("PATCH", "/admin/users/{user_id}/deactivate"): _deactivate,
     ("POST", "/admin/pros/{professional_id}/force-remove"): _force_remove,
@@ -532,6 +675,14 @@ AUDITED_WRITE_ROUTES = {
     ("PATCH", "/admin/coupons/{code}"): _coupon_update,
     ("POST", "/admin/coupons/{code}/deactivate"): _coupon_deactivate,
     ("POST", "/admin/coupons/{code}/activate"): _coupon_activate,
+    ("POST", "/admin/catalog/categories"): _catalog_category_create,
+    ("PATCH", "/admin/catalog/categories/{category_id}"): _catalog_category_update,
+    ("POST", "/admin/catalog/categories/{category_id}/deactivate"): _catalog_category_deactivate,
+    ("POST", "/admin/catalog/categories/{category_id}/activate"): _catalog_category_activate,
+    ("POST", "/admin/catalog/services"): _catalog_service_create,
+    ("PATCH", "/admin/catalog/services/{service_id}"): _catalog_service_update,
+    ("POST", "/admin/catalog/services/{service_id}/deactivate"): _catalog_service_deactivate,
+    ("POST", "/admin/catalog/services/{service_id}/activate"): _catalog_service_activate,
 }
 
 
@@ -547,7 +698,7 @@ def test_every_admin_write_route_has_an_audit_case():
             if is_admin or path.startswith("/services"):
                 found.add((method, path))
     assert found == set(AUDITED_WRITE_ROUTES)
-    assert len(found) == 21
+    assert len(found) == 29
 
 
 @pytest.fixture

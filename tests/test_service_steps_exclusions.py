@@ -131,6 +131,7 @@ def test_every_seeded_service_validates_as_a_detail_response():
         "duration_minutes": 60,
         "is_active": True,
         "created_at": datetime.now(UTC),
+        "icon_key": None,
     }
     for params in service_details_params():
         content = {

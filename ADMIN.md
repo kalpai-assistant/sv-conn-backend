@@ -80,8 +80,8 @@ this table and fails if a new `/admin` route isn't in it.
 
 | Roles | Routes |
 |---|---|
-| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config`, `/coupons`, `/coupons/{code}` |
-| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428), `POST /admin/coupons`, `PATCH /admin/coupons/{code}`, `POST /admin/coupons/{code}/deactivate` + `activate` (SVC-429) |
+| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config`, `/coupons`, `/coupons/{code}`, `/catalog`, `/catalog/categories/{id}`, `/catalog/services/{id}` |
+| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428), `POST /admin/coupons`, `PATCH /admin/coupons/{code}`, `POST /admin/coupons/{code}/deactivate` + `activate` (SVC-429), `POST /admin/catalog/categories` + `/catalog/services`, `PATCH /admin/catalog/categories/{id}` + `/catalog/services/{id}`, `POST .../deactivate` + `activate` on both (SVC-430) |
 | admin, support | `GET /admin/users` |
 | admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
@@ -194,6 +194,37 @@ edited and switched, but not created here.
   `valid_from`, and in the future on create (a PATCH may end a coupon early).
   `usage_limit` can't be set below the uses so far.
 
+---
+
+## Service catalog (SVC-430)
+
+`/admin/catalog` adds and edits categories and services without SQL. `GET /admin/catalog`
+is the whole tree, inactive rows included: L1 (home tile) → its L2s → their services.
+Each service row carries its active-variant count and its active bookings (requested,
+accepted, en route or in progress). Variants are read-only here, and SVC-428's pricing
+columns are edited at `/admin/pricing`, not here.
+
+- **Nothing is deleted.** Deactivate / activate are the only way a row is switched, and
+  PATCH has no `is_active`, so the active-bookings warning can't be skipped.
+- **Slugs never change.** A slug is made from the name at create (lowercase, `[a-z0-9-]`,
+  dashes collapsed). The consumer app keys its icons, tile images and `/category/$slug`
+  route on it. A name or slug that's taken is a 409 `CATALOG_NAME_TAKEN`.
+- **Structure.** Two levels. A category holds sub-categories or services, never both
+  (Miscellaneous is an L1 holding services). An active row can't sit under an inactive
+  one, checked on create, move and activate. These count inactive rows too.
+- **Deactivating** a category is refused (409 `CATEGORY_NOT_EMPTY`) while it holds an
+  active service or sub-category. Deactivating a service with bookings in flight is a
+  409 `SERVICE_HAS_ACTIVE_BOOKINGS` unless the body is `{"confirm": true}`; those bookings
+  carry on, and only new ones are refused.
+- **Icons** are picked from `app/seed_data/catalog_icons.py` (Lucide names). The
+  consumer app doesn't read `icon_key` yet: it still keys icons on the slug.
+- **Price unit** (`PER_VISIT`, `PER_SQFT`, `PER_HOUR`, `PER_ITEM`) and **min qty**
+  (required for `PER_SQFT` / `PER_HOUR`, refused otherwise) are stored for the
+  marketplace stories. Booking still prices from the variant, or `base_price`.
+- **Refusals:** 422 `CATALOG_INVALID` with `details.field`. On PATCH a field's own rule
+  runs only when it's sent, so an old row holding a value the rules now refuse can still
+  be edited.
+
 ## Audit log (SVC-423)
 
 Every admin write writes one `admin_actions` row: who, what, why, before and after,
@@ -243,6 +274,8 @@ passes them: `password_hash`, `totp_secret`, `fcm_token`, every `*_encrypted` co
 | `payout.requeue_failed`, `payout.requeue_reversed` | `provider` | the 2 requeue routes |
 | `app_version.release` | `app_version` (`target_id` is the platform) | `POST /admin/app-versions/{platform}/release` |
 | `service.create`, `service.update`, `service.delete` | `service` | `POST`, `PATCH`, `DELETE /services` |
+| `service.create`, `service.update`, `service.deactivate`, `service.activate` | `service` | `POST /admin/catalog/services`, `PATCH /admin/catalog/services/{id}`, `.../deactivate`, `activate` (`details` on a deactivate: `active_bookings`, `confirm`) |
+| `category.create`, `category.update`, `category.deactivate`, `category.activate` | `category` | `POST /admin/catalog/categories`, `PATCH /admin/catalog/categories/{id}`, `.../deactivate`, `activate` |
 | `pricing.category_update` | `category` | `PATCH /admin/pricing/categories/{id}` |
 | `pricing.config_update` | `pricing_config` (`target_id` is the key) | `PATCH /admin/pricing/config/{key}` |
 | `coupon.create`, `coupon.update` | `coupon` | `POST /admin/coupons`, `PATCH /admin/coupons/{code}` |
