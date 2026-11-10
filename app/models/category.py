@@ -44,6 +44,9 @@ class Category(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
     icon_url: Mapped[str | None] = mapped_column(String(512))
+    # SVC-430: a key from app.seed_data.catalog_icons.CATALOG_ICON_KEYS, or NULL.
+    # The consumer app still keys its icons on the slug and ignores icon_url.
+    icon_key: Mapped[str | None] = mapped_column(String(40), nullable=True)
     description: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)

@@ -173,6 +173,8 @@ async def test_public_categories_shape_is_unchanged(client, db_session):
         "name",
         "slug",
         "icon_url",
+        # SVC-430 adds the icon key; the pricing columns still stay off it.
+        "icon_key",
         "description",
         "sort_order",
         "parent_id",

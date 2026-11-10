@@ -1340,3 +1340,115 @@ def test_svc_428_adds_pricing_columns_seeds_config_and_round_trips(scratch_db):
         scratch_db,
         "SELECT 1 FROM pg_constraint WHERE conname = 'ck_categories_sensitive_needs_bounds'",
     )
+
+
+SVC_430 = "33122ac2373c"
+BEFORE_SVC_430 = SVC_428
+SVC_430_FILE = (
+    REPO_ROOT
+    / "alembic"
+    / "versions"
+    / "33122ac2373c_svc_430_catalog_icon_key_price_unit_min_qty.py"
+)
+
+
+def _svc_430_module():
+    spec = importlib.util.spec_from_file_location("svc_430_migration", SVC_430_FILE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_svc_430_frozen_checks_match_the_model():
+    from app.models.price_unit import MIN_QTY_CHECK, PRICE_UNIT_CHECK
+
+    module = _svc_430_module()
+    assert (module.PRICE_UNIT_CHECK, module.MIN_QTY_CHECK) == (PRICE_UNIT_CHECK, MIN_QTY_CHECK)
+
+
+def _seed_before_svc_430(url: URL) -> uuid.UUID:
+    """One category and one service, written before the columns exist."""
+    category_id, service_id = uuid.uuid4(), uuid.uuid4()
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO categories (id, name, slug, is_active, sort_order) "
+                    "VALUES (:id, 'SVC-430 cat', 'svc-430-cat', true, 1)"
+                ),
+                {"id": category_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO services (id, category_id, name, base_price, duration_minutes, "
+                    "is_active) VALUES (:id, :cat, 'SVC-430 svc', 499, 60, true)"
+                ),
+                {"id": service_id, "cat": category_id},
+            )
+    finally:
+        engine.dispose()
+    return service_id
+
+
+def _refused_by(url: URL, sql: str, constraint: str) -> None:
+    engine = create_engine(url)
+    try:
+        with pytest.raises(Exception, match=constraint):
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+    finally:
+        engine.dispose()
+
+
+def test_svc_430_adds_catalog_columns_backfills_and_round_trips(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_430)
+    service_id = _seed_before_svc_430(scratch_db)
+    before = {t: _shape(scratch_db, t) for t in ("categories", "services")}
+
+    _alembic(scratch_db, "upgrade", SVC_430)
+    after = {t: _shape(scratch_db, t) for t in ("categories", "services")}
+    assert set(after["categories"]["columns"]) - set(before["categories"]["columns"]) == {
+        ("icon_key", "VARCHAR(40)", True)
+    }
+    assert set(after["services"]["columns"]) - set(before["services"]["columns"]) == {
+        ("icon_key", "VARCHAR(40)", True),
+        ("price_unit", "VARCHAR(16)", False),
+        ("min_qty", "INTEGER", True),
+    }
+    # The existing row is backfilled.
+    [row] = _query(
+        scratch_db,
+        f"SELECT price_unit, min_qty, icon_key FROM services WHERE id = '{service_id}'",
+    )
+    assert dict(row) == {"price_unit": "PER_VISIT", "min_qty": None, "icon_key": None}
+
+    where = f"WHERE id = '{service_id}'"
+    _refused_by(
+        scratch_db, f"UPDATE services SET price_unit = 'PER_DAY' {where}", "ck_services_price_unit"
+    )
+    _refused_by(
+        scratch_db,
+        f"UPDATE services SET price_unit = 'PER_SQFT' {where}",
+        "ck_services_min_qty_unit",
+    )
+    _refused_by(
+        scratch_db,
+        f"UPDATE services SET price_unit = 'PER_HOUR', min_qty = 0 {where}",
+        "ck_services_min_qty_unit",
+    )
+    _refused_by(scratch_db, f"UPDATE services SET min_qty = 3 {where}", "ck_services_min_qty_unit")
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"UPDATE services SET price_unit = 'PER_SQFT', min_qty = 5 {where}"))
+    finally:
+        engine.dispose()
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_430)
+    assert {t: _shape(scratch_db, t) for t in ("categories", "services")} == before
+    assert not _query(
+        scratch_db,
+        "SELECT 1 FROM pg_constraint WHERE conname IN "
+        "('ck_services_price_unit', 'ck_services_min_qty_unit')",
+    )

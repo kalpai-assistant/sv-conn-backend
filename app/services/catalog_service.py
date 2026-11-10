@@ -311,6 +311,7 @@ class CatalogService:
             duration_minutes=service.duration_minutes,
             is_active=service.is_active,
             created_at=service.created_at,
+            icon_key=service.icon_key,
             variants=[ServiceVariantResponse.model_validate(v) for v in service.variants],
             related=related,
             banner_image_url=service.banner_image_url,
