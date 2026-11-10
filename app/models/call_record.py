@@ -45,7 +45,13 @@ class CallDirection(str, enum.Enum):
 
 class CallStatus(str, enum.Enum):
     """Exotel call lifecycle. Mirrors Exotel's own vocabulary 1:1 so the
-    webhook writes the status it was given, without a translation layer."""
+    webhook writes the status it was given, without a translation layer.
+
+    ``declined_consent`` is the one addition on top of Exotel's native set
+    (SVC-451): the press-2 branch on the consent IVR writes this status
+    after hanging up. The DB enum value is added by the SVC-451 migration
+    (``ALTER TYPE callstatus ADD VALUE 'declined_consent'``).
+    """
 
     RINGING = "ringing"
     IN_PROGRESS = "in_progress"
@@ -53,6 +59,7 @@ class CallStatus(str, enum.Enum):
     FAILED = "failed"
     NO_ANSWER = "no_answer"
     BUSY = "busy"
+    DECLINED_CONSENT = "declined_consent"
 
 
 class CallRecord(Base):

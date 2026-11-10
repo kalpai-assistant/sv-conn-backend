@@ -26,6 +26,7 @@ from app.models.call_record import (  # noqa: F401
 )
 from app.models.category import Category  # noqa: F401
 from app.models.coupon import Coupon, CouponRedemption, DiscountType  # noqa: F401
+from app.models.dnc_list import DncListEntry, DncSource  # noqa: F401
 from app.models.payment import Payment  # noqa: F401
 from app.models.payout_audit import PayoutAudit  # noqa: F401
 from app.models.professional import Professional  # noqa: F401
