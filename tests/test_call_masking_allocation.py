@@ -29,7 +29,7 @@ from app.services.call_masking import (
     ALLOCATION_MAX_LIFETIME,
     RELEASE_GRACE,
     CallMaskingService,
-    hard_release_expired,
+    hard_release_expired_async,
 )
 from tests.factories.booking_factory import BookingFactory
 from tests.factories.user_factory import UserFactory
@@ -47,10 +47,23 @@ pytestmark = pytest.mark.asyncio
 # ---------------------------------------------------------------------------
 
 
-async def _seed_number(db, e164: str = "+918065012345") -> VirtualNumberPool:
+def _unique_e164() -> str:
+    """Unique virtual number per allocation.
+
+    The test ``db_session`` fixture rolls back per test but ``test_hard_release_*``
+    commits (SyncSessionLocal needs a committed read) — so rows leak across
+    tests. Unique numbers avoid the uq_virtual_number_pool_e164 collision
+    between leftover rows and the fresh insert.
+    """
+    # 10-digit Indian mobile range, +91 prefix, varchar(16) cap respected.
+    n = uuid.uuid4().int % 10**9
+    return f"+9180{n:010d}"[:16]
+
+
+async def _seed_number(db, e164: str | None = None) -> VirtualNumberPool:
     n = VirtualNumberPool(
         id=uuid.uuid4(),
-        e164=e164,
+        e164=e164 or _unique_e164(),
         status=VirtualNumberStatus.ACTIVE,
     )
     db.add(n)
@@ -105,7 +118,7 @@ async def test_allocate_picks_from_pool_and_writes_mapping(db_session):
 
 async def test_allocate_is_idempotent(db_session):
     await _seed_number(db_session)
-    await _seed_number(db_session, e164="+918065000002")  # second number available
+    await _seed_number(db_session)  # second number available in the pool
     _, _, booking = await _booking_pair(db_session)
 
     svc = CallMaskingService(db_session)
@@ -120,14 +133,35 @@ async def test_allocate_is_idempotent(db_session):
     assert len(count) == 1
 
 
+async def _disable_leftover_pool_rows(db) -> None:
+    """Disable every ACTIVE pool row leaked from prior tests.
+
+    The ``db_session`` fixture rolls back per test, but ``test_hard_release_*``
+    commits (SyncSessionLocal reads need a committed view), so pool rows
+    leak across tests. The pool-exhaustion tests need an empty-of-active pool;
+    flipping leftovers to DISABLED is scoped to this session's transaction
+    and reverts at teardown.
+    """
+    from sqlalchemy import update
+
+    await db.execute(
+        update(VirtualNumberPool)
+        .where(VirtualNumberPool.status == VirtualNumberStatus.ACTIVE)
+        .values(status=VirtualNumberStatus.DISABLED)
+    )
+    await db.flush()
+
+
 async def test_allocate_raises_when_pool_exhausted(db_session):
-    # No pool rows at all. No ACTIVE number, allocate must fail.
+    # No ACTIVE pool rows at all.
+    await _disable_leftover_pool_rows(db_session)
     _, _, booking = await _booking_pair(db_session)
     with pytest.raises(NoVirtualNumbersAvailable):
         await CallMaskingService(db_session).allocate_mapping(booking.id)
 
 
 async def test_allocate_skips_disabled_numbers(db_session):
+    await _disable_leftover_pool_rows(db_session)
     disabled = await _seed_number(db_session)
     disabled.status = VirtualNumberStatus.DISABLED
     await db_session.flush()
@@ -139,6 +173,7 @@ async def test_allocate_skips_disabled_numbers(db_session):
 
 async def test_allocate_skips_already_held_number(db_session):
     """Two bookings compete for one number: second fails."""
+    await _disable_leftover_pool_rows(db_session)
     await _seed_number(db_session)
     _, _, booking_a = await _booking_pair(db_session)
     _, _, booking_b = await _booking_pair(db_session)
@@ -259,16 +294,13 @@ async def test_hard_release_releases_stuck_mapping(db_session):
     # Fast-forward the booking so it looks stuck.
     mapping.expires_at = datetime.now(UTC) - timedelta(hours=1)
     await db_session.flush()
-    await db_session.commit()
 
     now = datetime.now(UTC)
-    # ``hard_release_expired`` opens its own SyncSessionLocal — point it at
-    # the same DB URL by patching nothing: the test DB is a real postgres
-    # one, same one SyncSessionLocal reads.
-    released_count = hard_release_expired(now)
+    # The async twin runs the same SQL, inside the test's own transaction —
+    # no commit required, no leak to the next test.
+    released_count = await hard_release_expired_async(db_session, now)
     assert released_count >= 1
 
-    # Refresh and verify.
     await db_session.refresh(mapping)
     assert mapping.released_at is not None
     # Hard-released at ``now()``, not in the future (not a 48 h grace).
@@ -286,17 +318,17 @@ async def test_hard_release_ignores_already_released(db_session):
     # Even if expires_at is past, because released_at is set we don't touch it.
     mapping.expires_at = datetime.now(UTC) - timedelta(hours=1)
     await db_session.flush()
-    await db_session.commit()
 
-    hard_release_expired(datetime.now(UTC))
+    await hard_release_expired_async(db_session, datetime.now(UTC))
 
     await db_session.refresh(mapping)
     assert mapping.released_at == original_release
 
 
 async def test_hard_release_noop_on_empty(db_session):
-    # Nothing to release; the function reports 0 and does not fail.
-    assert hard_release_expired(datetime.now(UTC)) == 0
+    # Disable leftover rows + no stuck mapping → zero releases.
+    await _disable_leftover_pool_rows(db_session)
+    assert await hard_release_expired_async(db_session, datetime.now(UTC)) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +351,7 @@ async def test_pool_exhausted_in_wrapper_returns_none_not_raises(db_session):
     """The hook-safe wrapper must NOT raise — booking confirm stays valid."""
     from app.services.call_masking import allocate_for_booking
 
-    # No pool rows seeded → pool exhausted.
+    await _disable_leftover_pool_rows(db_session)
     _, _, booking = await _booking_pair(db_session)
     result = await allocate_for_booking(db_session, booking.id)
     assert result is None

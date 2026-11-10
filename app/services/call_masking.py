@@ -387,6 +387,43 @@ def hard_release_expired(now: datetime) -> int:
     return len(released_ids)
 
 
+async def hard_release_expired_async(db: AsyncSession, now: datetime) -> int:
+    """Async twin of :func:`hard_release_expired` sharing a caller's session.
+
+    The Celery task uses the sync version (Celery workers are sync). This
+    exists so unit tests can exercise the identical SQL under the test
+    ``db_session`` fixture — without committing, the rollback at fixture
+    teardown keeps the DB clean for the next test.
+    """
+    from sqlalchemy import update
+
+    stmt = (
+        update(CallMapping)
+        .where(
+            and_(
+                CallMapping.expires_at < now,
+                CallMapping.released_at.is_(None),
+            )
+        )
+        .values(released_at=now)
+        .returning(CallMapping.id)
+    )
+    result = await db.execute(stmt)
+    released_ids = list(result.scalars().all())
+    await db.flush()
+    if released_ids:
+        logger.warning(
+            "call_masking.hard_released_expired",
+            extra={
+                "count": len(released_ids),
+                "mapping_ids": [str(x) for x in released_ids],
+            },
+        )
+    else:
+        logger.info("call_masking.hard_release_sweep_clean", extra={"count": 0})
+    return len(released_ids)
+
+
 # `func` is imported at module top for the subquery predicate; re-exported
 # here to keep `from app.services.call_masking import ...` compact for tests.
 __all__ = [
@@ -396,6 +433,7 @@ __all__ = [
     "allocate_for_booking",
     "release_for_booking",
     "hard_release_expired",
+    "hard_release_expired_async",
 ]
 
 # Silence the unused-import warning for `func` — it's part of the public
