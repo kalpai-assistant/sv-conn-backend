@@ -296,6 +296,30 @@ class NoVirtualNumbersAvailable(AppException):
         )
 
 
+class PhoneOnDoNotCallList(AppException):
+    """SVC-451: allocation refused because a party's phone is on DNC.
+
+    422 (not 503) because this is a permanent, policy-level refusal — the
+    number has opted out of recorded calls, retrying won't help. The
+    caller surfaces the message to the user as "This number has opted out
+    of recorded calls — contact support if you believe this is in error".
+    No self-serve opt-back path in v1.
+    """
+
+    def __init__(
+        self,
+        message: str = (
+            "This number has opted out of recorded calls — contact support "
+            "if you believe this is in error."
+        ),
+    ):
+        super().__init__(
+            message,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            code="PHONE_ON_DNC_LIST",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Handler registration
 # ---------------------------------------------------------------------------

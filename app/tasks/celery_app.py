@@ -177,9 +177,20 @@ celery_app.conf.update(
             "task": "app.jobs.release_expired_mappings.release_expired_mappings",
             "schedule": 900.0,
         },
+        # SVC-451: delete recordings past retention (90 days, per the
+        # epic's baked default). Nightly at 03:00 IST — after the payout
+        # reconcile (02:00) so a human skimming morning logs sees them
+        # in sequence. Keeps metadata forever; only nulls recording_url.
+        "purge-expired-recordings": {
+            "task": "app.jobs.purge_expired_recordings.purge_expired_recordings",
+            "schedule": crontab(hour=3, minute=0),
+        },
     },
     # Explicitly register the jobs package so Celery's autodiscovery picks
-    # up ``app.jobs.release_expired_mappings`` even though nothing imports it
-    # from application code (only the beat schedule references it by name).
-    include=["app.jobs.release_expired_mappings"],
+    # up the beat-only modules even though nothing imports them from
+    # application code (only the beat schedule references them by name).
+    include=[
+        "app.jobs.release_expired_mappings",
+        "app.jobs.purge_expired_recordings",
+    ],
 )

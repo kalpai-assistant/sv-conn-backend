@@ -49,11 +49,12 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.exceptions import NoVirtualNumbersAvailable
+from app.exceptions import NoVirtualNumbersAvailable, PhoneOnDoNotCallList
 from app.models.booking import Booking
 from app.models.call_mapping import CallMapping
 from app.models.user import User
 from app.models.virtual_number_pool import VirtualNumberPool, VirtualNumberStatus
+from app.services.consent import assert_not_on_dnc
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,18 @@ class CallMaskingService:
             # shouldn't happen, but guard: nothing to allocate for.
             raise ValueError(f"Booking {booking_id} has no provider_id; cannot allocate mapping")
 
+        # Snapshot phones before the pool pick so the DNC check runs
+        # against the exact strings we would store, and so a DNC-blocked
+        # allocation never holds a row lock on the pool.
+        customer_phone, sp_phone = await self._snapshot_party_phones(booking)
+
+        # DNC check (SVC-451). Blocks allocation if either party has
+        # opted out; raises PhoneOnDoNotCallList (422). Deliberately in
+        # front of the pool pick: we should never burn a number on a
+        # mapping we're about to refuse.
+        await assert_not_on_dnc(self.db, customer_phone, party="customer")
+        await assert_not_on_dnc(self.db, sp_phone, party="sp")
+
         # Pick a free number with row lock + skip locked, so parallel
         # allocators don't see each other's in-flight picks.
         number = await self._pick_free_number()
@@ -123,8 +136,6 @@ class CallMaskingService:
             # lives in the admin pool-monitor (SVC-454) and the alerting
             # runbook reads the log event name.
             raise NoVirtualNumbersAvailable()
-
-        customer_phone, sp_phone = await self._snapshot_party_phones(booking)
 
         now = datetime.now(UTC)
         mapping = CallMapping(
@@ -333,6 +344,17 @@ async def allocate_for_booking(db: AsyncSession, booking_id: uuid.UUID) -> CallM
     except NoVirtualNumbersAvailable:
         logger.error(
             "call_masking.allocate_failed_pool_exhausted",
+            extra={"booking_id": str(booking_id)},
+        )
+        return None
+    except PhoneOnDoNotCallList:
+        # Same reasoning as the pool-exhaustion branch: the booking is
+        # valid, only the privacy layer refuses, so the booking state
+        # transition must not roll back. Logged at error via the DNC
+        # check itself (party + phone); this line just records the
+        # booking-level outcome so a dispute can trace it.
+        logger.error(
+            "call_masking.allocate_failed_dnc_block",
             extra={"booking_id": str(booking_id)},
         )
         return None
