@@ -271,6 +271,15 @@ class Settings(BaseSettings):
     # submit_kyc request without offloading to Celery.
     AI_KYC_LLM_TIMEOUT_SECONDS: float = 15.0
 
+    # SVC-450: Exotel webhooks. HMAC-SHA256 on the raw request body with a
+    # shared secret from the Exotel dashboard. Empty = refuse every webhook in
+    # any non-dev environment; dev logs a warning and accepts (same pattern as
+    # RAZORPAY_WEBHOOK_SECRET). ``SKIP_EXOTEL_SIG`` is a developer escape hatch
+    # for curl-ing the endpoint locally; hard-refused in production via the
+    # ``ENVIRONMENT`` check in the HMAC dep, exactly like E2E_TEST_PHONES.
+    EXOTEL_WEBHOOK_SECRET: str = ""
+    SKIP_EXOTEL_SIG: bool = False
+
     # Observability (SVC-46)
     # Environment tag propagated to Sentry + log records. staging | production | dev.
     ENVIRONMENT: str = "dev"
