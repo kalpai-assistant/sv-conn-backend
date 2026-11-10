@@ -170,5 +170,16 @@ celery_app.conf.update(
             "task": "app.tasks.payment_tasks.reconcile_payouts",
             "schedule": crontab(hour=2, minute=0),  # Nightly at 02:00 (hits RazorpayX API)
         },
+        # SVC-449: catches the stuck-booking path — a call_mappings row whose
+        # booking never went complete/cancel so the normal release hook never
+        # fired. Runs every 15 min; a clean sweep is a no-op log line.
+        "release-expired-call-mappings": {
+            "task": "app.jobs.release_expired_mappings.release_expired_mappings",
+            "schedule": 900.0,
+        },
     },
+    # Explicitly register the jobs package so Celery's autodiscovery picks
+    # up ``app.jobs.release_expired_mappings`` even though nothing imports it
+    # from application code (only the beat schedule references it by name).
+    include=["app.jobs.release_expired_mappings"],
 )
