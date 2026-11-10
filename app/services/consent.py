@@ -108,9 +108,7 @@ async def check_dnc(db: AsyncSession, phone_e164: str) -> bool:
     return result.scalar_one_or_none() is not None
 
 
-async def assert_not_on_dnc(
-    db: AsyncSession, phone_e164: str, *, party: str
-) -> None:
+async def assert_not_on_dnc(db: AsyncSession, phone_e164: str, *, party: str) -> None:
     """Raise :class:`PhoneOnDoNotCallList` if ``phone_e164`` is on DNC.
 
     ``party`` is one of ``"customer"`` / ``"sp"`` — included in the log

@@ -57,14 +57,10 @@ class DncListEntry(Base):
         Index("ix_dnc_list_added_at", "added_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # E.164, same shape as everywhere else in the call-masking schema
     # (``+91...``, varchar(16)). UNIQUE at DB level — one entry per phone.
-    phone_e164: Mapped[str] = mapped_column(
-        String(16), unique=True, nullable=False
-    )
+    phone_e164: Mapped[str] = mapped_column(String(16), unique=True, nullable=False)
     source: Mapped[DncSource] = mapped_column(
         Enum(
             DncSource,
