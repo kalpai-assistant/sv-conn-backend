@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import select
 
 from app.exceptions import NoVirtualNumbersAvailable
+from app.models.address import Address
 from app.models.booking import BookingStatus
 from app.models.call_mapping import CallMapping
 from app.models.virtual_number_pool import VirtualNumberPool, VirtualNumberStatus
@@ -32,6 +33,11 @@ from app.services.call_masking import (
 )
 from tests.factories.booking_factory import BookingFactory
 from tests.factories.user_factory import UserFactory
+
+# Mumbai point — any valid POINT works; the FK is on consumer_address_id and
+# that's what every failing test actually needed. Address.location is nullable
+# but we set it defensively so a future dispatch-adjacent assertion works too.
+ADDRESS_POINT = "POINT(72.8777 19.0760)"
 
 pytestmark = pytest.mark.asyncio
 
@@ -56,10 +62,19 @@ async def _booking_pair(db):
     """A consumer + provider + accepted booking ready to allocate against."""
     consumer = await UserFactory.create(db, role="consumer")
     provider = await UserFactory.create(db, role="provider")
+    address = Address(
+        user_id=consumer.id,
+        label="home",
+        full_address="12 MG Road",
+        location=ADDRESS_POINT,
+    )
+    db.add(address)
+    await db.flush()
     booking = await BookingFactory.create(
         db,
         consumer_id=consumer.id,
         provider_id=provider.id,
+        address_id=address.id,
         status=BookingStatus.ACCEPTED,
     )
     return consumer, provider, booking
