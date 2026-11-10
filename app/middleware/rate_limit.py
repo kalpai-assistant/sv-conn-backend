@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 # survives that via nightly reconciliation, but the collect leg does not — a
 # dropped ``payment.captured`` is lost permanently. Signature verification
 # already gates the endpoints (SVC-39 G3), so the per-IP quota adds nothing.
+#
+# SVC-450: Exotel webhooks ride on the same reasoning. The provider delivers
+# from a known set of IPs and we only serve it by HMAC-verifying the body —
+# a per-IP quota would just invite retries for a bursty high-call-volume
+# period while HMAC verification already closes the forgery door.
 _SKIP_PATHS = frozenset(
     {
         "/health",
@@ -28,6 +33,8 @@ _SKIP_PATHS = frozenset(
         "/redoc",
         "/api/v1/payments/webhook",
         "/api/v1/payments/payout-webhook",
+        "/webhooks/exotel/incoming",
+        "/webhooks/exotel/call-ended",
     }
 )
 
