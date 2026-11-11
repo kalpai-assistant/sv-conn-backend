@@ -81,7 +81,7 @@ this table and fails if a new `/admin` route isn't in it.
 | Roles | Routes |
 |---|---|
 | admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config`, `/coupons`, `/coupons/{code}`, `/catalog`, `/catalog/categories/{id}`, `/catalog/services/{id}`, `/disputes`, `/disputes/bookings/{id}`; `POST /admin/disputes`, `/disputes/{id}/review`, `/disputes/{id}/resolve` (SVC-431; support's refunds are capped) |
-| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428), `POST /admin/coupons`, `PATCH /admin/coupons/{code}`, `POST /admin/coupons/{code}/deactivate` + `activate` (SVC-429), `POST /admin/catalog/categories` + `/catalog/services`, `PATCH /admin/catalog/categories/{id}` + `/catalog/services/{id}`, `POST .../deactivate` + `activate` on both (SVC-430) |
+| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428), `POST /admin/coupons`, `PATCH /admin/coupons/{code}`, `POST /admin/coupons/{code}/deactivate` + `activate` (SVC-429), `POST /admin/catalog/categories` + `/catalog/services`, `PATCH /admin/catalog/categories/{id}` + `/catalog/services/{id}`, `POST .../deactivate` + `activate` on both (SVC-430), `GET /admin/analytics/overview` + `/analytics/supply` (read-only dashboards, SVC-432) |
 | admin, support | `GET /admin/users` |
 | admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
@@ -261,6 +261,74 @@ consumer "I had an issue" button yet, so an admin logs the dispute for the custo
   wording). No SMS: that needs a DLT template first.
 - `is_disputed` on the bookings list and detail (and `?disputed=`) means the booking was
   ever disputed: a Razorpay chargeback or any dispute row, open or closed.
+
+## Analytics (SVC-432)
+
+`GET /admin/analytics/overview` and `GET /admin/analytics/supply` feed the console's
+Overview and Supply dashboards. Admin and ops only (support gets 403). They're
+read-only, so nothing is audited. Both take `?weeks=` (1–52, default 12): trends cover
+the last `weeks` IST weeks, the current partial week last.
+
+**Cached views.** The numbers come from eight Postgres materialized views
+(`app/analytics/views.py`), never the raw tables. Celery beat
+(`refresh-analytics-views`) refreshes them every 900 s with `REFRESH ... CONCURRENTLY`,
+all in one transaction, so reads never block and every response's `as_of` is that
+refresh. The views hold no clock: the service applies the windows against `as_of`.
+The SQL lives once. The SVC-432 migration imports the frozen `VIEWS_V1`, and a
+`Base.metadata` `after_create` hook builds the same views for the suite's
+`create_all`. To change a view, add `VIEWS_V2` and a migration that drops V1 and
+creates V2. A long-lived `sc_test` then needs its analytics matviews dropped
+(`test_svc_432_migrated_views_match_create_all` says so). Postgres refuses to change
+the type of, or drop, a column a view reads, so a migration doing that on `bookings`,
+`booking_items`, `booking_status_logs`, `booking_disputes`, `users`,
+`provider_profiles`, `professionals`, `addresses`, `services` or `categories` drops
+the views first and recreates them after. Adding or renaming a column is unaffected.
+
+**Definitions.** Money is rupees as JSON numbers, ratios are 0..1, `null` means "not
+enough history" (never 0).
+
+- **Time:** everything is bucketed by `bookings.created_at` in IST, and weeks start on
+  Monday. A "last N days" window is the N whole IST days ending today, today
+  included.
+- **GMV** = `sum(service_amount)` of COMPLETED bookings: before discount, without
+  tips. 7/30/90-day totals. The previous-period figure is `null` unless the
+  platform's first booking is on or before that period's first day. A covered period
+  with no sales is 0. `change_pct` is null when the previous figure is null or 0.
+- **Take rate** = `sum(platform_commission) / GMV`, and **AOV** = GMV / completed
+  count, both per week (null for a week with no completed booking).
+- **Bookings per day**, for all 7 statuses (the booking's current status), plus
+  **refunded**, which is not a status: `payment_status` refunded, or a dispute refund
+  that hasn't FAILED (`refund_amount` set; a manual refund's `refund_status` is NULL).
+- **Consumer cohorts:** consumers (role consumer) grouped by signup week, counting
+  those with at least one COMPLETED booking. Their anchor is the `created_at` of their
+  first completed booking. "Rebooked within N" means another booking of any status
+  was created within N days of the anchor. Members keep joining (a first completion
+  can come months after signup), so each 7/30/90 cell's denominator is the members
+  whose N days have elapsed (`matured`). The rate is null while that is 0.
+- **Active SPs** = KYC-verified SPs (current status) with at least one booking of any
+  status (`bookings.provider_id`) in the period. **Active Pros** = active
+  professionals (current `is_active`; a Pro-for-self counts) with at least one booking
+  (`bookings.professional_id`). Each is given for the last 7 and 30 days plus a
+  weekly trend.
+- **New-SP cohorts:** verified SPs grouped by the IST week of `kyc_reviewed_at` (an SP
+  without one is left out). Each cell is the share with a booking in the 30 days
+  ending at day 30, 60 or 90, and stays null until every member's window has elapsed.
+- **SP churn:** verified SPs with no booking created in the last 14 days (never
+  booked counts as churned), grouped by the IST month of their user's `created_at`.
+  All months are shown.
+- **Supply gap:** pincode × service (`booking_items.service_id`; a booking counts once
+  per service) over the trend weeks. Demand = bookings created. Unmet = EXPIRED and
+  never accepted (no `accepted` status log). A NULL pincode is the `Unknown` row.
+  Coverage is a radius, so unmet is the only honest supply signal. The top 30
+  pincodes by demand are returned, `Unknown` always included; `truncated` and
+  `total_pincodes` say what was cut.
+- **Prices:** `booking_items.unit_price` on COMPLETED bookings, all time, by the
+  service's own category: min / p25 / median / p75 / max / count.
+- **Time to accept:** the first `accepted` status log minus `created_at` (a reopened
+  booking's later accepts are ignored), p50/p90 seconds per week. Bookings never
+  accepted are left out.
+- Marketplace health (sheet / pick rank / boost) needs SVC-419's events and isn't
+  here.
 
 ## Audit log (SVC-423)
 

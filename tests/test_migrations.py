@@ -1452,3 +1452,93 @@ def test_svc_430_adds_catalog_columns_backfills_and_round_trips(scratch_db):
         "SELECT 1 FROM pg_constraint WHERE conname IN "
         "('ck_services_price_unit', 'ck_services_min_qty_unit')",
     )
+
+
+# --- SVC-432: analytics materialized views -------------------------------------
+
+SVC_432 = "0319a6a0b99b"
+BEFORE_SVC_432 = "84057c00390d"
+
+
+def _matviews(url: URL) -> dict:
+    """``{name: (definition, populated, [unique index defs])}`` for the analytics views."""
+    from app.analytics.views import CURRENT_VIEWS
+
+    names = [v.name for v in CURRENT_VIEWS]
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            views = conn.execute(
+                text(
+                    "SELECT matviewname, definition, ispopulated FROM pg_matviews "
+                    "WHERE matviewname = ANY(:n)"
+                ),
+                {"n": names},
+            ).all()
+            indexes = conn.execute(
+                text("SELECT tablename, indexdef FROM pg_indexes WHERE tablename = ANY(:n)"),
+                {"n": names},
+            ).all()
+    finally:
+        engine.dispose()
+    return {
+        name: (definition, populated, sorted(i.indexdef for i in indexes if i.tablename == name))
+        for name, definition, populated in views
+    }
+
+
+def test_svc_432_views_round_trip_and_refresh_on_a_fresh_db(scratch_db):
+    from unittest.mock import patch
+
+    from sqlalchemy.orm import sessionmaker
+
+    from app.analytics.views import CURRENT_VIEWS
+    from app.tasks.analytics_tasks import refresh_analytics_views
+
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_432)
+    assert _matviews(scratch_db) == {}
+
+    _alembic(scratch_db, "upgrade", SVC_432)
+    views = _matviews(scratch_db)
+    assert set(views) == {v.name for v in CURRENT_VIEWS}
+    for name, (_, populated, indexes) in views.items():
+        # WITH DATA, and a unique index, or REFRESH ... CONCURRENTLY refuses.
+        assert populated, name
+        assert any(i.startswith("CREATE UNIQUE INDEX") for i in indexes), name
+
+    # The real beat task on a DB that has only ever been migrated.
+    engine = create_engine(scratch_db)
+    try:
+        with patch("app.database.SyncSessionLocal", sessionmaker(bind=engine)):
+            refresh_analytics_views()
+    finally:
+        engine.dispose()
+    [meta] = _query(scratch_db, "SELECT id, first_booking_at FROM mv_analytics_meta")
+    assert dict(meta) == {"id": 1, "first_booking_at": None}
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_432)
+    assert _matviews(scratch_db) == {}
+    _alembic(scratch_db, "upgrade", SVC_432)
+    assert set(_matviews(scratch_db)) == {v.name for v in CURRENT_VIEWS}
+
+
+def test_svc_432_migrated_views_match_create_all(scratch_db):
+    """The migration and the suite's create_all must build the same views."""
+    import app.models  # noqa: F401  (registers the create_all hook)
+    from app.database import Base
+
+    _alembic(scratch_db, "upgrade", "head")
+    test_db = make_url(TEST_DATABASE_URL).set(drivername="postgresql+psycopg2")
+    engine = create_engine(test_db)
+    try:
+        Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+    migrated, created = _matviews(scratch_db), _matviews(test_db)
+    assert migrated == created, (
+        "The analytics views built by create_all differ from the migrated ones. "
+        "If CURRENT_VIEWS changed, drop the analytics matviews in sc_test (the "
+        "create_all hook uses IF NOT EXISTS and keeps an old definition), or use "
+        "a fresh test DB."
+    )
