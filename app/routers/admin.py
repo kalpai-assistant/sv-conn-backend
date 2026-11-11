@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, R
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -21,6 +21,7 @@ from app.dependencies import authorize_admin_token, get_redis, require_roles
 from app.exceptions import BookingNotFound
 from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, SettlementStatus
+from app.models.booking_dispute import BookingDispute
 from app.models.payment import Payment
 from app.models.provider_profile import KYCStatus
 from app.models.user import User
@@ -73,13 +74,20 @@ def _ist_midnight(day: date) -> datetime:
 
 
 def _disputed_exists(booking_id):
-    """EXISTS a charged-back payment for this booking (SVC-134). One rule for the
-    list, which correlates on ``Booking.id``, and the detail, which passes an id."""
-    return (
+    """A booking is disputed if it was ever disputed: a payment was charged back
+    (``payments.disputed_at``, SVC-134) or a customer dispute was logged for it
+    (any ``booking_disputes`` row, open or closed, SVC-431). Neither is ever
+    cleared, so the flag never flips back. One rule for the list, which correlates
+    on ``Booking.id``, and the detail, which passes an id."""
+    chargeback = (
         select(Payment.id)
         .where(Payment.booking_id == booking_id, Payment.disputed_at.is_not(None))
         .exists()
     )
+    customer_dispute = (
+        select(BookingDispute.id).where(BookingDispute.booking_id == booking_id).exists()
+    )
+    return or_(chargeback, customer_dispute)
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +372,11 @@ async def reject_pro_kyc(
 async def list_all_bookings(
     booking_status: str | None = Query(None, alias="status"),
     disputed: bool | None = Query(
-        None, description="Filter to bookings with (or without) a charged-back payment"
+        None,
+        description=(
+            "Filter to bookings that were (or were never) disputed: a charged-back"
+            " payment or any customer dispute"
+        ),
     ),
     created_from: date | None = Query(
         None, description="Created on or after this day, in IST (YYYY-MM-DD)"
@@ -384,9 +396,9 @@ async def list_all_bookings(
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    # A booking can have several payment rows (failed attempts + the captured one), so
-    # "is this booking disputed" is an EXISTS over its payments rather than a join —
-    # a join would duplicate booking rows once per payment (SVC-134). The phone and
+    # A booking can have several payment rows (failed attempts + the captured one) and
+    # several disputes, so "is this booking disputed" is an EXISTS rather than a join:
+    # a join would duplicate booking rows (SVC-134, SVC-431). The phone and
     # name filters below are EXISTS for the same reason (SVC-425).
     disputed_exists = _disputed_exists(Booking.id)
 

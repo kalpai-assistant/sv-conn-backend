@@ -259,7 +259,8 @@ consumer "I had an issue" button yet, so an admin logs the dispute for the custo
   dispute), then by `booking_disputes.razorpay_refund_id`, before the cancel lookup.
 - **Customer:** a push after the commit (Razorpay refund, manual refund or no refund
   wording). No SMS: that needs a DLT template first.
-- `is_disputed` on the bookings list is unrelated: it means a Razorpay chargeback.
+- `is_disputed` on the bookings list and detail (and `?disputed=`) means the booking was
+  ever disputed: a Razorpay chargeback or any dispute row, open or closed.
 
 ## Audit log (SVC-423)
 

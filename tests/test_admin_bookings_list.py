@@ -13,6 +13,7 @@ import pytest
 
 from app.models.address import Address
 from app.models.booking import BookingStatus
+from app.models.booking_dispute import BookingDispute
 from app.models.payment import Payment, PaymentRecordMethod, PaymentRecordStatus
 from app.models.user import AdminRole
 from tests.factories.booking_factory import BookingFactory
@@ -329,3 +330,60 @@ async def test_consumer_is_403(client, db_session, auth_headers):
     consumer = await UserFactory.create(db_session)
     r = await client.get(URL, headers=auth_headers(str(consumer.id)))
     assert r.status_code == 403
+
+
+async def _customer_dispute(db, booking, status="RAISED"):
+    db.add(
+        BookingDispute(
+            booking_id=booking.id,
+            raised_by_user_id=booking.consumer_id,
+            reason_code="QUALITY",
+            description="Customer reported an issue",
+            status=status,
+            resolution_type="NO_REFUND" if status == "CLOSED" else None,
+        )
+    )
+    await db.flush()
+
+
+async def test_disputed_counts_customer_disputes_as_well_as_chargebacks(
+    client, db_session, auth_headers
+):
+    """SVC-431: "disputed" is a charged-back payment OR any booking_disputes row,
+    open or closed. The filter and the row flag use the same rule."""
+    headers = await _headers(db_session, auth_headers)
+    tok = _token()
+    consumer = await UserFactory.create(db_session)
+    sp = await UserFactory.create(db_session, role="provider", name=f"{tok} Cleaning")
+    day = datetime(2099, 3, 9, 6, tzinfo=UTC)
+
+    chargeback = await _booking(db_session, consumer, sp, day)
+    await _dispute(db_session, chargeback)
+    open_dispute = await _booking(db_session, consumer, sp, day + timedelta(minutes=1))
+    await _customer_dispute(db_session, open_dispute)
+    closed_dispute = await _booking(db_session, consumer, sp, day + timedelta(minutes=2))
+    await _customer_dispute(db_session, closed_dispute, status="CLOSED")
+    # Both kinds, and two dispute rows: still one row in the list.
+    both = await _booking(db_session, consumer, sp, day + timedelta(minutes=3))
+    await _dispute(db_session, both)
+    await _customer_dispute(db_session, both, status="CLOSED")
+    await _customer_dispute(db_session, both)
+    neither = await _booking(db_session, consumer, sp, day + timedelta(minutes=4))
+
+    disputed = {str(b.id) for b in (chargeback, open_dispute, closed_dispute, both)}
+
+    r = await client.get(URL, params={"provider_name": tok, "disputed": "true"}, headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["total"] == 4
+    assert sorted(_ids(r.json())) == sorted(disputed)
+    assert all(b["is_disputed"] for b in r.json()["bookings"])
+
+    r = await client.get(URL, params={"provider_name": tok, "disputed": "false"}, headers=headers)
+    assert r.json()["total"] == 1
+    assert _ids(r.json()) == [str(neither.id)]
+    assert r.json()["bookings"][0]["is_disputed"] is False
+
+    r = await client.get(URL, params={"provider_name": tok}, headers=headers)
+    assert r.json()["total"] == 5
+    flags = {b["id"]: b["is_disputed"] for b in r.json()["bookings"]}
+    assert flags == {**dict.fromkeys(disputed, True), str(neither.id): False}

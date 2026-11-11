@@ -278,8 +278,9 @@ class BookingResponse(BaseModel):
     # that builds this schema must call `BookingService.attach_status_logs`
     # first, exactly like `address` and `items`.
     status_history: list[BookingStatusLogResponse]
-    # True when any payment for this booking has been charged back. Only populated by
-    # the admin bookings list and detail (SVC-134, SVC-425); defaults False elsewhere.
+    # True when any payment for this booking has been charged back or a customer
+    # dispute was ever logged for it. Only populated by the admin bookings list and
+    # detail (SVC-134, SVC-425, SVC-431); defaults False elsewhere.
     is_disputed: bool = False
     # Party display fields, populated only on admin routes (SVC-299). Every other
     # BookingResponse consumer leaves them as None: the consumer's own booking

@@ -9,6 +9,7 @@ import pytest
 
 from app.models.address import Address
 from app.models.booking import BookingStatus, PaymentStatus, SettlementStatus
+from app.models.booking_dispute import BookingDispute
 from app.models.payment import Payment, PaymentRecordMethod, PaymentRecordStatus
 from app.models.user import AdminRole
 from tests.factories.booking_factory import BookingFactory
@@ -159,3 +160,38 @@ async def test_consumer_cannot_read_admin_detail(client, db_session, auth_header
     booking, consumer = await _booking(db_session)
     r = await client.get(f"{URL}/{booking.id}", headers=auth_headers(str(consumer.id)))
     assert r.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("chargeback", "dispute_status", "expected"),
+    [
+        (True, None, True),
+        (False, "RAISED", True),
+        (False, "CLOSED", True),
+        (False, None, False),
+    ],
+    ids=["chargeback-only", "open-dispute-only", "closed-dispute-only", "neither"],
+)
+async def test_detail_is_disputed_counts_customer_disputes(
+    client, db_session, auth_headers, chargeback, dispute_status, expected
+):
+    """SVC-431: a customer dispute (any status) marks the booking disputed too."""
+    headers = await _headers(db_session, auth_headers)
+    booking, consumer = await _booking(db_session)
+    await _payment(db_session, booking, disputed=chargeback)
+    if dispute_status:
+        db_session.add(
+            BookingDispute(
+                booking_id=booking.id,
+                raised_by_user_id=consumer.id,
+                reason_code="QUALITY",
+                description="Customer reported an issue",
+                status=dispute_status,
+                resolution_type="NO_REFUND" if dispute_status == "CLOSED" else None,
+            )
+        )
+        await db_session.flush()
+
+    r = await client.get(f"{URL}/{booking.id}", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["is_disputed"] is expected
