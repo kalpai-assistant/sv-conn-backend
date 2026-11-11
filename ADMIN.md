@@ -80,13 +80,14 @@ this table and fails if a new `/admin` route isn't in it.
 
 | Roles | Routes |
 |---|---|
-| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config`, `/coupons`, `/coupons/{code}`, `/catalog`, `/catalog/categories/{id}`, `/catalog/services/{id}` |
+| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config`, `/coupons`, `/coupons/{code}`, `/catalog`, `/catalog/categories/{id}`, `/catalog/services/{id}`, `/disputes`, `/disputes/bookings/{id}`; `POST /admin/disputes`, `/disputes/{id}/review`, `/disputes/{id}/resolve` (SVC-431; support's refunds are capped) |
 | admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428), `POST /admin/coupons`, `PATCH /admin/coupons/{code}`, `POST /admin/coupons/{code}/deactivate` + `activate` (SVC-429), `POST /admin/catalog/categories` + `/catalog/services`, `PATCH /admin/catalog/categories/{id}` + `/catalog/services/{id}`, `POST .../deactivate` + `activate` on both (SVC-430) |
 | admin, support | `GET /admin/users` |
 | admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
-Support has no write routes yet: its refund comes with SVC-431, and retry-dispatch
-and booking-level reassign don't exist.
+Support's only writes are the dispute routes (SVC-431), with refunds capped at
+`pricing_config.support_refund_limit`. Retry-dispatch and booking-level reassign don't
+exist.
 
 ---
 
@@ -225,6 +226,41 @@ columns are edited at `/admin/pricing`, not here.
   runs only when it's sent, so an old row holding a value the rules now refuse can still
   be edited.
 
+## Disputes and refunds (SVC-431)
+
+`/admin/disputes` replaces refunding by hand in the Razorpay dashboard. There is no
+consumer "I had an issue" button yet, so an admin logs the dispute for the customer.
+
+- **Lifecycle:** `RAISED` → `IN_REVIEW` (picked up; optional) → `RESOLVED` → `CLOSED`.
+  Only a completed or cancelled booking can be disputed (409
+  `DISPUTE_BOOKING_NOT_FINISHED`), with one open dispute at a time (409
+  `DISPUTE_ALREADY_OPEN`, also a partial unique index).
+- **Refundable** = what the customer paid for the service (service − discount; never
+  the tip), minus the cancel refund and earlier dispute refunds (a failed one doesn't
+  count). Nothing left: only `NO_REFUND` (409 `NOTHING_TO_REFUND`). `FULL_REFUND` is
+  the whole refundable amount; `PARTIAL_REFUND` is typed, > 0 and ≤ refundable (422
+  `DISPUTE_INVALID` with `details.field`). Notes are always required.
+- **Online:** a Razorpay refund on the booking's payment, made before anything is saved
+  (422 `REFUND_REJECTED` with Razorpay's reason; 502 `REFUND_GATEWAY_ERROR` if it doesn't
+  answer). Every refund carries `notes.dispute_id`, and a retry first looks for one
+  already made for the dispute, so a retry after a 502 never refunds twice. The dispute
+  stays `RESOLVED` (`refund_status` PENDING) until `refund.processed` closes it;
+  `refund.failed` leaves it `RESOLVED` with `refund_status` FAILED and the reason
+  (retrying is SVC-213).
+- **Cash:** a `MANUAL` refund paid outside the app (UPI, say). The amount is a record
+  only, Razorpay is never called, and the notes say how it was paid. It closes at once,
+  like `NO_REFUND`.
+- **Support** may refund up to `pricing_config.support_refund_limit` rupees (seeded 500)
+  per dispute: 403 `REFUND_OVER_SUPPORT_LIMIT` above it. Admin and ops are uncapped.
+- **Provider pay is never touched.** The platform absorbs dispute refunds: they don't
+  change `booking.payment_status`, `payments.status` or `payments.refund_*` (the cancel
+  refund's), and write no ledger rows, so the payout is the same. Clawback is a later
+  ticket. The refund webhooks find a dispute refund by `notes.dispute_id` (locking the
+  dispute), then by `booking_disputes.razorpay_refund_id`, before the cancel lookup.
+- **Customer:** a push after the commit (Razorpay refund, manual refund or no refund
+  wording). No SMS: that needs a DLT template first.
+- `is_disputed` on the bookings list is unrelated: it means a Razorpay chargeback.
+
 ## Audit log (SVC-423)
 
 Every admin write writes one `admin_actions` row: who, what, why, before and after,
@@ -280,6 +316,7 @@ passes them: `password_hash`, `totp_secret`, `fcm_token`, every `*_encrypted` co
 | `pricing.config_update` | `pricing_config` (`target_id` is the key) | `PATCH /admin/pricing/config/{key}` |
 | `coupon.create`, `coupon.update` | `coupon` | `POST /admin/coupons`, `PATCH /admin/coupons/{code}` |
 | `coupon.deactivate`, `coupon.activate` | `coupon` | `POST /admin/coupons/{code}/deactivate`, `activate` |
+| `dispute.create`, `dispute.review`, `dispute.resolve` | `dispute` | `POST /admin/disputes`, `/disputes/{id}/review`, `/disputes/{id}/resolve` (`reason` on a resolve is the notes; `details` has `booking_id`, `refundable_before`, `refund_amount_paise`) |
 
 **Exceptions worth knowing.**
 

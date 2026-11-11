@@ -110,6 +110,17 @@ AUDIT_FIELDS: dict[str, tuple[str, ...]] = {
         "is_active",
         "user_id",
     ),
+    # SVC-431. Never the description or notes: free text about a customer.
+    "dispute": (
+        "booking_id",
+        "status",
+        "reason_code",
+        "resolution_type",
+        "refund_amount",
+        "refund_channel",
+        "razorpay_refund_id",
+        "refund_status",
+    ),
 }
 
 # Never in an audit row, whatever a caller passes. So is every ``*_encrypted``

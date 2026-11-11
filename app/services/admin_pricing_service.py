@@ -21,7 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import AppException
 from app.models.category import Category
-from app.models.pricing_config import PRICING_CONFIG_KEYS, RANKING_WEIGHT_KEYS, PricingConfig
+from app.models.pricing_config import (
+    PRICING_CONFIG_KEYS,
+    RANKING_WEIGHT_KEYS,
+    SUPPORT_REFUND_LIMIT_KEY,
+    PricingConfig,
+)
 from app.schemas.admin_pricing import CategoryPricingRow, CategoryPricingUpdate, PricingConfigRow
 from app.services.admin_audit import AuditActor, audit_admin_action
 
@@ -41,6 +46,8 @@ _MONEY_LIMIT = Decimal("100000000")
 WEIGHT_SUM_TOLERANCE = 0.01
 # Room for any sane window or TTL, and still a 32-bit int for whoever reads it.
 _INT_CONFIG_MAX = 2_147_483_647
+# SVC-431: a sanity ceiling on the support refund cap, in rupees.
+SUPPORT_REFUND_LIMIT_MAX = Decimal("100000")
 
 
 class PricingInvalid(AppException):
@@ -161,6 +168,21 @@ def _validate_config(key: str, value: Any) -> Any:
                 sum=round(total, 4),
             )
         return {w: float(value[w]) for w in RANKING_WEIGHT_KEYS}
+
+    if key == SUPPORT_REFUND_LIMIT_KEY:
+        # Rupees, like every money value. 0 means support can't refund at all.
+        if not _is_number(value) or not math.isfinite(value):
+            raise PricingInvalid("value", f"{key} must be a number of rupees")
+        amount = Decimal(str(value))
+        if not 0 <= amount <= SUPPORT_REFUND_LIMIT_MAX or amount != amount.quantize(
+            Decimal("0.01")
+        ):
+            raise PricingInvalid(
+                "value",
+                f"{key} must be from 0 to {SUPPORT_REFUND_LIMIT_MAX} rupees, "
+                "with at most 2 decimals",
+            )
+        return int(amount) if amount == amount.to_integral_value() else float(amount)
 
     # boost_window_days, boost_window_jobs, sheet_ttl_seconds: a whole number.
     if not isinstance(value, int) or isinstance(value, bool) or not 0 < value <= _INT_CONFIG_MAX:

@@ -16,7 +16,11 @@ PRICING_CONFIG_KEYS = (
     "boost_window_days",
     "boost_window_jobs",
     "sheet_ttl_seconds",
+    # SVC-431: the most, in rupees, a support-role admin may refund on one dispute.
+    "support_refund_limit",
 )
+SUPPORT_REFUND_LIMIT_KEY = "support_refund_limit"
+SUPPORT_REFUND_LIMIT_DEFAULT = 500
 
 
 class PricingConfig(Base):

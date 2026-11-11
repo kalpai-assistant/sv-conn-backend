@@ -43,6 +43,7 @@ from app.models.admin_action import (
 )
 from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, PaymentStatus, SettlementStatus
+from app.models.booking_dispute import BookingDispute
 from app.models.category import Category
 from app.models.coupon import Coupon
 from app.models.pricing_config import PricingConfig
@@ -97,6 +98,7 @@ RECORD_MODELS = {
     "category": Category,
     "pricing_config": PricingConfig,
     "coupon": Coupon,
+    "dispute": BookingDispute,
 }
 
 
@@ -653,6 +655,65 @@ async def _catalog_service_activate(db) -> Case:
     )
 
 
+async def _disputed_booking(db, status="RAISED") -> tuple[Booking, BookingDispute]:
+    _, booking = await _unpaid_booking(db, status=BookingStatus.CANCELLED)
+    dispute = BookingDispute(
+        booking_id=booking.id,
+        raised_by_user_id=booking.consumer_id,
+        reason_code="NO_SHOW",
+        description="Nobody came",
+        status=status,
+    )
+    db.add(dispute)
+    await db.flush()
+    return booking, dispute
+
+
+async def _dispute_create(db) -> Case:
+    _, booking = await _unpaid_booking(db, status=BookingStatus.CANCELLED)
+    return Case(
+        url=f"{A}/disputes",
+        body={
+            "booking_id": str(booking.id),
+            "reason_code": "BILLING",
+            "description": "Overcharged",
+        },
+        status=201,
+        action="dispute.create",
+        target_type="dispute",
+        after={"status": "RAISED", "reason_code": "BILLING", "booking_id": str(booking.id)},
+        details={"booking_id": str(booking.id)},
+    )
+
+
+async def _dispute_review(db) -> Case:
+    booking, dispute = await _disputed_booking(db)
+    return Case(
+        url=f"{A}/disputes/{dispute.id}/review",
+        action="dispute.review",
+        target_type="dispute",
+        target_id=dispute.id,
+        before={"status": "RAISED"},
+        after={"status": "IN_REVIEW"},
+        details={"booking_id": str(booking.id)},
+    )
+
+
+async def _dispute_resolve(db) -> Case:
+    booking, dispute = await _disputed_booking(db, status="IN_REVIEW")
+    return Case(
+        url=f"{A}/disputes/{dispute.id}/resolve",
+        body={"resolution_type": "NO_REFUND", "notes": "Provider showed up on time"},
+        action="dispute.resolve",
+        target_type="dispute",
+        target_id=dispute.id,
+        reason="Provider showed up on time",
+        before={"status": "IN_REVIEW", "resolution_type": None},
+        after={"status": "CLOSED", "resolution_type": "NO_REFUND", "refund_amount": None},
+        details={"booking_id": str(booking.id), "refund_amount_paise": None},
+    )
+
+
 AUDITED_WRITE_ROUTES = {
     ("PATCH", "/admin/users/{user_id}/deactivate"): _deactivate,
     ("POST", "/admin/pros/{professional_id}/force-remove"): _force_remove,
@@ -683,6 +744,9 @@ AUDITED_WRITE_ROUTES = {
     ("PATCH", "/admin/catalog/services/{service_id}"): _catalog_service_update,
     ("POST", "/admin/catalog/services/{service_id}/deactivate"): _catalog_service_deactivate,
     ("POST", "/admin/catalog/services/{service_id}/activate"): _catalog_service_activate,
+    ("POST", "/admin/disputes"): _dispute_create,
+    ("POST", "/admin/disputes/{dispute_id}/review"): _dispute_review,
+    ("POST", "/admin/disputes/{dispute_id}/resolve"): _dispute_resolve,
 }
 
 
@@ -698,7 +762,7 @@ def test_every_admin_write_route_has_an_audit_case():
             if is_admin or path.startswith("/services"):
                 found.add((method, path))
     assert found == set(AUDITED_WRITE_ROUTES)
-    assert len(found) == 29
+    assert len(found) == 32
 
 
 @pytest.fixture

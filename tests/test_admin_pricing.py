@@ -43,6 +43,7 @@ SEED_CONFIG = {
     "boost_window_days": 14,
     "boost_window_jobs": 10,
     "sheet_ttl_seconds": 600,
+    "support_refund_limit": 500,  # SVC-431
 }
 CATEGORY_ROW_FIELDS = {
     "id",
@@ -63,7 +64,7 @@ SEEDED_AT = datetime(2026, 11, 1, tzinfo=UTC)
 
 
 async def seed_config(db) -> None:
-    """The migration's four rows, as of ``SEEDED_AT``."""
+    """The migrations' rows (SVC-428's four, SVC-431's one), as of ``SEEDED_AT``."""
     for key, value in SEED_CONFIG.items():
         await db.merge(
             PricingConfig(key=key, value_json=value, updated_at=SEEDED_AT, updated_by=None)
@@ -556,3 +557,26 @@ async def test_no_token_is_a_401(client, db_session):
     assert (
         await client.patch(f"{A}/config/sheet_ttl_seconds", json={"value": 1})
     ).status_code == 401
+
+
+# SVC-431: the support refund cap, in rupees.
+
+
+@pytest.mark.parametrize("value", [-1, -0.01, 100000.01, 12.345, True, "500", None, {"inr": 1}])
+async def test_support_refund_limit_refuses_anything_else(client, db_session, admin, value):
+    await seed_config(db_session)
+    r = await client.patch(
+        f"{A}/config/support_refund_limit", json={"value": value}, headers=_session(admin)
+    )
+    _assert_refused(r, "value")
+    assert await _rows(db_session, admin) == []
+
+
+@pytest.mark.parametrize(("value", "stored"), [(0, 0), (750, 750), (250.5, 250.5), (300.0, 300)])
+async def test_support_refund_limit_saves_rupees(client, db_session, admin, value, stored):
+    await seed_config(db_session)
+    r = await client.patch(
+        f"{A}/config/support_refund_limit", json={"value": value}, headers=_session(admin)
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["value"] == stored
