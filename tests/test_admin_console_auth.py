@@ -811,6 +811,9 @@ ROUTE_ROLES = {
     ("POST", "/admin/disputes"): ALL,
     ("POST", "/admin/disputes/{dispute_id}/review"): ALL,
     ("POST", "/admin/disputes/{dispute_id}/resolve"): ALL,
+    # admin_analytics.py (SVC-432): dashboards, read-only, support hidden
+    ("GET", "/admin/analytics/overview"): ADMIN_OPS,
+    ("GET", "/admin/analytics/supply"): ADMIN_OPS,
     # services.py: admin writes outside the /admin prefix
     ("POST", "/services"): ADMIN_OPS,
     ("PATCH", "/services/{service_id}"): ADMIN_OPS,

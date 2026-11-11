@@ -166,6 +166,12 @@ celery_app.conf.update(
             "task": "app.tasks.cleanup_tasks.expire_abandoned_payments",
             "schedule": 600.0,
         },
+        # SVC-432: the admin analytics views. Dashboards don't need real time;
+        # 15 min keeps the refresh load bounded.
+        "refresh-analytics-views": {
+            "task": "app.tasks.analytics_tasks.refresh_analytics_views",
+            "schedule": 900.0,
+        },
         "reconcile-payouts": {
             "task": "app.tasks.payment_tasks.reconcile_payouts",
             "schedule": crontab(hour=2, minute=0),  # Nightly at 02:00 (hits RazorpayX API)

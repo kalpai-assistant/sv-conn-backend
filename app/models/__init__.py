@@ -4,6 +4,10 @@ The order of imports matters for circular-reference safety; models with no
 FK dependencies come first.
 """
 
+# SVC-432: the analytics materialized views ride on create_all (tests); deployed
+# DBs get them from the SVC-432 migration. Same SQL either way.
+from app.analytics.views import register_create_all_hook  # noqa: E402
+from app.database import Base  # noqa: E402
 from app.models.address import Address  # noqa: F401
 from app.models.admin_action import AdminAction  # noqa: F401
 from app.models.app_version import AppPlatform, AppVersion  # noqa: F401
@@ -39,3 +43,5 @@ from app.models.service_relationship import RelationshipType, ServiceRelationshi
 from app.models.service_variant import ServiceVariant  # noqa: F401
 from app.models.settlement_statement import SettlementStatement  # noqa: F401
 from app.models.user import User, UserRole  # noqa: F401
+
+register_create_all_hook(Base.metadata)
