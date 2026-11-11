@@ -144,7 +144,26 @@ NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
             "Your full refund of {amount} has been started."
         ),
     },
+    # SVC-431: support settled a dispute the customer raised. Consumer only,
+    # English. {amount} is the dispute's refund, pre-formatted with the ₹ sign.
+    "dispute_refunded": {
+        "title": "Your refund is on its way",
+        "body": "We've started a refund of {amount} for your booking. Expect it in 5-7 working days.",
+    },
+    "dispute_refunded_manual": {
+        "title": "Your refund has been sent",
+        "body": "We've reviewed your issue and sent you a refund of {amount}.",
+    },
+    "dispute_no_refund": {
+        "title": "We've reviewed your issue",
+        "body": "We've looked into your booking and closed your request. Support will share the details.",
+    },
 }
+
+# SVC-431: the dispute events, all consumer-only.
+DISPUTE_PUSH_EVENTS = frozenset(
+    {"dispute_refunded", "dispute_refunded_manual", "dispute_no_refund"}
+)
 
 # The "no_taker_refunded" wording when the booking had been accepted and then
 # given back (it has ``reopened_at``): the consumer waited on someone who
@@ -704,6 +723,7 @@ def send_booking_notification(
     event: str,
     actor_id: str | None = None,
     professional_id: str | None = None,
+    dispute_id: str | None = None,
 ):
     """Send push notification for booking lifecycle events.
 
@@ -714,6 +734,9 @@ def send_booking_notification(
 
     ``professional_id`` is for ``unassigned`` (SVC-348): the Pro the job was
     taken off, since by now the booking points at someone else or no one.
+
+    ``dispute_id`` is for the dispute events (SVC-431): the dispute whose refund
+    the push names.
     """
     from app.database import SyncSessionLocal
     from app.models.booking import Booking
@@ -933,6 +956,21 @@ def send_booking_notification(
                     return provider_push_copy("pro_declined", lang, pro=pro_name)
 
                 recipients = [booking.provider]
+            elif event in DISPUTE_PUSH_EVENTS:
+                from app.models.booking_dispute import BookingDispute
+
+                dispute = db.get(BookingDispute, dispute_id) if dispute_id else None
+                if dispute is None or dispute.booking_id != booking.id:
+                    logger.warning(
+                        "push.dispute_not_found booking_id=%s dispute_id=%s", booking_id, dispute_id
+                    )
+                    return
+                if "{amount}" in body:
+                    from app.utils.money import to_paise
+
+                    amount = dispute.refund_amount or 0
+                    body = body.format(amount=_format_rupees(to_paise(amount)))
+                recipients = [booking.consumer]
             elif event == "no_taker_refunded":
                 # Consumer only: no provider is attached by now. The amount is
                 # what was captured and is now refunded (service − discount).

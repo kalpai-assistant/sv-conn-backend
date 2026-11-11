@@ -805,6 +805,12 @@ ROUTE_ROLES = {
     ("PATCH", "/admin/catalog/services/{service_id}"): ADMIN_OPS,
     ("POST", "/admin/catalog/services/{service_id}/deactivate"): ADMIN_OPS,
     ("POST", "/admin/catalog/services/{service_id}/activate"): ADMIN_OPS,
+    # admin_disputes.py (SVC-431): support writes too, its refunds capped
+    ("GET", "/admin/disputes"): ALL,
+    ("GET", "/admin/disputes/bookings/{booking_id}"): ALL,
+    ("POST", "/admin/disputes"): ALL,
+    ("POST", "/admin/disputes/{dispute_id}/review"): ALL,
+    ("POST", "/admin/disputes/{dispute_id}/resolve"): ALL,
     # services.py: admin writes outside the /admin prefix
     ("POST", "/services"): ADMIN_OPS,
     ("PATCH", "/services/{service_id}"): ADMIN_OPS,

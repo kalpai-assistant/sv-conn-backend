@@ -38,6 +38,9 @@ ADMIN_ACTIONS = (
     "coupon.update",
     "coupon.deactivate",
     "coupon.activate",
+    "dispute.create",
+    "dispute.review",
+    "dispute.resolve",
 )
 ADMIN_ACTION_TARGET_TYPES = (
     "user",
@@ -49,6 +52,7 @@ ADMIN_ACTION_TARGET_TYPES = (
     "category",
     "pricing_config",
     "coupon",
+    "dispute",
 )
 
 USER_AGENT_MAX_LENGTH = 512
