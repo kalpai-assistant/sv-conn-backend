@@ -265,6 +265,14 @@ aws ec2 terminate-instances --instance-ids "$INSTANCE"
 
 ### Migrations on beta
 
+**Analytics materialized views (SVC-432) pin columns.** They read `bookings`,
+`booking_items`, `booking_status_logs`, `booking_disputes`, `users`,
+`provider_profiles`, `professionals`, `addresses`, `services` and `categories`.
+Postgres refuses to change the type of, or drop, a column a view reads ("cannot
+alter type of a column used by a view"), so such a migration must drop the views
+first and recreate them after (`app/analytics/views.py`: `drop_statements` /
+`create_statements`). Adding a column, or renaming one, is unaffected.
+
 **Commit the migration, merge, and the API container runs it on boot.**
 `docker-api-entrypoint.sh` runs `alembic upgrade head` unconditionally
 every time the backend App Runner container starts. Alembic is idempotent

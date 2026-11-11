@@ -8,8 +8,9 @@ migration.
 
 Downgrade drops all eight. Nothing else depends on them.
 
-Note for later migrations: Postgres refuses to ALTER a column's type while a view
-reads it. Drop the analytics views first and recreate them after.
+Note for later migrations (also in CLAUDE.md): Postgres refuses to change the type
+of, or drop, a column a view reads. Drop the analytics views first and recreate them
+after. Adding or renaming a column is unaffected.
 
 Revision ID: 0319a6a0b99b
 Revises: 84057c00390d

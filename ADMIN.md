@@ -278,9 +278,11 @@ The SQL lives once. The SVC-432 migration imports the frozen `VIEWS_V1`, and a
 `Base.metadata` `after_create` hook builds the same views for the suite's
 `create_all`. To change a view, add `VIEWS_V2` and a migration that drops V1 and
 creates V2. A long-lived `sc_test` then needs its analytics matviews dropped
-(`test_svc_432_migrated_views_match_create_all` says so). Postgres won't ALTER a
-column's type while a view reads it, so a migration doing that drops and recreates
-the views around it.
+(`test_svc_432_migrated_views_match_create_all` says so). Postgres refuses to change
+the type of, or drop, a column a view reads, so a migration doing that on `bookings`,
+`booking_items`, `booking_status_logs`, `booking_disputes`, `users`,
+`provider_profiles`, `professionals`, `addresses`, `services` or `categories` drops
+the views first and recreates them after. Adding or renaming a column is unaffected.
 
 **Definitions.** Money is rupees as JSON numbers, ratios are 0..1, `null` means "not
 enough history" (never 0).
