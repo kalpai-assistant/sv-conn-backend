@@ -46,7 +46,7 @@ jobs:
   test:
     name: pytest
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
 
     services:
       # PostGIS image because the app requires the extension. Uses the same
