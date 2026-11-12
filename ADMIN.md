@@ -80,14 +80,20 @@ this table and fails if a new `/admin` route isn't in it.
 
 | Roles | Routes |
 |---|---|
-| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config`, `/coupons`, `/coupons/{code}`, `/catalog`, `/catalog/categories/{id}`, `/catalog/services/{id}`, `/disputes`, `/disputes/bookings/{id}`; `POST /admin/disputes`, `/disputes/{id}/review`, `/disputes/{id}/resolve` (SVC-431; support's refunds are capped) |
+| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config`, `/coupons`, `/coupons/{code}`, `/catalog`, `/catalog/categories/{id}`, `/catalog/services/{id}`, `/disputes`, `/disputes/bookings/{id}`; `POST /admin/disputes`, `/disputes/{id}/review`, `/disputes/{id}/resolve` (SVC-431; support's refunds are capped); the support console (SVC-433): `GET /admin/support/lookup`, `/support/customers/{id}`, `/bookings/{id}/notes`, `/bookings/{id}/eligible-pros`; `POST /admin/bookings/{id}/notes`, `/bookings/{id}/contacted`, `/bookings/{id}/retry-dispatch`, `/bookings/{id}/reassign-pro` |
 | admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428), `POST /admin/coupons`, `PATCH /admin/coupons/{code}`, `POST /admin/coupons/{code}/deactivate` + `activate` (SVC-429), `POST /admin/catalog/categories` + `/catalog/services`, `PATCH /admin/catalog/categories/{id}` + `/catalog/services/{id}`, `POST .../deactivate` + `activate` on both (SVC-430), `GET /admin/analytics/overview` + `/analytics/supply` (read-only dashboards, SVC-432) |
 | admin, support | `GET /admin/users` |
 | admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
-Support's only writes are the dispute routes (SVC-431), with refunds capped at
-`pricing_config.support_refund_limit`. Retry-dispatch and booking-level reassign don't
-exist.
+Support's writes are the dispute routes (SVC-431), with refunds capped at
+`pricing_config.support_refund_limit`, and the support console's booking actions
+(SVC-433): notes, "contacted" marks, retry dispatch and reassign-Pro. Admin and ops
+have all of these too. Retry dispatch re-runs the existing `new_request` broadcast
+on a REQUESTED booking with a fresh offer window (`bookings.dispatch_retried_at`),
+and refuses with 409 rather than broadcast to nobody. Reassign-Pro is the SP's own
+re-pick (`BookingService.assign`) on an ACCEPTED booking, with the admin as actor:
+it moves the job only between Pros of the same SP, by the same rules. Both are
+audited, and so is every note.
 
 ---
 

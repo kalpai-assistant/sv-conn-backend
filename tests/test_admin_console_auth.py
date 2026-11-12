@@ -814,6 +814,15 @@ ROUTE_ROLES = {
     # admin_analytics.py (SVC-432): dashboards, read-only, support hidden
     ("GET", "/admin/analytics/overview"): ADMIN_OPS,
     ("GET", "/admin/analytics/supply"): ADMIN_OPS,
+    # admin_support.py (SVC-433): the support console, every role reads and writes
+    ("GET", "/admin/support/lookup"): ALL,
+    ("GET", "/admin/support/customers/{user_id}"): ALL,
+    ("GET", "/admin/bookings/{booking_id}/notes"): ALL,
+    ("POST", "/admin/bookings/{booking_id}/notes"): ALL,
+    ("POST", "/admin/bookings/{booking_id}/contacted"): ALL,
+    ("POST", "/admin/bookings/{booking_id}/retry-dispatch"): ALL,
+    ("GET", "/admin/bookings/{booking_id}/eligible-pros"): ALL,
+    ("POST", "/admin/bookings/{booking_id}/reassign-pro"): ALL,
     # services.py: admin writes outside the /admin prefix
     ("POST", "/services"): ADMIN_OPS,
     ("PATCH", "/services/{service_id}"): ADMIN_OPS,

@@ -390,6 +390,9 @@ async def list_all_bookings(
     provider_name: str | None = Query(
         None, description="Case-insensitive substring of the SP's name"
     ),
+    consumer_id: UUID | None = Query(
+        None, description="Exactly this customer (their user id); finds a deleted account too"
+    ),
     provider_id: UUID | None = Query(None, description="Exactly this SP (its user id)"),
     professional_id: UUID | None = Query(None, description="Exactly this Pro row"),
     page: int = Query(1, ge=1),
@@ -441,6 +444,11 @@ async def list_all_bookings(
             .where(User.id == Booking.consumer_id, User.phone == f"+91{digits[-10:]}")
             .exists()
         )
+
+    if consumer_id is not None:
+        # SVC-433: the support console's "all bookings" link. A deleted account's
+        # phone is a placeholder, so consumer_phone can't find it.
+        filters.append(Booking.consumer_id == consumer_id)
 
     name = (provider_name or "").strip()
     if name:
