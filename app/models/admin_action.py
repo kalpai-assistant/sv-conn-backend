@@ -41,6 +41,10 @@ ADMIN_ACTIONS = (
     "dispute.create",
     "dispute.review",
     "dispute.resolve",
+    "booking.note_add",
+    "booking.contacted",
+    "booking.retry_dispatch",
+    "booking.reassign_pro",
 )
 ADMIN_ACTION_TARGET_TYPES = (
     "user",

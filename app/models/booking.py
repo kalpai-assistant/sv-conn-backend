@@ -206,20 +206,35 @@ class Booking(Base):
     # instead of being swept the moment it reopens. ``created_at`` stays the
     # booking's real creation time.
     reopened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # SVC-433: when support last re-broadcast this REQUESTED booking (POST
+    # /admin/bookings/{id}/retry-dispatch). It restarts the offer window like a
+    # reopen, but it is its own column because ``reopened_at`` also means
+    # "accepted, then given back": it picks the no-taker refund push's wording
+    # and the ``dispatch.no_acceptance`` log's ``reopened`` flag.
+    dispatch_retried_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     @hybrid_property
     def offer_window_start(self) -> datetime:
-        """Start of the current offer window: the last reopen, else creation.
+        """Start of the current offer window: the latest of creation, the last
+        reopen and the last support retry (SVC-433).
 
         The single definition read by the expiry sweep, the offer poll and the
         card's countdown, so the three can't disagree about when an offer dies.
+        ``_offer_expires_at_expression`` repeats it in SQL; keep them in step.
         """
-        return self.reopened_at or self.created_at
+        return max(
+            moment
+            for moment in (self.created_at, self.reopened_at, self.dispatch_retried_at)
+            if moment is not None
+        )
 
     @offer_window_start.inplace.expression
     @classmethod
     def _offer_window_start_expression(cls):
-        return func.coalesce(cls.reopened_at, cls.created_at)
+        # GREATEST skips NULLs in Postgres, matching the Python max above.
+        return func.greatest(cls.created_at, cls.reopened_at, cls.dispatch_retried_at)
 
     # SVC-344: when a PAID booking that nobody took entered its second offer
     # (one more broadcast, BOOKING_LAST_CHANCE_SECONDS more to accept). NULL
@@ -247,7 +262,7 @@ class Booking(Base):
         settings = get_settings()
         return func.coalesce(
             cls.last_chance_at + timedelta(seconds=settings.BOOKING_LAST_CHANCE_SECONDS),
-            func.coalesce(cls.reopened_at, cls.created_at)
+            func.greatest(cls.created_at, cls.reopened_at, cls.dispatch_retried_at)
             + timedelta(seconds=settings.BOOKING_REQUEST_TIMEOUT_SECONDS),
         )
 

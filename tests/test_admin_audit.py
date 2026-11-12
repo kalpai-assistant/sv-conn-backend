@@ -61,7 +61,7 @@ from app.services.admin_audit import (
 )
 from tests.conftest import TEST_DATABASE_URL
 from tests.factories.user_factory import UserFactory
-from tests.test_accept_contract import _eligible_provider, _service
+from tests.test_accept_contract import _booking, _eligible_provider, _service
 from tests.test_admin_console_auth import _admin, _session
 from tests.test_admin_coupons import _coupon as _seed_coupon
 from tests.test_admin_force_cancel import _seed_booking
@@ -714,6 +714,69 @@ async def _dispute_resolve(db) -> Case:
     )
 
 
+# SVC-433: the support console's booking actions. Each targets the booking.
+
+
+async def _support_note(db) -> Case:
+    _, booking = await _booking(db)
+    return Case(
+        url=f"{A}/bookings/{booking.id}/notes",
+        body={"body": "Customer called about timing"},
+        status=201,
+        action="booking.note_add",
+        target_type="booking",
+        target_id=booking.id,
+        details={"kind": "note"},
+    )
+
+
+async def _support_contacted(db) -> Case:
+    _, booking = await _booking(db)
+    return Case(
+        url=f"{A}/bookings/{booking.id}/contacted",
+        status=201,
+        action="booking.contacted",
+        target_type="booking",
+        target_id=booking.id,
+        details={"kind": "contacted"},
+    )
+
+
+async def _support_retry_dispatch(db) -> Case:
+    service = await _service(db)
+    await _eligible_provider(db, service)
+    _, booking = await _booking(db, service=service)
+    return Case(
+        url=f"{A}/bookings/{booking.id}/retry-dispatch",
+        action="booking.retry_dispatch",
+        target_type="booking",
+        target_id=booking.id,
+        details={"recipients": 1},
+    )
+
+
+async def _support_reassign_pro(db) -> Case:
+    service = await _service(db)
+    sp, _, rohan = await _team_sp(db, service)
+    meera = await _team_pro(db, sp.id, name="Meera")
+    _, booking = await _booking(
+        db, service=service, provider_id=sp.id, status=BookingStatus.ACCEPTED
+    )
+    booking.professional_id = rohan.id
+    await db.flush()
+    return Case(
+        url=f"{A}/bookings/{booking.id}/reassign-pro",
+        body={"professional_id": str(meera.id)},
+        action="booking.reassign_pro",
+        target_type="booking",
+        target_id=booking.id,
+        sp_user_id=sp.id,
+        before={"professional_id": str(rohan.id)},
+        after={"professional_id": str(meera.id)},
+        details={"from_professional_id": str(rohan.id), "to_professional_id": str(meera.id)},
+    )
+
+
 AUDITED_WRITE_ROUTES = {
     ("PATCH", "/admin/users/{user_id}/deactivate"): _deactivate,
     ("POST", "/admin/pros/{professional_id}/force-remove"): _force_remove,
@@ -747,6 +810,10 @@ AUDITED_WRITE_ROUTES = {
     ("POST", "/admin/disputes"): _dispute_create,
     ("POST", "/admin/disputes/{dispute_id}/review"): _dispute_review,
     ("POST", "/admin/disputes/{dispute_id}/resolve"): _dispute_resolve,
+    ("POST", "/admin/bookings/{booking_id}/notes"): _support_note,
+    ("POST", "/admin/bookings/{booking_id}/contacted"): _support_contacted,
+    ("POST", "/admin/bookings/{booking_id}/retry-dispatch"): _support_retry_dispatch,
+    ("POST", "/admin/bookings/{booking_id}/reassign-pro"): _support_reassign_pro,
 }
 
 
@@ -762,7 +829,7 @@ def test_every_admin_write_route_has_an_audit_case():
             if is_admin or path.startswith("/services"):
                 found.add((method, path))
     assert found == set(AUDITED_WRITE_ROUTES)
-    assert len(found) == 32
+    assert len(found) == 36
 
 
 @pytest.fixture

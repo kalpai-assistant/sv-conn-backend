@@ -25,6 +25,7 @@ from app.routers import (
     admin_coupons,
     admin_disputes,
     admin_pricing,
+    admin_support,
     admin_team,
     auth,
     bookings,
@@ -170,6 +171,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_catalog.router, prefix=prefix)
     app.include_router(admin_disputes.router, prefix=prefix)
     app.include_router(admin_analytics.router, prefix=prefix)
+    app.include_router(admin_support.router, prefix=prefix)
     app.include_router(downloads.router, prefix=prefix)
 
     # -----------------------------------------------------------------------

@@ -1542,3 +1542,61 @@ def test_svc_432_migrated_views_match_create_all(scratch_db):
         "create_all hook uses IF NOT EXISTS and keeps an old definition), or use "
         "a fresh test DB."
     )
+
+
+# --- SVC-433: support notes + bookings.dispatch_retried_at ---------------------------
+
+
+SVC_433 = "66ca0b0a9c76"
+BEFORE_SVC_433 = SVC_432
+
+
+def _check_constraints(url: URL, table: str) -> set[str]:
+    engine = create_engine(url)
+    try:
+        return {c["name"] for c in inspect(engine).get_check_constraints(table)}
+    finally:
+        engine.dispose()
+
+
+def test_svc_433_adds_notes_and_the_retry_column_and_round_trips(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_433)
+    bookings_before = _shape(scratch_db, "bookings")
+    views_before = _matviews(scratch_db)
+
+    _alembic(scratch_db, "upgrade", SVC_433)
+    bookings_after = _shape(scratch_db, "bookings")
+    assert set(bookings_after["columns"]) - set(bookings_before["columns"]) == {
+        ("dispatch_retried_at", "TIMESTAMP", True),
+    }
+    assert {k: v for k, v in bookings_after.items() if k != "columns"} == {
+        k: v for k, v in bookings_before.items() if k != "columns"
+    }
+    notes = _shape(scratch_db, "booking_support_notes")
+    assert notes["primary_key"] == ["id"]
+    assert sorted(fk[1:4] for fk in notes["foreign_keys"]) == [
+        (("author_user_id",), "users", ("id",)),
+        (("booking_id",), "bookings", ("id",)),
+    ]
+    assert (
+        "ix_booking_support_notes_booking_id_created_at",
+        ("booking_id", "created_at"),
+        False,
+        "None",
+    ) in notes["indexes"]
+    assert _check_constraints(scratch_db, "booking_support_notes") == {
+        "ck_booking_support_notes_kind",
+        "ck_booking_support_notes_note_has_body",
+        "ck_booking_support_notes_body_length",
+    }
+    # A new bookings column leaves the SVC-432 analytics views as they were.
+    assert _matviews(scratch_db) == views_before
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_433)
+    assert _shape(scratch_db, "bookings") == bookings_before
+    engine = create_engine(scratch_db)
+    try:
+        assert not inspect(engine).has_table("booking_support_notes")
+    finally:
+        engine.dispose()
+    assert _matviews(scratch_db) == views_before
