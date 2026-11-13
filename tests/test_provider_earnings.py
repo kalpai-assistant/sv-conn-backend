@@ -23,8 +23,33 @@ from app.models.booking_status_log import BookingStatusLog
 from app.models.category import Category
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.service import Service
+from app.services import provider_service
 from tests.factories.booking_factory import BookingFactory
 from tests.factories.user_factory import UserFactory
+
+IST = timezone(timedelta(hours=5, minutes=30))
+# Thursday 2026-10-08 10:00 IST — mid-week, mid-month, mid-day, so every
+# seeded offset below stays inside the today/week/month window it targets.
+NOW = datetime(2026, 10, 8, 10, 0, tzinfo=IST)
+
+
+@pytest.fixture
+def frozen_now(monkeypatch):
+    """Pin the clock the earnings windows read, so no test straddles a boundary.
+
+    The windows start at IST midnight / Monday / the 1st. With a live clock, a
+    job seeded a few minutes back falls into the previous window when the suite
+    runs just after one starts (Monday 00:00–00:20 IST, the 1st 00:00–00:30
+    IST). Same pin as tests/test_provider_earnings_by_pro.py.
+    """
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz) if tz else NOW.replace(tzinfo=None)
+
+    monkeypatch.setattr(provider_service, "datetime", _Frozen)
+    return NOW.astimezone(UTC)
 
 
 async def _seed_service(db, suffix: str | None = None) -> Service:
@@ -101,16 +126,11 @@ async def _seed_completed_booking(
 
 
 @pytest.mark.asyncio
-async def test_earnings_sums_recent_payouts(client, auth_headers, db_session):
+async def test_earnings_sums_recent_payouts(client, auth_headers, db_session, frozen_now):
     """Two completed bookings within window → both appear, total is summed."""
     provider = await _seed_provider(db_session)
     consumer = await UserFactory.create(db_session, role="consumer")
-    now_utc = datetime.now(UTC)
-    # Offsets in *minutes*, not hours: the week window boundary is IST Monday
-    # 00:00 (= UTC Sunday 18:30), so `now - 2h` slips out of the window when
-    # CI runs during the first ~2h of Monday IST (18:30–20:30 UTC Sunday).
-    # Keeping both bookings inside the last 30 min sidesteps the entire
-    # weekly boundary problem without changing what the test asserts.
+    now_utc = frozen_now
     await _seed_completed_booking(
         db_session, provider, consumer, payout=80.0, completed_at=now_utc - timedelta(minutes=10)
     )
@@ -135,12 +155,12 @@ async def test_earnings_sums_recent_payouts(client, auth_headers, db_session):
 
 
 @pytest.mark.asyncio
-async def test_earnings_excludes_old_bookings(client, auth_headers, db_session):
+async def test_earnings_excludes_old_bookings(client, auth_headers, db_session, frozen_now):
     """Bookings completed before the window start are excluded."""
     provider = await _seed_provider(db_session)
     consumer = await UserFactory.create(db_session, role="consumer")
-    now_utc = datetime.now(UTC)
-    # Inside today's window
+    now_utc = frozen_now
+    # Inside this month's window
     await _seed_completed_booking(
         db_session, provider, consumer, payout=80.0, completed_at=now_utc - timedelta(minutes=30)
     )
@@ -159,15 +179,15 @@ async def test_earnings_excludes_old_bookings(client, auth_headers, db_session):
 
 
 @pytest.mark.asyncio
-async def test_earnings_excludes_cancelled_and_refunded(client, auth_headers, db_session):
+async def test_earnings_excludes_cancelled_and_refunded(
+    client, auth_headers, db_session, frozen_now
+):
     """CANCELLED bookings and REFUNDED payments are not earnings."""
     provider = await _seed_provider(db_session)
     consumer = await UserFactory.create(db_session, role="consumer")
-    now_utc = datetime.now(UTC)
+    now_utc = frozen_now
 
-    # Completed + PAID — counts. Offset must stay inside the IST calendar week
-    # even on Monday just past midnight IST (~18:30 UTC Sun), so keep it seconds
-    # not hours — otherwise `now - 1h` lands in last week and the count is 0.
+    # Completed + PAID — counts.
     await _seed_completed_booking(
         db_session, provider, consumer, payout=80.0, completed_at=now_utc - timedelta(seconds=5)
     )
@@ -233,15 +253,13 @@ async def test_earnings_consumer_forbidden(client, auth_headers, db_session):
 
 
 @pytest.mark.asyncio
-async def test_earnings_isolated_between_providers(client, auth_headers, db_session):
+async def test_earnings_isolated_between_providers(client, auth_headers, db_session, frozen_now):
     """Provider A's earnings must not include Provider B's bookings."""
     provider_a = await _seed_provider(db_session)
     provider_b = await _seed_provider(db_session)
     consumer = await UserFactory.create(db_session, role="consumer")
-    now_utc = datetime.now(UTC)
+    now_utc = frozen_now
 
-    # See note in test_earnings_excludes_cancelled_and_refunded — `hours=1`
-    # crosses the IST week boundary on Monday just past midnight IST.
     await _seed_completed_booking(
         db_session, provider_a, consumer, payout=80.0, completed_at=now_utc - timedelta(seconds=5)
     )
