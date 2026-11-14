@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Razorpay Payments webhook — fields we consume",
+  "description": "This schema codifies the subset of a Razorpay webhook body that app/services/payment_service.py::handle_webhook actually reads. Vendor changes to fields OUTSIDE this subset will NOT flake the test — only changes that break what we consume. See SVC-458 (G2).",
+  "type": "object",
+  "required": ["event", "payload"],
+  "properties": {
+    "event": {
+      "type": "string",
+      "description": "Event kind — the handler branches on this.",
+      "enum": [
+        "payment.captured",
+        "payment.failed",
+        "payment.dispute.created",
+        "payment.dispute.won",
+        "payment.dispute.lost",
+        "payment.dispute.closed",
+        "payment.dispute.under_review",
+        "refund.processed",
+        "refund.failed",
+        "refund.created",
+        "settlement.processed",
+        "order.paid"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "description": "Variant-shaped by event kind. Each variant branch pins the fields we read; unmentioned extra fields are vendor's prerogative.",
+      "anyOf": [
+        {
+          "description": "payment.captured / payment.failed",
+          "type": "object",
+          "properties": {
+            "payment": {
+              "type": "object",
+              "properties": {
+                "entity": {
+                  "type": "object",
+                  "required": ["id", "order_id"],
+                  "properties": {
+                    "id": { "type": "string" },
+                    "order_id": { "type": "string" },
+                    "status": { "type": "string" },
+                    "amount": { "type": "integer", "minimum": 0 },
+                    "method": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "payment.dispute.*",
+          "type": "object",
+          "properties": {
+            "dispute": {
+              "type": "object",
+              "properties": {
+                "entity": {
+                  "type": "object",
+                  "required": ["id"],
+                  "properties": {
+                    "id": { "type": "string" },
+                    "payment_id": { "type": "string" },
+                    "status": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "refund.*",
+          "type": "object",
+          "properties": {
+            "refund": {
+              "type": "object",
+              "properties": {
+                "entity": {
+                  "type": "object",
+                  "required": ["id"],
+                  "properties": {
+                    "id": { "type": "string" },
+                    "payment_id": { "type": "string" },
+                    "amount": { "type": "integer", "minimum": 0 },
+                    "status": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "settlement.processed",
+          "type": "object",
+          "properties": {
+            "settlement": {
+              "type": "object",
+              "properties": {
+                "entity": {
+                  "type": "object",
+                  "required": ["id"],
+                  "properties": {
+                    "id": { "type": "string" },
+                    "amount": { "type": "integer" },
+                    "fees": { "type": "integer" },
+                    "tax": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
