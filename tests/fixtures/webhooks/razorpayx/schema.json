@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RazorpayX payout webhook — fields we consume",
+  "description": "Schema for the subset of /payments/payout-webhook bodies that PayoutService.handle_payout_webhook actually reads. Extracted from the RazorpayX docs (public, no live payloads captured yet — blocked on SVC-229 activation). Tests marked xfail until a real payload is captured. See SVC-459 (G3).",
+  "type": "object",
+  "required": ["event", "payload"],
+  "properties": {
+    "event": {
+      "type": "string",
+      "enum": [
+        "payout.processed",
+        "payout.failed",
+        "payout.reversed",
+        "payout.initiated",
+        "payout.queued",
+        "payout.rejected"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "payout": {
+          "type": "object",
+          "properties": {
+            "entity": {
+              "type": "object",
+              "required": ["id", "status"],
+              "properties": {
+                "id": { "type": "string" },
+                "reference_id": { "type": "string" },
+                "status": { "type": "string" },
+                "amount": { "type": "integer", "minimum": 0 },
+                "utr": { "type": "string" },
+                "failure_reason": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
