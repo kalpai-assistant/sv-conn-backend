@@ -402,7 +402,8 @@ async def test_an_admin_cannot_accept(client, db_session, auth_headers):
     admin = await UserFactory.create(db_session, role="admin")
     invite = (await _invite(client, auth_headers, sp, admin.phone)).json()
     resp = await _accept(client, auth_headers, admin, invite["token"])
-    assert resp.status_code == 403
+    # SVC-422: an admin's console session isn't a token for this route at all.
+    assert resp.status_code == 401
 
 
 @pytest.mark.asyncio

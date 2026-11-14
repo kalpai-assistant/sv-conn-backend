@@ -30,7 +30,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, "feature/**"]
   # Also run on any feat/* push so juniors see failures before opening a PR.
   # Not strictly required but the compute is cheap and the feedback loop
   # dramatically shortens.
@@ -46,7 +46,7 @@ jobs:
   test:
     name: pytest
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
 
     services:
       # PostGIS image because the app requires the extension. Uses the same

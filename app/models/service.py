@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -12,11 +13,13 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.models.price_unit import MIN_QTY_CHECK, PRICE_UNIT_CHECK, PriceUnit
 
 
 class Service(Base):
@@ -27,6 +30,8 @@ class Service(Base):
     __table_args__ = (
         # Partial index: fast catalog browsing by category for active services only
         Index("idx_services_category_active", "category_id", postgresql_where="is_active = true"),
+        CheckConstraint(PRICE_UNIT_CHECK, name="ck_services_price_unit"),
+        CheckConstraint(MIN_QTY_CHECK, name="ck_services_min_qty_unit"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -41,6 +46,18 @@ class Service(Base):
     base_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # SVC-430: a key from app.seed_data.catalog_icons.CATALOG_ICON_KEYS, or NULL.
+    icon_key: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # SVC-430: a PriceUnit value. min_qty is set (>= 1) for PER_SQFT / PER_HOUR
+    # and NULL otherwise; both CHECKs are in __table_args__. Nothing reads them
+    # yet: the marketplace stories (SVC-408, SVC-416, SVC-441) will.
+    price_unit: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=PriceUnit.PER_VISIT.value,
+        server_default=text(f"'{PriceUnit.PER_VISIT.value}'"),
+    )
+    min_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # SVC-293: full URLs to the service's banner media in S3. Both nullable —
     # the frontend falls through to sub-category / L1 / colour block when
     # they are, so a service without curated media renders intentionally.

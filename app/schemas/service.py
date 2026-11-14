@@ -71,6 +71,8 @@ class ServiceResponse(BaseModel):
     duration_minutes: int
     is_active: bool
     created_at: datetime
+    # SVC-430: a Lucide icon name from the admin's preset list, or None.
+    icon_key: str | None
     # Empty list until the variants relationship is loaded. Routes that
     # render variants call an attach helper first — the model relationship
     # is `lazy="raise_on_sql"` and will refuse an implicit lookup here.
@@ -176,6 +178,8 @@ class CategoryResponse(BaseModel):
     name: str
     slug: str
     icon_url: str | None
+    # SVC-430: a Lucide icon name from the admin's preset list, or None.
+    icon_key: str | None
     description: str | None
     sort_order: int
     # SVC-286: NULL ⇒ Level-1 (home tile). Non-NULL ⇒ Level-2 (sub-category

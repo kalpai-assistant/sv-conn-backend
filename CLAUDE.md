@@ -27,7 +27,7 @@ celery -A app.tasks.celery_app beat --loglevel=info     # Scheduler
 ```bash
 uv run alembic revision --autogenerate -m "message"
 uv run alembic upgrade head
-uv run python scripts/create_admin.py +91XXXXXXXXXX
+uv run python scripts/create_admin.py --email a@b.in --role ops  # console login (SVC-422)
 ```
 
 **Seed ritual (SVC-312).** Run in this exact order against a freshly-migrated DB. Each step is idempotent — re-runs are safe and never wipe categories.
@@ -101,8 +101,16 @@ Every operational concern has its own runbook — followable by anyone with AWS 
 - **[BACKUPS.md](BACKUPS.md)** — RDS backup config + quarterly restore drill. SC-34.
 - **[SECRETS.md](SECRETS.md)** — every secret enumerated, rotation cadence + procedure, incident response (DPDP 72h clock). SC-50.
 - **[OBSERVABILITY.md](OBSERVABILITY.md)** — Better Stack Logs vendor decision, alert catalog (P1/P2/P3), dashboard spec, Sentry↔logs correlation. SC-47.
-- **[ADMIN.md](ADMIN.md)** — admin IP allowlist + role hardening. SC-75.
+- **[ADMIN.md](ADMIN.md)** — admin console login, roles, audit log, IP allowlist. SC-75, SVC-422, SVC-423.
 - **[PURE_CODE_QUEUE.md](PURE_CODE_QUEUE.md)** — in-flight pure-code work queue. Delete when drained.
+
+### Admin console auth (SVC-422)
+
+Runbook and route-to-role table: [ADMIN.md](ADMIN.md). Admins are `users` rows with `role=ADMIN`; the console login (email + password + TOTP) lives in columns on that row, and `admin_role` holds `admin` / `ops` / `support`. The migration seeds nothing: `scripts/create_admin.py` must run for each existing admin, and nobody can log in until it has. `ck_users_admin_has_login` is `NOT VALID`, so an existing admin's row can't be updated until then. `uq_users_admin_email` is partial because `users.email` is free text any consumer can edit. The phone login is retired: `/auth/admin/send-otp` and `verify-otp` return 410, and `decode_access_token`, `get_current_user` and `/auth/refresh` refuse an admin's old tokens. Every `/admin/*` route and the 3 `services.py` writes use `require_roles(...)`, which returns the admin `User`; `require_role` stays for provider routes. A new `/admin` route must be added to `ROUTE_ROLES` in `tests/test_admin_console_auth.py`, or the test fails. Admin tokens carry `aud=eazyserv-admin`, so `decode_jwt` and everything built on it refuses them. Role and `is_active` come from the DB per request. Tokens slide through the `X-Admin-Token` response header; logout blacklists the `sid` in Redis. Passwords use `bcrypt` directly (passlib crashed on bcrypt 5). In tests, `auth_headers(id, "admin")` returns a console session.
+
+### Admin audit log (SVC-423)
+
+Runbook: [ADMIN.md](ADMIN.md). Every admin write writes one `admin_actions` row (the SVC-329 table, extended; there is no `admin_audit_log`) through `audit_admin_action` in `app/services/admin_audit.py`, on top of `record_admin_action`, the only writer. Calls are explicit, in the same transaction as the change: in the route, except the 3 team actions (`AdminTeamService`) and `booking.force_cancel` (`BookingService.force_cancel`, which must read `before` under its row lock). A new admin write route needs a call and a case in `AUDITED_WRITE_ROUTES` in `tests/test_admin_audit.py`, or the test fails. `before_json` / `after_json` hold only the `AUDIT_FIELDS` allow-list for that record type, built with `snapshot`, and blocked keys (`BLOCKED_FIELDS`, `*_encrypted`) are dropped at any depth even if a caller passes them. `target_id` is text and the CHECKs are gone, so a new action name only needs adding to `app/models/admin_action.py`. Don't rename `TEAM_ACTIONS`: the inline Teams screen reads them, and `GET /admin/actions` (admin + support) returns only those. `GET /admin/audit` and `/audit/filters` are admin only. IP comes from `appended_client_ip` and saves NULL if it won't parse; recording it or the User-Agent never fails the action. Payout is the exception to "same transaction": `POST /admin/providers/{id}/payout` commits its row before `.delay`, so a row means an admin asked, and the outcome stays in `payout_audits`. The CI release token writes no row, because no admin acted. The migration's downgrade deletes every row outside the 3 team actions.
 
 ### Booking State Machine
 
@@ -133,7 +141,7 @@ Doorstep OTP (4-digit, stored in Redis) is required to transition from `en_route
 1. `POST /send-otp` — generates 6-digit OTP, stores in Redis with 10-min TTL, sends via SMS
 2. `POST /verify-otp` — validates OTP, upserts user, returns JWT access + refresh tokens
 3. `POST /refresh` — exchanges refresh token for new token pair
-4. JWT middleware (`app/middleware/auth.py`) attaches user to request context; `get_current_user` dependency enforces authentication
+4. JWT middleware (`app/middleware/auth.py`) attaches user to request context; `get_current_user` dependency enforces authentication. Anything granting access reads tokens with `decode_access_token`, which refuses a refresh token and an old admin token; only `/auth/refresh` and `/auth/logout` take one.
 
 Rate limiting: 5 OTP attempts per phone per hour, tracked in Redis.
 
@@ -257,6 +265,14 @@ aws ec2 terminate-instances --instance-ids "$INSTANCE"
 
 ### Migrations on beta
 
+**Analytics materialized views (SVC-432) pin columns.** They read `bookings`,
+`booking_items`, `booking_status_logs`, `booking_disputes`, `users`,
+`provider_profiles`, `professionals`, `addresses`, `services` and `categories`.
+Postgres refuses to change the type of, or drop, a column a view reads ("cannot
+alter type of a column used by a view"), so such a migration must drop the views
+first and recreate them after (`app/analytics/views.py`: `drop_statements` /
+`create_statements`). Adding a column, or renaming one, is unaffected.
+
 **Commit the migration, merge, and the API container runs it on boot.**
 `docker-api-entrypoint.sh` runs `alembic upgrade head` unconditionally
 every time the backend App Runner container starts. Alembic is idempotent
@@ -310,7 +326,7 @@ Tests use `pytest-asyncio` with `AsyncClient` over ASGI transport. `conftest.py`
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push to main + every PR:
+`.github/workflows/ci.yml` runs on push to main + every PR into `main` or `feature/**`:
 1. `ruff check` (lint) + `ruff format --check` (format enforcement) — blocking
 2. PostGIS extension enable → `alembic upgrade head` → `alembic check` (drift catch) — blocking
 3. `pytest tests/` — blocking

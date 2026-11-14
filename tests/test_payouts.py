@@ -3148,7 +3148,7 @@ async def test_preflight_payout_refuses_empty_provider(db_session):
 
 @pytest.mark.asyncio
 async def test_admin_payout_endpoint_returns_202_and_enqueues_task(
-    client, db_session, auth_headers
+    client, db_session, auth_headers, monkeypatch
 ):
     """POST /admin/providers/{id}/payout enqueues the payout task and returns 202.
 
@@ -3156,6 +3156,9 @@ async def test_admin_payout_endpoint_returns_202_and_enqueues_task(
     the response body carries the queued estimate + Celery task id, and the
     actual money movement happens in the worker.
     """
+    # The route commits its admin_actions row before queuing (SVC-423); a real
+    # commit would leave these owed bookings behind for later tests.
+    monkeypatch.setattr(db_session, "commit", db_session.flush)
     consumer = await UserFactory.create(db_session, role="consumer")
     provider = await UserFactory.create(db_session, role="provider")
     admin = await UserFactory.create(db_session, role="admin")
@@ -3309,9 +3312,11 @@ async def test_list_pending_settlements_missing_profile_row_reports_pending_kyc(
 
     report = await PayoutService(db_session).list_pending_settlements()
 
-    assert len(report["providers"]) == 1
-    assert report["providers"][0]["kyc_status"] == "pending"
-    assert report["providers"][0]["payout_set"] is False
+    # Scoped to this provider: the payout route commits for real (SVC-423), so
+    # another test's provider can be in the table too.
+    [row] = [p for p in report["providers"] if p["provider_id"] == provider.id]
+    assert row["kyc_status"] == "pending"
+    assert row["payout_set"] is False
 
 
 # ---------------------------------------------------------------------------

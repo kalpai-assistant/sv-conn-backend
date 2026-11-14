@@ -56,6 +56,7 @@ from app.schemas.booking import (
     StatusTimelineItem,
     TimelinePro,
 )
+from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
 from app.services.provider_matching import (
     is_eligible_provider_multi_stmt,
 )
@@ -1134,8 +1135,61 @@ class BookingService:
         busy = await self._busy_pro_ids([pro.id for pro in pros])
         return [(pro, pro.id in busy) for pro in pros]
 
+    @classmethod
+    def pro_refusal(cls, pro: Professional, *, declined: bool, busy: bool) -> AppException | None:
+        """Why ``pro`` can't be given a job, or None: the per-Pro half of
+        ``assign``'s ladder, in its order. ``assign`` raises it, and support's
+        eligible-Pros list (SVC-433) shows it, so the two can't drift.
+
+        * declined → 409 ``PRO_DECLINED_THIS_BOOKING`` (SVC-361; the
+          Pro-for-self too);
+        * a switched-off Pro-for-self → 409 ``SELF_NOT_TAKING_JOBS`` (SVC-326);
+        * a team Pro goes into a consumer's home, so their own identity KYC must
+          be approved (SVC-318; wireframes §3B). Nothing else stops it:
+          accept-invite and /pros/me/online have no KYC gate, and broadcast
+          eligibility checks only the SP's KYC → 409 ``PRO_KYC_INCOMPLETE``;
+        * a team Pro who is offline (SVC-320 PR 3) → 409 ``PRO_OFFLINE``;
+        * on another unfinished job → 409 ``PRO_BUSY``.
+
+        The Pro-for-self is exempt from KYC and online: its KYC and online
+        state are the SP's, which broadcast eligibility already requires.
+        """
+        if declined:
+            return AppException(
+                "This Pro already declined this booking.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=PRO_DECLINED_THIS_BOOKING,
+            )
+        try:
+            cls._refuse_if_not_taking_jobs(pro)
+        except AppException as refused:
+            return refused
+        if not pro.is_self and pro.kyc_status != KYCStatus.VERIFIED:
+            return AppException(
+                f"{pro.display_name} hasn't finished KYC yet.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=PRO_KYC_INCOMPLETE,
+            )
+        if not pro.is_self and not pro.is_online:
+            return AppException(
+                f"{pro.display_name} is offline.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=PRO_OFFLINE,
+            )
+        if busy:
+            return AppException(
+                f"{pro.display_name} is already on another job.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=PRO_BUSY,
+            )
+        return None
+
     async def assign(
-        self, booking_id: uuid.UUID, sp_id: uuid.UUID, professional_id: uuid.UUID
+        self,
+        booking_id: uuid.UUID,
+        sp_id: uuid.UUID,
+        professional_id: uuid.UUID,
+        actor_id: uuid.UUID | None = None,
     ) -> tuple[Booking, bool, Professional | None]:
         """The SP picks the Pro who does this job: the atomic claim of two-level
         dispatch, first write wins. Returns ``(booking, newly_claimed,
@@ -1161,7 +1215,13 @@ class BookingService:
         Pro-for-self is exempt from both, since the SP's own KYC and online
         state are part of eligibility; instead it is refused while the SP has
         switched off taking jobs itself (409 ``SELF_NOT_TAKING_JOBS``, SVC-326).
+
+        ``actor_id`` is who made the change, for the audit trail: the SP when
+        omitted. Support's reassign (SVC-433) passes the admin, and runs only on a
+        booking the SP already holds at ACCEPTED, so it always takes the re-pick
+        branch with these same refusals.
         """
+        actor_id = actor_id or sp_id
         booking = await self.db.get(Booking, booking_id, with_for_update=True)
         if not booking:
             raise BookingNotFound(booking_id)
@@ -1206,11 +1266,7 @@ class BookingService:
         # Pro-for-self included. After the same-Pro short-circuit, so a no-op
         # re-assign stays a 200.
         if await self.declined_pro_ids(booking.id, [pro.id]):
-            raise AppException(
-                "This Pro already declined this booking.",
-                status_code=status.HTTP_409_CONFLICT,
-                code=PRO_DECLINED_THIS_BOOKING,
-            )
+            raise self.pro_refusal(pro, declined=True, busy=False)
 
         if not holds_it and booking.status is not BookingStatus.REQUESTED:
             # Theirs, but past ACCEPTED: en route or later.
@@ -1219,39 +1275,14 @@ class BookingService:
                 code="BOOKING_NOT_REASSIGNABLE",
             )
 
-        self._refuse_if_not_taking_jobs(pro)
-
-        # A team Pro goes into a consumer's home, so their own identity KYC
-        # must be approved first (SVC-318; wireframes §3B). Nothing else stops
-        # it: accept-invite and /pros/me/online have no KYC gate, and
-        # broadcast eligibility checks only the SP's KYC. The Pro-for-self is
-        # exempt: its KYC *is* the SP's, which eligibility already requires.
-        if not pro.is_self and pro.kyc_status != KYCStatus.VERIFIED:
-            raise AppException(
-                f"{pro.display_name} hasn't finished KYC yet.",
-                status_code=status.HTTP_409_CONFLICT,
-                code=PRO_KYC_INCOMPLETE,
-            )
-
-        # SVC-320 PR 3: team Pros now have their own online toggle. The SP's
-        # Pro-for-self is exempt: the SP's toggle, part of eligibility, covers it.
-        if not pro.is_self and not pro.is_online:
-            raise AppException(
-                f"{pro.display_name} is offline.",
-                status_code=status.HTTP_409_CONFLICT,
-                code=PRO_OFFLINE,
-            )
-
-        if await self._busy_pro_ids([pro.id], except_booking=booking.id):
-            raise AppException(
-                f"{pro.display_name} is already on another job.",
-                status_code=status.HTTP_409_CONFLICT,
-                code=PRO_BUSY,
-            )
+        busy = bool(await self._busy_pro_ids([pro.id], except_booking=booking.id))
+        refusal = self.pro_refusal(pro, declined=False, busy=busy)
+        if refusal is not None:
+            raise refusal
 
         if holds_it:
             await self.record_assignment(
-                booking, "repicked", booking.professional_id, pro.id, actor_id=sp_id
+                booking, "repicked", booking.professional_id, pro.id, actor_id=actor_id
             )
             booking.professional_id = pro.id
             await self.db.flush()
@@ -1723,7 +1754,7 @@ class BookingService:
     async def force_cancel(
         self,
         booking_id: uuid.UUID,
-        admin_id: uuid.UUID,
+        actor: AuditActor,
         reason: str,
     ) -> Booking:
         """Admin-driven cancel on a customer's behalf (SVC-299).
@@ -1751,6 +1782,9 @@ class BookingService:
         also stamped on ``booking.cancellation_reason`` — the ticket asked
         for both, and they answer different questions: the log is the
         audit story, the column is the row's current explanation.
+
+        The ``admin_actions`` row is written here rather than in the route
+        (SVC-423) because ``before`` must be read under the row lock taken below.
         """
         booking = await self.db.get(Booking, booking_id, with_for_update=True)
         if not booking:
@@ -1765,6 +1799,7 @@ class BookingService:
                 f"Cannot force-cancel a booking that is already {booking.status.value}."
             )
 
+        before = snapshot("booking", booking)
         old_status = booking.status
         booking.status = BookingStatus.CANCELLED
         booking.cancellation_reason = reason
@@ -1785,9 +1820,20 @@ class BookingService:
             booking_id=booking.id,
             from_status=old_status.value,
             to_status=BookingStatus.CANCELLED.value,
-            changed_by=admin_id,
+            changed_by=actor.admin_id,
             metadata={"admin_override": True},
             note=reason,
+        )
+        await audit_admin_action(
+            self.db,
+            actor,
+            action="booking.force_cancel",
+            target_type="booking",
+            target_id=booking.id,
+            reason=reason,
+            sp_user_id=booking.provider_id,
+            before=before,
+            after=snapshot("booking", booking),
         )
 
         await self.attach_addresses([booking])

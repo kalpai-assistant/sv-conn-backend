@@ -1,10 +1,11 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import require_role
+from app.dependencies import require_roles
+from app.models.service import Service
 from app.models.user import User
 from app.schemas.service import (
     CategoryResponse,
@@ -13,6 +14,7 @@ from app.schemas.service import (
     ServiceResponse,
     UpdateServiceRequest,
 )
+from app.services.admin_audit import audit_actor, audit_admin_action, snapshot
 from app.services.catalog_service import CatalogService
 
 router = APIRouter(tags=["Catalog"])
@@ -61,38 +63,70 @@ async def get_service(
 @router.post("/services", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED)
 async def create_service(
     request: CreateServiceRequest,
-    current_user: User = Depends(require_role("admin")),  # Fix #3: admin-only
+    http_request: Request,
+    current_user: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin-only: add a service to the global catalog."""
-    return await CatalogService(db).create_service(
+    """Admin or ops: add a service to the global catalog."""
+    service = await CatalogService(db).create_service(
         category_id=request.category_id,
         name=request.name,
         description=request.description,
         base_price=request.base_price,
         duration_minutes=request.duration_minutes,
     )
+    await audit_admin_action(
+        db,
+        audit_actor(http_request, current_user),
+        action="service.create",
+        target_type="service",
+        target_id=service.id,
+        after=snapshot("service", service),
+    )
+    return service
 
 
 @router.patch("/services/{service_id}", response_model=ServiceResponse)
 async def update_service(
     service_id: UUID,
     request: UpdateServiceRequest,
-    current_user: User = Depends(require_role("admin")),  # Fix #3: admin-only
+    http_request: Request,
+    current_user: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin-only: update a catalog service."""
-    return await CatalogService(db).update_service(
+    """Admin or ops: update a catalog service."""
+    before = snapshot("service", await db.get(Service, service_id))
+    service = await CatalogService(db).update_service(
         service_id=service_id,
         **request.model_dump(exclude_none=True),
     )
+    await audit_admin_action(
+        db,
+        audit_actor(http_request, current_user),
+        action="service.update",
+        target_type="service",
+        target_id=service_id,
+        before=before,
+        after=snapshot("service", service),
+    )
+    return service
 
 
 @router.delete("/services/{service_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_service(
     service_id: UUID,
-    current_user: User = Depends(require_role("admin")),  # Fix #3: admin-only
+    http_request: Request,
+    current_user: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin-only: soft-delete a catalog service."""
+    """Admin or ops: soft-delete a catalog service."""
+    before = snapshot("service", await db.get(Service, service_id))
     await CatalogService(db).delete_service(service_id)
+    await audit_admin_action(
+        db,
+        audit_actor(http_request, current_user),
+        action="service.delete",
+        target_type="service",
+        target_id=service_id,
+        before=before,
+    )

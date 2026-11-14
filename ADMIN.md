@@ -1,8 +1,8 @@
-# Admin Access Runbook (SVC-75)
+# Admin Access Runbook (SVC-75, SVC-422, SVC-423, SVC-424, SVC-429)
 
 `/admin/*` sits behind **two** layers of defence:
 
-1. **JWT role check** (`require_role("admin")`) — enforced per-endpoint.
+1. **Login + role check** (`require_roles(...)`) — enforced per-endpoint.
 2. **IP allowlist middleware** (`AdminIPAllowlistMiddleware`) — enforced app-wide
    before the router. Optional; empty allowlist = no restriction (dev-safe).
 
@@ -10,7 +10,418 @@ Even a stolen admin JWT is useless from an unlisted network.
 
 ---
 
-## Config
+## Admin console login (SVC-422)
+
+Email + password, then a TOTP code. No self-signup. Admins are `users` rows with
+`role=ADMIN`; `admin_role` holds `admin`, `ops` or `support`.
+
+The phone login is retired: `POST /auth/admin/send-otp` and `verify-otp` return 410
+`ADMIN_PHONE_LOGIN_GONE`, and old admin access and refresh tokens get 401.
+
+| Endpoint | Does | Refusals |
+|---|---|---|
+| `POST /admin/auth/login` | Password step. Returns `requires_totp`, `totp_setup_required`, and a 5-minute `challenge_token`. | 401 `INVALID_CREDENTIALS`, 429 |
+| `POST /admin/auth/totp/setup` | First login: returns `otpauth_url`; the app draws the QR. A new secret on every call. | 401 `INVALID_CHALLENGE`, 409 `TOTP_ALREADY_ACTIVE` |
+| `POST /admin/auth/totp/verify` | Returns the session JWT, and activates TOTP on first success. | 401 `INVALID_CHALLENGE` / `INVALID_TOTP_CODE`, 409 `TOTP_SETUP_REQUIRED`, 429 |
+| `POST /admin/auth/logout` | Ends the session (every token with its `sid`). | 401 |
+| `GET /admin/auth/me` | Who is logged in. Console sessions only. | 401 |
+
+**Limits.** Login: 5 attempts per IP per 15 minutes, using the rightmost
+`X-Forwarded-For` entry, because a client controls the leftmost. This assumes one
+proxy in front of the app; with more, all admins share one bucket. TOTP verify: 10
+attempts per admin per 15 minutes. Three wrong passwords in a row lock the account
+for 24 hours. Unknown email, wrong password, locked and deactivated accounts all
+get the same 401.
+
+**Session.** The JWT lasts 12 hours and has `typ=admin` and a `sid`; role and
+`is_active` are read from the DB on every request. Past half its life, a response
+carries a fresh token in `X-Admin-Token`, and the client should swap to it. There is
+no absolute cap, so an active session can run indefinitely. Admin tokens carry
+`aud=eazyserv-admin`, which makes every non-admin path refuse them.
+
+### Add an admin
+
+```bash
+# An existing admin keeps their own row and history. Run this right after the
+# deploy that adds the columns, once for every existing admin:
+uv run python scripts/create_admin.py --email vipul@kalpai.in --phone +919999900001
+# Someone new:
+uv run python scripts/create_admin.py --email someone@kalpai.in --role ops
+```
+
+The password comes from `ADMIN_USER_PASSWORD` or a prompt, never an argument: 12+
+characters, at most 72 bytes. On beta, run it through the SSM bastion tunnel in
+CLAUDE.md. Nothing is seeded by the migration, so **nobody can log in until this has
+run**. Someone new with no `--phone` gets a placeholder phone, `A` + 14 hex.
+
+An admin who predates the migration can't be updated until the script has run for
+them, because the CHECK holds every update to it. To list who still needs it:
+`SELECT phone FROM users WHERE role = 'ADMIN' AND password_hash IS NULL;`. After the
+last one, `ALTER TABLE users VALIDATE CONSTRAINT ck_users_admin_has_login;`.
+
+### SQL recipes
+
+```sql
+-- Unlock an account
+UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE email = '...' AND role = 'ADMIN';
+-- Deactivate (takes effect on the next request)
+UPDATE users SET is_active = false WHERE email = '...' AND role = 'ADMIN';
+-- Change role (takes effect on the next request)
+UPDATE users SET admin_role = 'support' WHERE email = '...' AND role = 'ADMIN';
+-- Lost authenticator: the next login goes through setup again
+UPDATE users SET totp_secret = NULL, totp_enabled_at = NULL WHERE email = '...' AND role = 'ADMIN';
+```
+
+### Who can call what
+
+A consumer or provider token gets 403; an old admin phone-login token or a challenge
+token gets 401. `tests/test_admin_console_auth.py::ROUTE_ROLES` holds
+this table and fails if a new `/admin` route isn't in it.
+
+| Roles | Routes |
+|---|---|
+| admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config`, `/coupons`, `/coupons/{code}`, `/catalog`, `/catalog/categories/{id}`, `/catalog/services/{id}`, `/disputes`, `/disputes/bookings/{id}`; `POST /admin/disputes`, `/disputes/{id}/review`, `/disputes/{id}/resolve` (SVC-431; support's refunds are capped); the support console (SVC-433): `GET /admin/support/lookup`, `/support/customers/{id}`, `/bookings/{id}/notes`, `/bookings/{id}/eligible-pros`; `POST /admin/bookings/{id}/notes`, `/bookings/{id}/contacted`, `/bookings/{id}/retry-dispatch`, `/bookings/{id}/reassign-pro` |
+| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428), `POST /admin/coupons`, `PATCH /admin/coupons/{code}`, `POST /admin/coupons/{code}/deactivate` + `activate` (SVC-429), `POST /admin/catalog/categories` + `/catalog/services`, `PATCH /admin/catalog/categories/{id}` + `/catalog/services/{id}`, `POST .../deactivate` + `activate` on both (SVC-430), `GET /admin/analytics/overview` + `/analytics/supply` (read-only dashboards, SVC-432) |
+| admin, support | `GET /admin/users` |
+| admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/app-versions/{platform}/release` (also the CI token) |
+
+Support's writes are the dispute routes (SVC-431), with refunds capped at
+`pricing_config.support_refund_limit`, and the support console's booking actions
+(SVC-433): notes, "contacted" marks, retry dispatch and reassign-Pro. Admin and ops
+have all of these too. Retry dispatch re-runs the existing `new_request` broadcast
+on a REQUESTED booking with a fresh offer window (`bookings.dispatch_retried_at`),
+and refuses with 409 rather than broadcast to nobody. Reassign-Pro is the SP's own
+re-pick (`BookingService.assign`) on an ACCEPTED booking, with the admin as actor:
+it moves the job only between Pros of the same SP, by the same rules. Both are
+audited, and so is every note.
+
+---
+
+## KYC queue (SVC-424)
+
+`GET /admin/providers/kyc/pending` lists KYC records, and
+`GET /admin/providers/kyc/pending/count` returns `{"count": n}`: how many rows the
+same filters have across all pages. Both take the same params and defaults, and
+read through the same query (`app/services/kyc_queue_service.py`), so the two
+can't disagree.
+
+`kind`: `sp` (default), `pro` (team Pros) or `all`. `status`, default `submitted`:
+
+| `status` | Rows | Order |
+|---|---|---|
+| `submitted` | Waiting for review | Oldest submitted first |
+| `verified` | Approved, by an admin or the AI verifier | Newest review first |
+| `rejected` | Rejected | Newest review first |
+| `pending` | No documents uploaded, so not a review state | Oldest submitted first |
+| `auto_approved` | Approved by the AI verifier in the last 7 days | Newest review first |
+| `all` | `submitted` + `verified` + `rejected`, never `pending` | Newest submitted first |
+
+A missing time sorts last, and the row id breaks ties. Each row's `kyc_status` says
+which state it is in, which `status=all` needs because it mixes them. The console's
+"pending" and "approved" filters are `submitted` and `verified`.
+
+Every status leaves out deleted accounts (`users.deleted_at` set; deletion wipes
+their documents) and removed Pros (`professionals.is_active = false`; re-adding a
+Pro reactivates the same row, so it comes back by itself). A deactivated user stays
+in, unless they are also a removed Pro. A Pro-for-self is never listed or counted:
+its KYC is its SP's. These rules only cover the queue and the count, so the verify
+and reject routes can still act on a removed Pro if called directly.
+
+A badge that includes team Pros must call the count with `kind=all`, since the
+default is `sp`.
+
+Rejecting a KYC sends one push to that SP or team Pro in their language (SVC-444),
+except a removed Pro. It's enqueued after the commit and is best effort, so a broker
+failure still returns 200. The reason stays out of the push, since it shows on a lock
+screen. The person reads it in the app: `GET /providers/me` for an SP, the Pro's own
+profile for a Pro. Approving sends no push. SMS waits on DLT approval (SVC-225).
+
+---
+
+## Payouts dashboard (SVC-426)
+
+Read-only, in `app/services/payout_dashboard_service.py`. **Payout scope** means a
+booking that is completed, PAID and not cash: `PayoutService._payout_scope_filter`,
+which is `_owed_filter` without its `settlement_status = pending` clause. Cash
+bookings never appear, because the SP already holds that money.
+
+- `GET /admin/payouts/providers?status=&page=&per_page=` (25, max 100): one row per
+  SP with a payout-scope booking. Each row has a count and paise for each settlement
+  status, `earned_paise` (all five summed), `payable_paise` and `latest_failure_reason`.
+  `status` keeps SPs with a booking in that bucket. Sorted by pending paise desc,
+  then id. `pending_*` is `_owed_filter`, so it equals the
+  `/providers/pending-settlements` row.
+- **`pending_paise` is not what gets sent.** `payable_paise` is: the wallet balance,
+  floored at 0, which is also the trigger's 202 `amount_paise`. The wallet takes cash
+  commission off and only counts bookings Razorpay has settled to us (T+1), so it can
+  be lower.
+- `latest_failure_reason` is RazorpayX's reason from the newest failed or reversed
+  booking. Without one, it's the error of the SP's latest payout attempt, if that
+  attempt failed. Otherwise it is null.
+- `GET /admin/providers/{id}/payout-bookings?settlement_status=&page=&per_page=`:
+  the SP's payout-scope bookings, newest completion first, with the money split in
+  paise. `service_amount_paise` is the price fixed at booking time.
+- `GET /admin/payouts/export.csv?from=YYYY-MM-DD&to=YYYY-MM-DD`: both dates are
+  required, and they are IST days, inclusive, on the completion time. `from > to` or
+  a range over 366 days returns 422. Columns, in order: `sp_id, sp_name, booking_id,
+  locked_price, commission, sp_payout, booking_completed_at, payout_status`.
+  - `locked_price` is `service_amount`, and SVC-410 must keep that meaning.
+  - `sp_payout` is `provider_payout + tip_amount`, gross per booking. A range's total
+    won't match RazorpayX for the reason above.
+  - `sp_name` is the business name, else the user's name.
+  - A booking with no completion log row is left out.
+  - A cell that starts with `=`, `+`, `-`, `@`, tab or CR gets a leading `'`, so a
+    spreadsheet doesn't run it as a formula.
+
+Completion time is the booking's first `booking_status_logs` row with
+`to_status = completed`. It is not `settled_at`, which is when Razorpay paid the
+customer's money to us.
+
+---
+
+## Coupons (SVC-429)
+
+`/admin/coupons` replaces the SQL inserts. A coupon is never deleted: deactivate is
+the kill switch and activate undoes it, since `code` is UNIQUE and a mistaken
+deactivate would otherwise burn it. The code can't change after create. Admin creates
+are always global; personal (referral) coupons are listed with their owner and can be
+edited and switched, but not created here.
+
+- **Code:** trimmed and uppercased, then `^[A-Z0-9]{3,20}$`. Stored lowercase (the
+  consumer lookups match on `lower()`), shown uppercase, and matched in any case in the
+  URL. A code taken in any case is a 409 `COUPON_CODE_TAKEN`.
+- **Usage** is the count of `coupon_redemptions` rows, which the limits also count. A
+  redemption is never deleted, so a cancelled booking still uses up one use.
+- **Status:** each coupon has exactly one, the first that matches: `inactive`
+  (`is_active` false), `expired` (`valid_until` passed), `exhausted` (the global
+  `usage_limit` reached; the per-user limit isn't a coupon status), `scheduled`
+  (`valid_from` in the future), else `active`.
+- **Refusals:** 422 `COUPON_INVALID` with `details.field`. A flat coupon has no
+  `max_discount` (sent: 422; switching to flat clears it). `valid_until` must be after
+  `valid_from`, and in the future on create (a PATCH may end a coupon early).
+  `usage_limit` can't be set below the uses so far.
+
+---
+
+## Service catalog (SVC-430)
+
+`/admin/catalog` adds and edits categories and services without SQL. `GET /admin/catalog`
+is the whole tree, inactive rows included: L1 (home tile) → its L2s → their services.
+Each service row carries its active-variant count and its active bookings (requested,
+accepted, en route or in progress). Variants are read-only here, and SVC-428's pricing
+columns are edited at `/admin/pricing`, not here.
+
+- **Nothing is deleted.** Deactivate / activate are the only way a row is switched, and
+  PATCH has no `is_active`, so the active-bookings warning can't be skipped.
+- **Slugs never change.** A slug is made from the name at create (lowercase, `[a-z0-9-]`,
+  dashes collapsed). The consumer app keys its icons, tile images and `/category/$slug`
+  route on it. A name or slug that's taken is a 409 `CATALOG_NAME_TAKEN`.
+- **Structure.** Two levels. A category holds sub-categories or services, never both
+  (Miscellaneous is an L1 holding services). An active row can't sit under an inactive
+  one, checked on create, move and activate. These count inactive rows too.
+- **Deactivating** a category is refused (409 `CATEGORY_NOT_EMPTY`) while it holds an
+  active service or sub-category. Deactivating a service with bookings in flight is a
+  409 `SERVICE_HAS_ACTIVE_BOOKINGS` unless the body is `{"confirm": true}`; those bookings
+  carry on, and only new ones are refused.
+- **Icons** are picked from `app/seed_data/catalog_icons.py` (Lucide names). The
+  consumer app doesn't read `icon_key` yet: it still keys icons on the slug.
+- **Price unit** (`PER_VISIT`, `PER_SQFT`, `PER_HOUR`, `PER_ITEM`) and **min qty**
+  (required for `PER_SQFT` / `PER_HOUR`, refused otherwise) are stored for the
+  marketplace stories. Booking still prices from the variant, or `base_price`.
+- **Refusals:** 422 `CATALOG_INVALID` with `details.field`. On PATCH a field's own rule
+  runs only when it's sent, so an old row holding a value the rules now refuse can still
+  be edited.
+
+## Disputes and refunds (SVC-431)
+
+`/admin/disputes` replaces refunding by hand in the Razorpay dashboard. There is no
+consumer "I had an issue" button yet, so an admin logs the dispute for the customer.
+
+- **Lifecycle:** `RAISED` → `IN_REVIEW` (picked up; optional) → `RESOLVED` → `CLOSED`.
+  Only a completed or cancelled booking can be disputed (409
+  `DISPUTE_BOOKING_NOT_FINISHED`), with one open dispute at a time (409
+  `DISPUTE_ALREADY_OPEN`, also a partial unique index).
+- **Refundable** = what the customer paid for the service (service − discount; never
+  the tip), minus the cancel refund and earlier dispute refunds (a failed one doesn't
+  count). Nothing left: only `NO_REFUND` (409 `NOTHING_TO_REFUND`). `FULL_REFUND` is
+  the whole refundable amount; `PARTIAL_REFUND` is typed, > 0 and ≤ refundable (422
+  `DISPUTE_INVALID` with `details.field`). Notes are always required.
+- **Online:** a Razorpay refund on the booking's payment, made before anything is saved
+  (422 `REFUND_REJECTED` with Razorpay's reason; 502 `REFUND_GATEWAY_ERROR` if it doesn't
+  answer). Every refund carries `notes.dispute_id`, and a retry first looks for one
+  already made for the dispute, so a retry after a 502 never refunds twice. The dispute
+  stays `RESOLVED` (`refund_status` PENDING) until `refund.processed` closes it;
+  `refund.failed` leaves it `RESOLVED` with `refund_status` FAILED and the reason
+  (retrying is SVC-213).
+- **Cash:** a `MANUAL` refund paid outside the app (UPI, say). The amount is a record
+  only, Razorpay is never called, and the notes say how it was paid. It closes at once,
+  like `NO_REFUND`.
+- **Support** may refund up to `pricing_config.support_refund_limit` rupees (seeded 500)
+  per dispute: 403 `REFUND_OVER_SUPPORT_LIMIT` above it. Admin and ops are uncapped.
+- **Provider pay is never touched.** The platform absorbs dispute refunds: they don't
+  change `booking.payment_status`, `payments.status` or `payments.refund_*` (the cancel
+  refund's), and write no ledger rows, so the payout is the same. Clawback is a later
+  ticket. The refund webhooks find a dispute refund by `notes.dispute_id` (locking the
+  dispute), then by `booking_disputes.razorpay_refund_id`, before the cancel lookup.
+- **Customer:** a push after the commit (Razorpay refund, manual refund or no refund
+  wording). No SMS: that needs a DLT template first.
+- `is_disputed` on the bookings list and detail (and `?disputed=`) means the booking was
+  ever disputed: a Razorpay chargeback or any dispute row, open or closed.
+
+## Analytics (SVC-432)
+
+`GET /admin/analytics/overview` and `GET /admin/analytics/supply` feed the console's
+Overview and Supply dashboards. Admin and ops only (support gets 403). They're
+read-only, so nothing is audited. Both take `?weeks=` (1–52, default 12): trends cover
+the last `weeks` IST weeks, the current partial week last.
+
+**Cached views.** The numbers come from eight Postgres materialized views
+(`app/analytics/views.py`), never the raw tables. Celery beat
+(`refresh-analytics-views`) refreshes them every 900 s with `REFRESH ... CONCURRENTLY`,
+all in one transaction, so reads never block and every response's `as_of` is that
+refresh. The views hold no clock: the service applies the windows against `as_of`.
+The SQL lives once. The SVC-432 migration imports the frozen `VIEWS_V1`, and a
+`Base.metadata` `after_create` hook builds the same views for the suite's
+`create_all`. To change a view, add `VIEWS_V2` and a migration that drops V1 and
+creates V2. A long-lived `sc_test` then needs its analytics matviews dropped
+(`test_svc_432_migrated_views_match_create_all` says so). Postgres refuses to change
+the type of, or drop, a column a view reads, so a migration doing that on `bookings`,
+`booking_items`, `booking_status_logs`, `booking_disputes`, `users`,
+`provider_profiles`, `professionals`, `addresses`, `services` or `categories` drops
+the views first and recreates them after. Adding or renaming a column is unaffected.
+
+**Definitions.** Money is rupees as JSON numbers, ratios are 0..1, `null` means "not
+enough history" (never 0).
+
+- **Time:** everything is bucketed by `bookings.created_at` in IST, and weeks start on
+  Monday. A "last N days" window is the N whole IST days ending today, today
+  included.
+- **GMV** = `sum(service_amount)` of COMPLETED bookings: before discount, without
+  tips. 7/30/90-day totals. The previous-period figure is `null` unless the
+  platform's first booking is on or before that period's first day. A covered period
+  with no sales is 0. `change_pct` is null when the previous figure is null or 0.
+- **Take rate** = `sum(platform_commission) / GMV`, and **AOV** = GMV / completed
+  count, both per week (null for a week with no completed booking).
+- **Bookings per day**, for all 7 statuses (the booking's current status), plus
+  **refunded**, which is not a status: `payment_status` refunded, or a dispute refund
+  that hasn't FAILED (`refund_amount` set; a manual refund's `refund_status` is NULL).
+- **Consumer cohorts:** consumers (role consumer) grouped by signup week, counting
+  those with at least one COMPLETED booking. Their anchor is the `created_at` of their
+  first completed booking. "Rebooked within N" means another booking of any status
+  was created within N days of the anchor. Members keep joining (a first completion
+  can come months after signup), so each 7/30/90 cell's denominator is the members
+  whose N days have elapsed (`matured`). The rate is null while that is 0.
+- **Active SPs** = KYC-verified SPs (current status) with at least one booking of any
+  status (`bookings.provider_id`) in the period. **Active Pros** = active
+  professionals (current `is_active`; a Pro-for-self counts) with at least one booking
+  (`bookings.professional_id`). Each is given for the last 7 and 30 days plus a
+  weekly trend.
+- **New-SP cohorts:** verified SPs grouped by the IST week of `kyc_reviewed_at` (an SP
+  without one is left out). Each cell is the share with a booking in the 30 days
+  ending at day 30, 60 or 90, and stays null until every member's window has elapsed.
+- **SP churn:** verified SPs with no booking created in the last 14 days (never
+  booked counts as churned), grouped by the IST month of their user's `created_at`.
+  All months are shown.
+- **Supply gap:** pincode × service (`booking_items.service_id`; a booking counts once
+  per service) over the trend weeks. Demand = bookings created. Unmet = EXPIRED and
+  never accepted (no `accepted` status log). A NULL pincode is the `Unknown` row.
+  Coverage is a radius, so unmet is the only honest supply signal. The top 30
+  pincodes by demand are returned, `Unknown` always included; `truncated` and
+  `total_pincodes` say what was cut.
+- **Prices:** `booking_items.unit_price` on COMPLETED bookings, all time, by the
+  service's own category: min / p25 / median / p75 / max / count.
+- **Time to accept:** the first `accepted` status log minus `created_at` (a reopened
+  booking's later accepts are ignored), p50/p90 seconds per week. Bookings never
+  accepted are left out.
+- Marketplace health (sheet / pick rank / boost) needs SVC-419's events and isn't
+  here.
+
+## Audit log (SVC-423)
+
+Every admin write writes one `admin_actions` row: who, what, why, before and after,
+IP and User-Agent. Rows are never updated or deleted, and there is no route that
+could.
+
+**Reading it.** `GET /admin/audit` (paginated, newest first; filter by
+`admin_user_id`, `action`, `target_type`, `target_id`, `date_from` inclusive,
+`date_to` exclusive; a date with no offset means UTC) and `GET /admin/audit/filters`.
+Admin role only, because ops shouldn't review their own actions. `GET /admin/actions`
+is the owner history on the Teams screen and the SP/Pro pages: all three roles
+(SVC-427), and only the 3 team actions. A Pro row's history
+(`target_type=professional&target_id=X`) also lists a reassign that landed the
+person on row X (stored against the row they left) and a deactivation that removed
+row X (stored against the user).
+
+**Adding a write route.** Call the helper in the handler, in the same transaction as
+the change, and add a case to `AUDITED_WRITE_ROUTES` in `tests/test_admin_audit.py`,
+which fails until you do. Put a new action name in `app/models/admin_action.py`, in the
+`area.verb` form. No migration is needed.
+
+```python
+before = snapshot("service", service)   # NULL for a create
+...change it...
+await audit_admin_action(
+    db, audit_actor(request, admin),
+    action="service.update", target_type="service", target_id=service.id,
+    before=before, after=snapshot("service", service),   # NULL for a delete
+)
+```
+
+**What can't be in a row.** `before_json` and `after_json` hold the short per-record
+lists in `AUDIT_FIELDS`, never a whole record. These are dropped even if a caller
+passes them: `password_hash`, `totp_secret`, `fcm_token`, every `*_encrypted` column,
+`razorpayx_contact_id`, `razorpayx_fund_account_id`, `kyc_docs`, `kyc_ai_verdict`,
+`doorstep_otp`.
+
+**What each route writes.**
+
+| Action | Target | Routes |
+|---|---|---|
+| `user_deactivated` | `user` | `PATCH /admin/users/{id}/deactivate` |
+| `pro_force_removed`, `pro_reassigned` | `professional` | `POST /admin/pros/{id}/force-remove`, `reassign` |
+| `kyc.approve`, `kyc.reject` | `provider` or `professional` | the 4 KYC verify and reject routes |
+| `booking.force_cancel` | `booking` | `POST /admin/bookings/{id}/cancel` |
+| `payout.enqueue` | `provider` | `POST /admin/providers/{id}/payout` |
+| `payout.requeue_failed`, `payout.requeue_reversed` | `provider` | the 2 requeue routes |
+| `app_version.release` | `app_version` (`target_id` is the platform) | `POST /admin/app-versions/{platform}/release` |
+| `service.create`, `service.update`, `service.delete` | `service` | `POST`, `PATCH`, `DELETE /services` |
+| `service.create`, `service.update`, `service.deactivate`, `service.activate` | `service` | `POST /admin/catalog/services`, `PATCH /admin/catalog/services/{id}`, `.../deactivate`, `activate` (`details` on a deactivate: `active_bookings`, `confirm`) |
+| `category.create`, `category.update`, `category.deactivate`, `category.activate` | `category` | `POST /admin/catalog/categories`, `PATCH /admin/catalog/categories/{id}`, `.../deactivate`, `activate` |
+| `pricing.category_update` | `category` | `PATCH /admin/pricing/categories/{id}` |
+| `pricing.config_update` | `pricing_config` (`target_id` is the key) | `PATCH /admin/pricing/config/{key}` |
+| `coupon.create`, `coupon.update` | `coupon` | `POST /admin/coupons`, `PATCH /admin/coupons/{code}` |
+| `coupon.deactivate`, `coupon.activate` | `coupon` | `POST /admin/coupons/{code}/deactivate`, `activate` |
+| `dispute.create`, `dispute.review`, `dispute.resolve` | `dispute` | `POST /admin/disputes`, `/disputes/{id}/review`, `/disputes/{id}/resolve` (`reason` on a resolve is the notes; `details` has `booking_id`, `refundable_before`, `refund_amount_paise`) |
+
+**Exceptions worth knowing.**
+
+- **Payout.** One row when the route accepts (202), with the amount and booking count
+  in `details`, committed before the task is enqueued. So a row means "an admin asked",
+  not "money moved": a failed enqueue leaves a row and a 500, and an empty batch is a
+  202 with a row showing 0. Each attempt's outcome stays in `payout_audits`. An unknown
+  provider id is still a 202, with `sp_user_id` NULL.
+- **CI release.** The token path writes no row, because no admin acted. Its record is
+  the `app_version_published` log line with `release_auth=token`. A request sending
+  both the token and a JWT counts as the token.
+- **Actions that write no row.** Refused ones, and deactivating an unknown id (a silent
+  204).
+- **Pricing (SVC-428).** `before_json` / `after_json` hold only the fields the save
+  changed, including `bounds_pct` when turning `is_sensitive` off clears it. A save
+  that changes nothing is a 200 with no row.
+
+**IP and User-Agent.** Recording them never fails the action: an IP that doesn't parse
+saves NULL, and the User-Agent is cut to 512 characters. The IP comes from
+`appended_client_ip`, the same helper as the login limit. **Before the epic reaches
+beta**, check the real `X-Forwarded-For` there and correct that one helper if needed
+(see SVC-422's operational gaps). Audit rows only start on beta at that deploy.
+
+**Downgrading.** The migration's downgrade deletes every row outside the 3 team
+actions, because the old schema can't hold them. Copy the table first if they matter.
+App Runner's auto-rollback redeploys the old image and never runs a downgrade.
+
+---
+
+## IP allowlist config
 
 Two env vars in `.env`:
 
@@ -97,12 +508,12 @@ Non-admin JWT + listed IP: GET → 403 (IP passes, role fails at handler)
 
 ## What this does NOT protect against
 
-- **Compromised admin machine on an allowed network.** Solved separately by
-  Cloudflare Access / short JWT TTL / mandatory 2FA (all post-beta).
+- **Compromised admin machine on an allowed network.** Partly addressed by
+  console TOTP (SVC-422). Cloudflare Access is still post-beta.
 - **XSS / CSRF on the admin panel.** Different threat, handled at the
   frontend / CORS layer.
 - **Insider abuse.** An admin with legit credentials from a legit network can
-  still act maliciously. Audit logs (SVC-XX follow-up) are the answer here.
+  still act maliciously. The audit log (SVC-423) records it but doesn't stop it.
 
 ---
 

@@ -88,3 +88,78 @@ class ProviderPayoutHistoryResponse(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+# ---------------------------------------------------------------------------
+# Admin payouts dashboard (SVC-426)
+#
+# Every amount is paise, with the unit in the field name, like the rest of this
+# screen: the trigger's 202 and pending-settlements are paise too.
+# ---------------------------------------------------------------------------
+
+
+class PayoutDashboardProvider(BaseModel):
+    """One SP with any payout-scope booking (completed, PAID, not cash)."""
+
+    provider_id: UUID
+    name: str | None
+    business_name: str | None
+    phone: str
+    is_active: bool
+    payout_set: bool
+    kyc_status: str
+    # One count + amount per settlement status. ``pending_*`` is ``_owed_filter``,
+    # so it equals pending-settlements' figures for the same SP.
+    pending_count: int
+    pending_paise: int
+    processing_count: int
+    processing_paise: int
+    completed_count: int
+    completed_paise: int
+    failed_count: int
+    failed_paise: int
+    reversed_count: int
+    reversed_paise: int
+    # All five buckets: what the SP has earned through payout-scope bookings.
+    earned_count: int
+    earned_paise: int
+    # What a payout would send right now: the wallet balance, which nets cash
+    # commission and only counts T+1-settled credits (SVC-180). Equals the
+    # trigger's 202 ``amount_paise``, and can be below ``pending_paise``.
+    payable_paise: int
+    # The newest failed/reversed booking's RazorpayX reason, else the error of the
+    # SP's latest payout attempt when that attempt failed. Null otherwise.
+    latest_failure_reason: str | None
+
+
+class PayoutDashboardResponse(BaseModel):
+    providers: list[PayoutDashboardProvider]
+    total: int
+    page: int
+    per_page: int
+
+
+class PayoutBookingRow(BaseModel):
+    """One booking behind an SP's payout figures: the split that went into it."""
+
+    booking_id: UUID
+    # First COMPLETED status-log time. Null only for a booking with no such row.
+    completed_at: datetime | None
+    # The price fixed at booking time (the ticket's "locked_price").
+    service_amount_paise: int
+    discount_amount_paise: int
+    platform_commission_paise: int
+    provider_payout_paise: int
+    tip_amount_paise: int
+    settlement_status: str
+    settlement_payout_id: str | None
+    settlement_failure_reason: str | None
+    # The Pro who did the job; null when no Pro was recorded.
+    professional_name: str | None
+
+
+class PayoutBookingsResponse(BaseModel):
+    bookings: list[PayoutBookingRow]
+    total: int
+    page: int
+    per_page: int

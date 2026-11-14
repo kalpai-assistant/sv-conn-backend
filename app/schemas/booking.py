@@ -278,8 +278,9 @@ class BookingResponse(BaseModel):
     # that builds this schema must call `BookingService.attach_status_logs`
     # first, exactly like `address` and `items`.
     status_history: list[BookingStatusLogResponse]
-    # True when any payment for this booking has been charged back. Only populated by
-    # the admin bookings list (which computes it); defaults False elsewhere (SVC-134).
+    # True when any payment for this booking has been charged back or a customer
+    # dispute was ever logged for it. Only populated by the admin bookings list and
+    # detail (SVC-134, SVC-425, SVC-431); defaults False elsewhere.
     is_disputed: bool = False
     # Party display fields, populated only on admin routes (SVC-299). Every other
     # BookingResponse consumer leaves them as None: the consumer's own booking
@@ -290,6 +291,13 @@ class BookingResponse(BaseModel):
     # payload and every existing client keeps working.
     consumer_phone: str | None = None
     provider_name: str | None = None
+    # Admin booking detail fields (SVC-425), filled only by the admin detail and
+    # force-cancel responses; every other route leaves them None, same as the
+    # party fields above. ``settlement_status`` is the enum value (pending /
+    # processing / completed / failed).
+    cancellation_reason: str | None = None
+    settlement_status: str | None = None
+    settled_at: datetime | None = None
     # Who is doing the job and for which business (SVC-324). Null until a Pro is
     # assigned, and null again while a team SP re-picks after a Pro declined:
     # an ACCEPTED booking with ``professional_id`` null is exactly that state.

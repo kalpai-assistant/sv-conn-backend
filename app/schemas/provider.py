@@ -133,6 +133,10 @@ class ProviderResponse(BaseModel):
     avg_rating: float
     total_completed_jobs: int
     kyc_status: KYCStatus
+    # SVC-444: why the last review failed, so the provider can fix it. Only this
+    # schema's own /providers/me routes return it; customers read
+    # NearbyProviderResponse. NULL unless the KYC is currently rejected.
+    kyc_rejection_reason: str | None = None
     is_online: bool
     service_area_radius_km: int
     # SVC-279: the centre, so a provider can see and edit the area they set.
@@ -247,6 +251,8 @@ class KYCQueueRow(BaseModel):
     phone: str
     name: str | None
     email: str | None
+    # SVC-424: status=all mixes states, so each row says which one it is in.
+    kyc_status: KYCStatus
     kyc_submitted_at: datetime | None
     kyc_reviewed_at: datetime | None
     kyc_rejection_reason: str | None
@@ -258,6 +264,12 @@ class KYCQueueRow(BaseModel):
     professional_id: UUID | None = None
     sp_user_id: UUID | None = None
     sp_business_name: str | None = None
+
+
+class KYCQueueCountResponse(BaseModel):
+    """How many rows the admin KYC queue has across all pages (SVC-424)."""
+
+    count: int
 
 
 # ---------------------------------------------------------------------------

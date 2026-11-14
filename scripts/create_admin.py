@@ -1,39 +1,55 @@
 """
-Create a super admin user.
-Run: python scripts/create_admin.py +91XXXXXXXXXX
+Give someone an admin console login (SVC-422).
+
+    # The existing Super Admin, on its own users row:
+    uv run python scripts/create_admin.py --email vipul@kalpai.in --phone +919999900001
+    # Someone new, with no phone needed:
+    uv run python scripts/create_admin.py --email someone@kalpai.in --role ops
+
+The password comes from ADMIN_USER_PASSWORD or a prompt, never an argument, so it
+stays out of shell history and process lists. TOTP is set up at first login.
 """
 
+import argparse
 import asyncio
+import getpass
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from sqlalchemy import select
+import app.models  # noqa: F401, E402 - registers every mapper the FKs need
+from app.database import AsyncSessionLocal  # noqa: E402
+from app.models.user import AdminRole  # noqa: E402
+from app.services.admin_auth_service import provision_admin  # noqa: E402
 
-from app.database import AsyncSessionLocal
-from app.models.user import User, UserRole
+
+def read_password() -> str:
+    password = os.environ.get("ADMIN_USER_PASSWORD")
+    if password:
+        return password
+    password = getpass.getpass("Password: ")
+    if password != getpass.getpass("Repeat password: "):
+        sys.exit("Passwords do not match")
+    return password
 
 
-async def create_admin(phone: str):
+async def main(email: str, phone: str | None, role: AdminRole, password: str) -> None:
     async with AsyncSessionLocal() as db:
-        existing = await db.execute(select(User).where(User.phone == phone))
-        user = existing.scalar_one_or_none()
-
-        if user:
-            user.role = UserRole.ADMIN
-            user.is_active = True
-            print(f"Updated existing user {phone} → role=admin")
-        else:
-            user = User(phone=phone, role=UserRole.ADMIN, name="Super Admin")
-            db.add(user)
-            print(f"Created admin user: {phone}")
-
+        try:
+            admin = await provision_admin(db, email, role, password, phone=phone)
+        except ValueError as exc:
+            sys.exit(str(exc))
         await db.commit()
+        print(f"{admin.email} is now {role.value}. TOTP is set up at first login.")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python scripts/create_admin.py +91XXXXXXXXXX")
-        sys.exit(1)
-    asyncio.run(create_admin(sys.argv[1]))
+    parser = argparse.ArgumentParser(description="Give someone an admin console login.")
+    parser.add_argument("--email", required=True)
+    parser.add_argument("--phone", help="An existing admin's number, or a new one to record")
+    parser.add_argument(
+        "--role", choices=[r.value for r in AdminRole], default=AdminRole.ADMIN.value
+    )
+    args = parser.parse_args()
+    asyncio.run(main(args.email, args.phone, AdminRole(args.role), read_password()))

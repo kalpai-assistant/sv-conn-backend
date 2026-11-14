@@ -332,7 +332,8 @@ async def test_get_any_booking_returns_a_booking_the_admin_is_not_party_to(
     # The user-facing route still refuses the same admin for the same booking —
     # this route exists precisely because that one cannot serve them.
     user_route = await client.get(f"/api/v1/bookings/{booking.id}", headers=admin_headers)
-    assert user_route.status_code == 403, user_route.text
+    # SVC-422: 401, because a console session isn't a token for this route at all.
+    assert user_route.status_code == 401, user_route.text
 
 
 @pytest.mark.asyncio

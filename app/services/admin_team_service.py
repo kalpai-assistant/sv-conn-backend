@@ -1,7 +1,10 @@
 """
 Admin team management (SVC-329): find an owner, see their team (removed Pros
-included) and invite history, force-remove or reassign a Pro, and the audit
-log every admin team mutation writes.
+included) and invite history, force-remove or reassign a Pro, and the owner
+history on the Teams screen. The audit helper itself is ``admin_audit``.
+
+SVC-427 adds the directories: owner filters and the SP page's aggregates, and a
+paginated list of every Pro across all owners.
 
 Mutations go through ``TeamService.remove_pro``, the only place a Pro is
 deactivated, so the SVC-326 invariant and the active-job refusal hold for
@@ -11,25 +14,36 @@ admin actions too. See ``docs/pro-entity/LLD.md``, "Admin team management".
 import logging
 import re
 import uuid
+from datetime import datetime, time, timedelta, timezone
 
 from fastapi import status
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.exceptions import AppException
-from app.models.admin_action import AdminAction
-from app.models.booking import ACTIVE_JOB_STATUSES, Booking
+from app.models.admin_action import TEAM_ACTIONS, AdminAction
+from app.models.booking import ACTIVE_JOB_STATUSES, Booking, BookingStatus
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
+from app.models.provider_service import ProviderService as ProviderServiceLink
 from app.models.provider_team_invite import ProviderTeamInvite
+from app.models.review import Review
+from app.models.service import Service
 from app.models.user import User
 from app.schemas.admin_team import (
     AdminActionRow,
+    AdminBookingVolume,
     AdminProDetail,
+    AdminProListRow,
     AdminProOwner,
+    AdminProviderDetail,
     AdminProviderRow,
+    AdminProviderService,
+    AdminServiceArea,
     AdminTeamPro,
 )
+from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
 from app.services.provider_service import effective_kyc_status, professional_display_name
 from app.services.team_service import ALREADY_ON_TEAM, PRO_NOT_FOUND, TeamService
 
@@ -45,10 +59,26 @@ USER_INACTIVE = "USER_INACTIVE"
 
 _PHONE_NOISE_RE = re.compile(r"[\s\-()]")
 
+# India has no DST, so a fixed offset is exact (same as provider_service._IST).
+_IST = timezone(timedelta(hours=5, minutes=30))
+# The SP page's booking volume: this many IST calendar days, today included.
+BOOKING_VOLUME_DAYS = 30
+
 
 def _escape_like(term: str) -> str:
     """Make ``%``, ``_`` and ``\\`` match themselves in an ILIKE pattern."""
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _search_patterns(term: str) -> tuple[str, str]:
+    """``(text, phone)`` ILIKE patterns for an admin search box. Phones are
+    stored as ``+91XXXXXXXXXX`` and matched as a substring with spaces, dashes
+    and brackets dropped, so ``98765``, ``9876543210`` and ``+91 98765 43210``
+    all find ``+919876543210``."""
+    return (
+        f"%{_escape_like(term)}%",
+        f"%{_escape_like(_PHONE_NOISE_RE.sub('', term))}%",
+    )
 
 
 def _sp_not_found() -> AppException:
@@ -61,35 +91,6 @@ def _pro_not_found() -> AppException:
     return AppException(
         "Professional not found.", status_code=status.HTTP_404_NOT_FOUND, code=PRO_NOT_FOUND
     )
-
-
-async def record_admin_action(
-    db: AsyncSession,
-    *,
-    admin_id: uuid.UUID,
-    action: str,
-    target_type: str,
-    target_id: uuid.UUID,
-    reason: str | None,
-    details: dict,
-    sp_user_id: uuid.UUID | None = None,
-    to_sp_user_id: uuid.UUID | None = None,
-) -> AdminAction:
-    """Append one ``admin_actions`` row: the only writer. Call it in the same
-    transaction as the change it describes."""
-    row = AdminAction(
-        admin_user_id=admin_id,
-        action=action,
-        target_type=target_type,
-        target_id=target_id,
-        sp_user_id=sp_user_id,
-        to_sp_user_id=to_sp_user_id,
-        reason=reason,
-        details=details,
-    )
-    db.add(row)
-    await db.flush()
-    return row
 
 
 class AdminTeamService:
@@ -137,20 +138,27 @@ class AdminTeamService:
         )
 
     async def search_providers(
-        self, q: str | None, page: int, per_page: int
+        self,
+        q: str | None,
+        page: int,
+        per_page: int,
+        *,
+        is_active: bool | None = None,
+        kyc_status: KYCStatus | None = None,
     ) -> list[AdminProviderRow]:
         """Owners, newest first, optionally matching ``q`` against phone, name
-        or business name. One statement per page, counts included.
-
-        Phones are stored as ``+91XXXXXXXXXX`` and matched as a substring with
-        spaces, dashes and brackets dropped, so ``98765``, ``9876543210`` and
-        ``+91 98765 43210`` all find ``+919876543210``.
+        or business name (see ``_search_patterns``), and (SVC-427) filtered by
+        the owner's account ``is_active`` and the SP's ``kyc_status``. One
+        statement per page, counts included.
         """
         stmt = self._provider_rows_stmt()
+        if is_active is not None:
+            stmt = stmt.where(User.is_active.is_(is_active))
+        if kyc_status is not None:
+            stmt = stmt.where(ProviderProfile.kyc_status == kyc_status)
         term = (q or "").strip()
         if term:
-            text_pattern = f"%{_escape_like(term)}%"
-            phone_pattern = f"%{_escape_like(_PHONE_NOISE_RE.sub('', term))}%"
+            text_pattern, phone_pattern = _search_patterns(term)
             stmt = stmt.where(
                 or_(
                     User.phone.ilike(phone_pattern, escape="\\"),
@@ -165,14 +173,57 @@ class AdminTeamService:
         )
         return [self._provider_row(*row) for row in (await self.db.execute(stmt)).all()]
 
-    async def provider(self, sp_user_id: uuid.UUID) -> AdminProviderRow:
-        """One owner, the same row the search returns. 404 ``SP_NOT_FOUND``."""
+    async def provider(self, sp_user_id: uuid.UUID) -> AdminProviderDetail:
+        """One owner: the row the search returns plus the SP page's aggregates
+        (SVC-427). 404 ``SP_NOT_FOUND``."""
         row = (
             await self.db.execute(self._provider_rows_stmt().where(User.id == sp_user_id))
         ).first()
         if row is None:
             raise _sp_not_found()
-        return self._provider_row(*row)
+        _, profile, _ = row
+        lat, lng = profile.service_area_lat, profile.service_area_lng
+        services = (
+            await self.db.execute(
+                select(Service.id, Service.name, Service.is_active)
+                .join(ProviderServiceLink, ProviderServiceLink.service_id == Service.id)
+                .where(ProviderServiceLink.provider_id == sp_user_id)
+                .order_by(Service.name, Service.id)
+            )
+        ).all()
+        return AdminProviderDetail(
+            **self._provider_row(*row).model_dump(),
+            service_area=(
+                AdminServiceArea(lat=lat, lng=lng, radius_km=profile.service_area_radius_km)
+                if lat is not None and lng is not None
+                else None
+            ),
+            avg_rating=profile.avg_rating or 0.0,
+            total_completed_jobs=profile.total_completed_jobs or 0,
+            services=[
+                AdminProviderService(id=sid, name=name, is_active=bool(active))
+                for sid, name, active in services
+            ],
+            bookings_30d=await self._booking_volume(sp_user_id),
+        )
+
+    async def _booking_volume(self, sp_user_id: uuid.UUID) -> AdminBookingVolume:
+        """Bookings CREATED for this SP in the last 30 IST days, today included:
+        ``created_at`` on or after IST midnight of ``since``, which is the
+        ``created_from`` rule of ``GET /admin/bookings``."""
+        since = datetime.now(_IST).date() - timedelta(days=BOOKING_VOLUME_DAYS - 1)
+        start = datetime.combine(since, time.min, tzinfo=_IST)
+        counts = dict(
+            (
+                await self.db.execute(
+                    select(Booking.status, func.count())
+                    .where(Booking.provider_id == sp_user_id, Booking.created_at >= start)
+                    .group_by(Booking.status)
+                )
+            ).all()
+        )
+        by_status = {s: counts.get(s, 0) for s in BookingStatus}
+        return AdminBookingVolume(since=since, total=sum(by_status.values()), by_status=by_status)
 
     async def _require_owner(self, sp_user_id: uuid.UUID) -> ProviderProfile:
         # A plain read: unlike /providers/me, admin must never create an SP.
@@ -262,25 +313,129 @@ class AdminTeamService:
         await self._require_owner(sp_user_id)
         return await TeamService(self.db).list_invites(sp_user_id)
 
-    async def pro_detail(self, pro_id: uuid.UUID) -> AdminProDetail:
-        pro = await self._team_pro_by_id(pro_id)
-        if pro is None:
-            raise _pro_not_found()
-        owner, profile = (
-            await self.db.execute(
-                select(User, ProviderProfile)
-                .outerjoin(ProviderProfile, ProviderProfile.user_id == User.id)
-                .where(User.id == pro.service_provider_id)
-            )
-        ).one()
-        return AdminProDetail(
-            **pro.model_dump(),
+    # ------------------------------------------------------------------
+    # Pro directory (SVC-427)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _effective_kyc_expr():
+        """``effective_kyc_status`` in SQL: a Pro-for-self shows (and so is
+        filtered by) its SP's KYC, every other row its own."""
+        return case(
+            (
+                Professional.user_id == Professional.service_provider_id,
+                func.coalesce(ProviderProfile.kyc_status, Professional.kyc_status),
+            ),
+            else_=Professional.kyc_status,
+        )
+
+    def _pro_list_stmt(self) -> Select:
+        """``_team_rows_stmt`` plus the owner's user row, for the directory row."""
+        owner = aliased(User, name="owner")
+        return (
+            self._team_rows_stmt()
+            .add_columns(owner, ProviderProfile.business_name)
+            .join(owner, owner.id == Professional.service_provider_id)
+        )
+
+    def _pro_list_row(
+        self,
+        pro: Professional,
+        phone: str,
+        user_active: bool,
+        jobs: int,
+        sp_kyc_status: KYCStatus | None,
+        owner: User,
+        business_name: str | None,
+    ) -> AdminProListRow:
+        return AdminProListRow(
+            **self._team_pro(pro, phone, user_active, jobs, sp_kyc_status).model_dump(),
             service_provider=AdminProOwner(
                 user_id=owner.id,
                 name=owner.name,
                 phone=owner.phone,
-                business_name=profile.business_name if profile is not None else None,
+                business_name=business_name,
             ),
+        )
+
+    async def search_pros(
+        self,
+        *,
+        q: str | None,
+        sp_user_id: uuid.UUID | None,
+        is_active: bool | None,
+        kyc_status: KYCStatus | None,
+        is_online: bool | None,
+        page: int,
+        per_page: int,
+    ) -> tuple[list[AdminProListRow], int]:
+        """Every Pro row across all owners (removed ones too, unless
+        ``is_active`` says otherwise), newest first, and the total matching.
+        ``q`` matches the display name or the Pro's phone, as owner search
+        does. ``kyc_status`` matches the KYC each row shows (a Pro-for-self's
+        is its owner's), so a row never shows a status its filter leaves out."""
+        filters = []
+        if sp_user_id is not None:
+            filters.append(Professional.service_provider_id == sp_user_id)
+        if is_active is not None:
+            filters.append(Professional.is_active.is_(is_active))
+        if is_online is not None:
+            filters.append(Professional.is_online.is_(is_online))
+        if kyc_status is not None:
+            filters.append(self._effective_kyc_expr() == kyc_status)
+        term = (q or "").strip()
+        if term:
+            text_pattern, phone_pattern = _search_patterns(term)
+            filters.append(
+                or_(
+                    User.phone.ilike(phone_pattern, escape="\\"),
+                    Professional.display_name.ilike(text_pattern, escape="\\"),
+                )
+            )
+
+        total = await self.db.scalar(
+            select(func.count())
+            .select_from(Professional)
+            .join(User, User.id == Professional.user_id)
+            .outerjoin(ProviderProfile, ProviderProfile.user_id == Professional.service_provider_id)
+            .where(*filters)
+        )
+        stmt = (
+            self._pro_list_stmt()
+            .where(*filters)
+            .order_by(Professional.created_at.desc(), Professional.id)
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+        rows = [self._pro_list_row(*row) for row in (await self.db.execute(stmt)).all()]
+        return rows, total
+
+    async def pro_detail(self, pro_id: uuid.UUID) -> AdminProDetail:
+        """One Pro row, removed or not, its owner, and (SVC-427) its rating and
+        completed jobs by the SVC-396 trust-card rules."""
+        row = (
+            await self.db.execute(self._pro_list_stmt().where(Professional.id == pro_id))
+        ).first()
+        if row is None:
+            raise _pro_not_found()
+        avg, rating_count = (
+            await self.db.execute(
+                select(func.avg(Review.rating), func.count(Review.id)).where(
+                    Review.professional_id == pro_id
+                )
+            )
+        ).one()
+        completed = await self.db.scalar(
+            select(func.count()).where(
+                Booking.professional_id == pro_id,
+                Booking.status == BookingStatus.COMPLETED,
+            )
+        )
+        return AdminProDetail(
+            **self._pro_list_row(*row).model_dump(),
+            rating_avg=round(float(avg), 1) if avg is not None else None,
+            rating_count=rating_count,
+            completed_job_count=completed,
         )
 
     async def actions(
@@ -292,13 +447,49 @@ class AdminTeamService:
         page: int,
         per_page: int,
     ) -> list[AdminActionRow]:
-        """Audit rows, newest first. ``sp_user_id`` matches an owner on either
-        side of the action, so a reassign shows in both owners' histories."""
-        stmt = select(AdminAction, User.name).join(User, User.id == AdminAction.admin_user_id)
-        if target_type is not None:
-            stmt = stmt.where(AdminAction.target_type == target_type)
-        if target_id is not None:
-            stmt = stmt.where(AdminAction.target_id == target_id)
+        """The 3 team actions, newest first: the owner history on the Teams
+        screen, which support reads too, so it must never show more (SVC-423).
+        ``sp_user_id`` matches an owner on either side of the action, so a
+        reassign shows in both owners' histories.
+
+        A Pro row's history (``target_type="professional"`` and ``target_id``
+        both given) also includes the two actions stored under another target
+        (SVC-427 follow-up): a reassign that landed the person on this row (new
+        or reactivated; the target is the row they left, this row is
+        ``details.to_professional_id``), and a deactivation that removed this
+        row (target is the user; this row is in
+        ``details.removed_professional_ids``). One ``WHERE`` with ``OR``, so a
+        row matching two ways comes back once. Every other combination of
+        filters is an exact match on the stored target, as before.
+        """
+        stmt = (
+            select(AdminAction, User.name)
+            .join(User, User.id == AdminAction.admin_user_id)
+            .where(AdminAction.action.in_(TEAM_ACTIONS))
+        )
+        if target_type == "professional" and target_id is not None:
+            pro_id = str(target_id)
+            stmt = stmt.where(
+                or_(
+                    and_(
+                        AdminAction.target_type == "professional",
+                        AdminAction.target_id == pro_id,
+                    ),
+                    and_(
+                        AdminAction.action == "pro_reassigned",
+                        AdminAction.details["to_professional_id"].astext == pro_id,
+                    ),
+                    and_(
+                        AdminAction.action == "user_deactivated",
+                        AdminAction.details.contains({"removed_professional_ids": [pro_id]}),
+                    ),
+                )
+            )
+        else:
+            if target_type is not None:
+                stmt = stmt.where(AdminAction.target_type == target_type)
+            if target_id is not None:
+                stmt = stmt.where(AdminAction.target_id == str(target_id))
         if sp_user_id is not None:
             stmt = stmt.where(
                 or_(AdminAction.sp_user_id == sp_user_id, AdminAction.to_sp_user_id == sp_user_id)
@@ -330,7 +521,7 @@ class AdminTeamService:
     # ------------------------------------------------------------------
 
     async def deactivate_user(
-        self, admin_id: uuid.UUID, user_id: uuid.UUID, reason: str | None
+        self, actor: AuditActor, user_id: uuid.UUID, reason: str | None
     ) -> bool:
         """``TeamService.deactivate_user`` plus its audit row. False for an
         unknown user (nothing written).
@@ -339,10 +530,11 @@ class AdminTeamService:
         owner whose team they were removed from, if any. (One person has at
         most one active Pro row, and an owner's is their Pro-for-self.)
         """
+        before = snapshot("user", await self.db.get(User, user_id))
         result = await TeamService(self.db).deactivate_user(user_id)
         if result is None:
             return False
-        _, removed = result
+        user, removed = result
         is_owner = (
             await self.db.scalar(
                 select(ProviderProfile.id).where(ProviderProfile.user_id == user_id)
@@ -352,14 +544,16 @@ class AdminTeamService:
         sp_user_id = (
             user_id if is_owner else (removed[0][0].service_provider_id if removed else None)
         )
-        await record_admin_action(
+        await audit_admin_action(
             self.db,
-            admin_id=admin_id,
+            actor,
             action="user_deactivated",
             target_type="user",
             target_id=user_id,
             reason=reason,
             sp_user_id=sp_user_id,
+            before=before,
+            after=snapshot("user", user),
             details={
                 "removed_professional_ids": [str(pro.id) for pro, _ in removed],
                 "self_reenabled_sp_ids": [
@@ -369,7 +563,7 @@ class AdminTeamService:
         )
         return True
 
-    async def force_remove(self, admin_id: uuid.UUID, pro_id: uuid.UUID, reason: str) -> bool:
+    async def force_remove(self, actor: AuditActor, pro_id: uuid.UUID, reason: str) -> bool:
         """Soft-remove a Pro on the owner's behalf, through ``remove_pro``: so
         404 if missing or already removed, 400 for a Pro-for-self, 409 while on
         a job. Returns ``self_reenabled``."""
@@ -377,27 +571,32 @@ class AdminTeamService:
         if pro is None:
             raise _pro_not_found()
         sp_id = pro.service_provider_id
+        before = snapshot("professional", pro)
         self_reenabled = await TeamService(self.db).remove_pro(sp_id, pro_id)
-        await record_admin_action(
+        await audit_admin_action(
             self.db,
-            admin_id=admin_id,
+            actor,
             action="pro_force_removed",
             target_type="professional",
             target_id=pro_id,
             reason=reason,
             sp_user_id=sp_id,
+            before=before,
+            after=snapshot("professional", pro),
             details={
                 "sp_user_id": str(sp_id),
                 "user_id": str(pro.user_id),
                 "self_reenabled": self_reenabled,
             },
         )
-        logger.info("admin.pro_force_removed pro_id=%s sp=%s admin=%s", pro_id, sp_id, admin_id)
+        logger.info(
+            "admin.pro_force_removed pro_id=%s sp=%s admin=%s", pro_id, sp_id, actor.admin_id
+        )
         return self_reenabled
 
     async def reassign(
         self,
-        admin_id: uuid.UUID,
+        actor: AuditActor,
         pro_id: uuid.UUID,
         target_sp_user_id: uuid.UUID,
         reason: str,
@@ -497,6 +696,7 @@ class AdminTeamService:
                 code=ALREADY_ON_TEAM,
             )
 
+        before = snapshot("professional", source)
         self_reenabled = await TeamService(self.db).remove_pro(from_sp_id, pro_id)
 
         reactivated = existing is not None
@@ -514,15 +714,18 @@ class AdminTeamService:
             self.db.add(new_row)
         await self.db.flush()
 
-        await record_admin_action(
+        await audit_admin_action(
             self.db,
-            admin_id=admin_id,
+            actor,
             action="pro_reassigned",
             target_type="professional",
             target_id=pro_id,
             reason=reason,
             sp_user_id=from_sp_id,
             to_sp_user_id=target_sp_user_id,
+            # The row they left, then the row they're on now.
+            before=before,
+            after=snapshot("professional", new_row),
             details={
                 "user_id": str(person.id),
                 "from_sp_user_id": str(from_sp_id),
@@ -539,6 +742,6 @@ class AdminTeamService:
             from_sp_id,
             target_sp_user_id,
             new_row.id,
-            admin_id,
+            actor.admin_id,
         )
         return pro_id, await self._team_pro_by_id(new_row.id), reactivated, self_reenabled

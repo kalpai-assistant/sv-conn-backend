@@ -144,7 +144,26 @@ NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
             "Your full refund of {amount} has been started."
         ),
     },
+    # SVC-431: support settled a dispute the customer raised. Consumer only,
+    # English. {amount} is the dispute's refund, pre-formatted with the ₹ sign.
+    "dispute_refunded": {
+        "title": "Your refund is on its way",
+        "body": "We've started a refund of {amount} for your booking. Expect it in 5-7 working days.",
+    },
+    "dispute_refunded_manual": {
+        "title": "Your refund has been sent",
+        "body": "We've reviewed your issue and sent you a refund of {amount}.",
+    },
+    "dispute_no_refund": {
+        "title": "We've reviewed your issue",
+        "body": "We've looked into your booking and closed your request. Support will share the details.",
+    },
 }
+
+# SVC-431: the dispute events, all consumer-only.
+DISPUTE_PUSH_EVENTS = frozenset(
+    {"dispute_refunded", "dispute_refunded_manual", "dispute_no_refund"}
+)
 
 # The "no_taker_refunded" wording when the booking had been accepted and then
 # given back (it has ``reopened_at``): the consumer waited on someone who
@@ -192,6 +211,13 @@ UPDATE_AVAILABLE_TEMPLATE: dict[str, str] = {
     "body": "EazyServ v{version} is ready. Tap to update.",
 }
 
+# SVC-444: a rejected KYC, for an SP or a team Pro. The reason is left out on
+# purpose: it can name a document problem, and this shows on a lock screen.
+KYC_REJECTED_TEMPLATE: dict[str, str] = {
+    "title": "Your documents were rejected",
+    "body": "Open the app to see why and submit them again.",
+}
+
 # SVC-374: the events whose push goes out in the recipient's language. They
 # are the provider/Pro ones only: customer copy is always English, so a Pro
 # booking a service for themselves reads "Booking Confirmed" in English
@@ -210,6 +236,7 @@ _PROVIDER_PUSH_ENGLISH: dict[str, dict[str, str]] = {
     **{event: dict(NOTIFICATION_TEMPLATES[event]) for event in PROVIDER_PUSH_EVENTS},
     **{f"payout.{status}": dict(t) for status, t in PAYOUT_NOTIFICATION_TEMPLATES.items()},
     "update_available": dict(UPDATE_AVAILABLE_TEMPLATE),
+    "kyc_rejected": dict(KYC_REJECTED_TEMPLATE),
 }
 _PROVIDER_PUSH_ENGLISH["new_request"]["service_fallback"] = "A new service request"
 _PROVIDER_PUSH_ENGLISH["new_request"]["more_services"] = "{service} + {count} more"
@@ -271,6 +298,10 @@ PROVIDER_PUSH_TRANSLATIONS: dict[str, dict[str, dict[str, str]]] = {
             "title": "अपडेट उपलब्ध है",
             "body": "EazyServ v{version} तैयार है। अपडेट करने के लिए टैप करें।",
         },
+        "kyc_rejected": {
+            "title": "आपके दस्तावेज़ नामंज़ूर हो गए",
+            "body": "कारण देखने और इन्हें फिर से जमा करने के लिए ऐप खोलें।",
+        },
     },
     "mr": {
         "new_request": {
@@ -321,6 +352,10 @@ PROVIDER_PUSH_TRANSLATIONS: dict[str, dict[str, dict[str, str]]] = {
         "update_available": {
             "title": "अपडेट उपलब्ध आहे",
             "body": "EazyServ v{version} तयार आहे. अपडेट करण्यासाठी टॅप करा.",
+        },
+        "kyc_rejected": {
+            "title": "तुमची कागदपत्रे नामंजूर झाली",
+            "body": "कारण पाहण्यासाठी आणि ती पुन्हा सबमिट करण्यासाठी ॲप उघडा.",
         },
     },
 }
@@ -688,6 +723,7 @@ def send_booking_notification(
     event: str,
     actor_id: str | None = None,
     professional_id: str | None = None,
+    dispute_id: str | None = None,
 ):
     """Send push notification for booking lifecycle events.
 
@@ -698,6 +734,9 @@ def send_booking_notification(
 
     ``professional_id`` is for ``unassigned`` (SVC-348): the Pro the job was
     taken off, since by now the booking points at someone else or no one.
+
+    ``dispute_id`` is for the dispute events (SVC-431): the dispute whose refund
+    the push names.
     """
     from app.database import SyncSessionLocal
     from app.models.booking import Booking
@@ -917,6 +956,21 @@ def send_booking_notification(
                     return provider_push_copy("pro_declined", lang, pro=pro_name)
 
                 recipients = [booking.provider]
+            elif event in DISPUTE_PUSH_EVENTS:
+                from app.models.booking_dispute import BookingDispute
+
+                dispute = db.get(BookingDispute, dispute_id) if dispute_id else None
+                if dispute is None or dispute.booking_id != booking.id:
+                    logger.warning(
+                        "push.dispute_not_found booking_id=%s dispute_id=%s", booking_id, dispute_id
+                    )
+                    return
+                if "{amount}" in body:
+                    from app.utils.money import to_paise
+
+                    amount = dispute.refund_amount or 0
+                    body = body.format(amount=_format_rupees(to_paise(amount)))
+                recipients = [booking.consumer]
             elif event == "no_taker_refunded":
                 # Consumer only: no provider is attached by now. The amount is
                 # what was captured and is now refunded (service − discount).
@@ -1170,6 +1224,43 @@ def send_payout_notification(
                 # clear once, let the missed push be caught by whatever the
                 # provider looks at next (offers list, payout history screen).
                 _clear_dead_fcm_token(db, provider, dead)
+
+    except Exception as exc:
+        self.retry(exc=exc)
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=5,
+    name="app.tasks.notification_tasks.send_kyc_rejected_notification",
+)
+def send_kyc_rejected_notification(self, user_id: str):
+    """Tell an SP or a team Pro their KYC was rejected (SVC-444).
+
+    No-ops without an FCM token: the app still shows the rejection when they
+    next open it. There's no booking on this push, so a tap just opens the app.
+    """
+    from app.database import SyncSessionLocal
+    from app.models.user import User
+
+    try:
+        with SyncSessionLocal() as db:
+            user = db.get(User, user_id)
+            if not user or not user.fcm_token:
+                return
+
+            title, body = provider_push_copy("kyc_rejected", push_language(user))
+            try:
+                send_push_notification(
+                    token=user.fcm_token,
+                    title=title,
+                    body=body,
+                    data={"type": "kyc", "event": "kyc_rejected"},
+                )
+            except _DEAD_TOKEN_ERRORS as dead:
+                # SVC-301: clear it once, and let the app show the rejection.
+                _clear_dead_fcm_token(db, user, dead)
 
     except Exception as exc:
         self.retry(exc=exc)

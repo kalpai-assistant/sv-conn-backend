@@ -110,19 +110,14 @@ class InvalidOTP(AppException):
         super().__init__(message, status_code=status.HTTP_400_BAD_REQUEST, code=code)
 
 
-class AdminNotFound(AppException):
-    """SVC-345: phone does not belong to an existing admin user.
-
-    404, never 403: the client asking must not learn which phones are admin
-    accounts. Same shape for "user doesn't exist" and "user exists but is
-    consumer/provider" — leaking either would turn /auth/admin/send-otp into
-    a role-enumeration oracle.
-    """
+class AdminPhoneLoginGone(AppException):
+    """SVC-422: the admin phone login (SVC-345) was replaced by the console login."""
 
     def __init__(self):
         super().__init__(
-            "No admin account exists for this phone.",
-            status_code=status.HTTP_404_NOT_FOUND,
+            "Admin phone login has been retired. Use email, password and authenticator code.",
+            status_code=status.HTTP_410_GONE,
+            code="ADMIN_PHONE_LOGIN_GONE",
         )
 
 
@@ -143,6 +138,32 @@ class PayoutRefused(PaymentError):
         super().__init__(message)
         self.amount_paise = amount_paise
         self.booking_count = booking_count
+
+
+class DisputeRefundRejected(AppException):
+    """SVC-431: Razorpay refused a dispute refund. Nothing was saved."""
+
+    def __init__(self, razorpay_error: str):
+        super().__init__(
+            f"Razorpay rejected the refund: {razorpay_error}",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            code="REFUND_REJECTED",
+            details={"razorpay_error": razorpay_error},
+        )
+
+
+class DisputeRefundGatewayError(AppException):
+    """SVC-431: Razorpay didn't answer a dispute refund. Nothing was saved here,
+    but the refund may still have been made; a retry finds it by its
+    ``notes.dispute_id`` instead of refunding twice."""
+
+    def __init__(self):
+        super().__init__(
+            "Razorpay did not respond. The refund may or may not have gone through; "
+            "retrying is safe and will not refund twice.",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code="REFUND_GATEWAY_ERROR",
+        )
 
 
 class InvalidPayoutMethod(AppException):

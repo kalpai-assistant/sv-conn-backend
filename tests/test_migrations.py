@@ -838,6 +838,106 @@ def test_svc_329_creates_the_admin_actions_table_and_downgrade_drops_it(scratch_
     )
 
 
+# SVC-423 (audit log on admin_actions) and the revision it builds on (SVC-422).
+SVC_423 = "c4e81d07a3f6"
+BEFORE_SVC_423 = "a7c31e90d2b4"
+TEAM_ACTION_NAMES = ("user_deactivated", "pro_force_removed", "pro_reassigned")
+
+
+def _admin_action_checks(url: URL) -> dict:
+    return {
+        row["conname"]: row["def"]
+        for row in _query(
+            url,
+            "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint "
+            "WHERE conname LIKE 'ck_admin_actions_%'",
+        )
+    }
+
+
+def test_svc_423_extends_admin_actions_and_downgrade_survives_the_new_rows(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_423)
+    before_shape = _shape(scratch_db, "admin_actions")
+    assert set(_admin_action_checks(scratch_db)) == {
+        "ck_admin_actions_action",
+        "ck_admin_actions_target_type",
+    }
+    admin_id, team_row, team_target = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (id, phone, name, role, is_active) "
+                    "VALUES (:id, '+919000000002', 'An Admin', 'CONSUMER', true)"
+                ),
+                {"id": admin_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO admin_actions (id, admin_user_id, action, target_type, target_id) "
+                    "VALUES (:id, :admin, 'pro_force_removed', 'professional', :target)"
+                ),
+                {"id": team_row, "admin": admin_id, "target": team_target},
+            )
+    finally:
+        engine.dispose()
+
+    _alembic(scratch_db, "upgrade", SVC_423)
+    shape = _shape(scratch_db, "admin_actions")
+    columns = {name: (type_, nullable) for name, type_, nullable in shape["columns"]}
+    assert columns["target_id"] == ("VARCHAR(64)", False)
+    assert columns["admin_user_id"][1] is False
+    assert columns["before_json"][1] is True
+    assert columns["after_json"][1] is True
+    assert columns["ip_address"] == ("INET", True)
+    assert columns["user_agent"] == ("VARCHAR(512)", True)
+    assert _admin_action_checks(scratch_db) == {}
+    assert ("ix_admin_actions_target", ("target_type", "target_id")) in {
+        (name, cols) for name, cols, *_ in shape["indexes"]
+    }
+    index_def = _query(
+        scratch_db,
+        "SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_admin_actions_admin_created'",
+    )[0]["indexdef"]
+    assert "(admin_user_id, created_at DESC)" in index_def
+    assert _query(scratch_db, "SELECT id, target_id FROM admin_actions") == [
+        {"id": team_row, "target_id": str(team_target)}
+    ]
+
+    # What the old schema can't hold: a new action, a new target type, a text id.
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO admin_actions "
+                    "(id, admin_user_id, action, target_type, target_id, before_json, ip_address) "
+                    "VALUES (:id, :admin, 'app_version.release', 'app_version', 'android', "
+                    "'{}'::jsonb, '203.0.113.9')"
+                ),
+                {"id": uuid.uuid4(), "admin": admin_id},
+            )
+    finally:
+        engine.dispose()
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_423)
+    assert _shape(scratch_db, "admin_actions") == before_shape
+    # The team row survives with its uuid; the row the old schema can't hold is gone.
+    assert _query(scratch_db, "SELECT id, target_id FROM admin_actions") == [
+        {"id": team_row, "target_id": team_target}
+    ]
+    checks = _admin_action_checks(scratch_db)
+    for action in TEAM_ACTION_NAMES:
+        assert f"'{action}'" in checks["ck_admin_actions_action"]
+    for target_type in ("user", "professional"):
+        assert f"'{target_type}'" in checks["ck_admin_actions_target_type"]
+
+    # And it can come back up.
+    _alembic(scratch_db, "upgrade", SVC_423)
+    assert _admin_action_checks(scratch_db) == {}
+
+
 # SVC-366 (ios app_versions row) and the revision it builds on (SVC-329).
 SVC_366 = "e721a87d86e1"
 BEFORE_SVC_366 = SVC_329
@@ -1135,3 +1235,368 @@ def test_retire_first20_coupon_round_trip(scratch_db):
 
     _alembic(scratch_db, "downgrade", BEFORE_RETIRE_FIRST20)
     assert _coupon_states(scratch_db) == {"First20": True, "EXPO25": True, "FIRST100": True}
+
+
+# --- SVC-428: category pricing columns + pricing_config ------------------------
+
+SVC_428 = "d762e3df6aa5"
+BEFORE_SVC_428 = "9d31d9715e0e"
+SVC_428_COLUMNS = {
+    ("is_sensitive", "BOOLEAN", False),
+    ("reference_price", "NUMERIC(10, 2)", True),
+    ("bounds_pct", "NUMERIC(5, 2)", True),
+    ("platform_commission_pct", "NUMERIC(5, 2)", False),
+    ("platform_commission_min", "NUMERIC(10, 2)", False),
+    ("commission_gst_pct", "NUMERIC(5, 2)", False),
+}
+
+
+def _seed_before_svc_428(url: URL) -> None:
+    """Three of the four sensitive slugs (no pest-control), plus one that isn't."""
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            for slug in ("ac", "plumber", "electrician", "cleaning"):
+                conn.execute(
+                    text(
+                        "INSERT INTO categories (id, name, slug, is_active, sort_order) "
+                        "VALUES (:id, :name, :slug, true, 1)"
+                    ),
+                    {"id": uuid.uuid4(), "name": f"SVC-428 {slug}", "slug": slug},
+                )
+    finally:
+        engine.dispose()
+
+
+def test_svc_428_adds_pricing_columns_seeds_config_and_round_trips(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_428)
+    _seed_before_svc_428(scratch_db)
+    before = _shape(scratch_db, "categories")
+
+    _alembic(scratch_db, "upgrade", SVC_428)
+    upgraded = _shape(scratch_db, "categories")
+    assert set(upgraded["columns"]) - set(before["columns"]) == SVC_428_COLUMNS
+
+    pricing = {
+        row["slug"]: dict(row)
+        for row in _query(
+            scratch_db,
+            "SELECT slug, is_sensitive, bounds_pct, reference_price, platform_commission_pct, "
+            "platform_commission_min, commission_gst_pct FROM categories",
+        )
+    }
+    # pest-control isn't in this DB: skipped, not an error. The L1 tiles come from
+    # an earlier migration and stay at the defaults.
+    seeded = {"ac", "plumber", "electrician", "cleaning"}
+    assert {
+        slug: (r["is_sensitive"], r["bounds_pct"]) for slug, r in pricing.items() if slug in seeded
+    } == {
+        "ac": (True, 25),
+        "plumber": (True, 20),
+        "electrician": (True, 20),
+        "cleaning": (False, None),
+    }
+    assert not [slug for slug, r in pricing.items() if slug not in seeded and r["is_sensitive"]]
+    for row in pricing.values():
+        assert row["reference_price"] is None
+        assert (
+            row["platform_commission_pct"],
+            row["platform_commission_min"],
+            row["commission_gst_pct"],
+        ) == (20, 30, 18)
+
+    config = {
+        row["key"]: dict(row)
+        for row in _query(scratch_db, "SELECT key, value_json, updated_by FROM pricing_config")
+    }
+    assert {key: row["value_json"] for key, row in config.items()} == {
+        "ranking_weights": {
+            "rating": 0.35,
+            "price_vs_ref": 0.25,
+            "distance": 0.20,
+            "reliability": 0.15,
+            "activity": 0.05,
+        },
+        "boost_window_days": 14,
+        "boost_window_jobs": 10,
+        "sheet_ttl_seconds": 600,
+    }
+    assert all(row["updated_by"] is None for row in config.values())
+
+    # A sensitive row without bounds can't be saved.
+    engine = create_engine(scratch_db)
+    try:
+        with pytest.raises(Exception, match="ck_categories_sensitive_needs_bounds"):
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE categories SET bounds_pct = NULL WHERE slug = 'ac'"))
+    finally:
+        engine.dispose()
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_428)
+    assert _shape(scratch_db, "categories") == before
+    [table] = _query(scratch_db, "SELECT to_regclass('pricing_config') AS t")
+    assert table["t"] is None
+    assert not _query(
+        scratch_db,
+        "SELECT 1 FROM pg_constraint WHERE conname = 'ck_categories_sensitive_needs_bounds'",
+    )
+
+
+SVC_430 = "33122ac2373c"
+BEFORE_SVC_430 = SVC_428
+SVC_430_FILE = (
+    REPO_ROOT
+    / "alembic"
+    / "versions"
+    / "33122ac2373c_svc_430_catalog_icon_key_price_unit_min_qty.py"
+)
+
+
+def _svc_430_module():
+    spec = importlib.util.spec_from_file_location("svc_430_migration", SVC_430_FILE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_svc_430_frozen_checks_match_the_model():
+    from app.models.price_unit import MIN_QTY_CHECK, PRICE_UNIT_CHECK
+
+    module = _svc_430_module()
+    assert (module.PRICE_UNIT_CHECK, module.MIN_QTY_CHECK) == (PRICE_UNIT_CHECK, MIN_QTY_CHECK)
+
+
+def _seed_before_svc_430(url: URL) -> uuid.UUID:
+    """One category and one service, written before the columns exist."""
+    category_id, service_id = uuid.uuid4(), uuid.uuid4()
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO categories (id, name, slug, is_active, sort_order) "
+                    "VALUES (:id, 'SVC-430 cat', 'svc-430-cat', true, 1)"
+                ),
+                {"id": category_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO services (id, category_id, name, base_price, duration_minutes, "
+                    "is_active) VALUES (:id, :cat, 'SVC-430 svc', 499, 60, true)"
+                ),
+                {"id": service_id, "cat": category_id},
+            )
+    finally:
+        engine.dispose()
+    return service_id
+
+
+def _refused_by(url: URL, sql: str, constraint: str) -> None:
+    engine = create_engine(url)
+    try:
+        with pytest.raises(Exception, match=constraint):
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+    finally:
+        engine.dispose()
+
+
+def test_svc_430_adds_catalog_columns_backfills_and_round_trips(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_430)
+    service_id = _seed_before_svc_430(scratch_db)
+    before = {t: _shape(scratch_db, t) for t in ("categories", "services")}
+
+    _alembic(scratch_db, "upgrade", SVC_430)
+    after = {t: _shape(scratch_db, t) for t in ("categories", "services")}
+    assert set(after["categories"]["columns"]) - set(before["categories"]["columns"]) == {
+        ("icon_key", "VARCHAR(40)", True)
+    }
+    assert set(after["services"]["columns"]) - set(before["services"]["columns"]) == {
+        ("icon_key", "VARCHAR(40)", True),
+        ("price_unit", "VARCHAR(16)", False),
+        ("min_qty", "INTEGER", True),
+    }
+    # The existing row is backfilled.
+    [row] = _query(
+        scratch_db,
+        f"SELECT price_unit, min_qty, icon_key FROM services WHERE id = '{service_id}'",
+    )
+    assert dict(row) == {"price_unit": "PER_VISIT", "min_qty": None, "icon_key": None}
+
+    where = f"WHERE id = '{service_id}'"
+    _refused_by(
+        scratch_db, f"UPDATE services SET price_unit = 'PER_DAY' {where}", "ck_services_price_unit"
+    )
+    _refused_by(
+        scratch_db,
+        f"UPDATE services SET price_unit = 'PER_SQFT' {where}",
+        "ck_services_min_qty_unit",
+    )
+    _refused_by(
+        scratch_db,
+        f"UPDATE services SET price_unit = 'PER_HOUR', min_qty = 0 {where}",
+        "ck_services_min_qty_unit",
+    )
+    _refused_by(scratch_db, f"UPDATE services SET min_qty = 3 {where}", "ck_services_min_qty_unit")
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"UPDATE services SET price_unit = 'PER_SQFT', min_qty = 5 {where}"))
+    finally:
+        engine.dispose()
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_430)
+    assert {t: _shape(scratch_db, t) for t in ("categories", "services")} == before
+    assert not _query(
+        scratch_db,
+        "SELECT 1 FROM pg_constraint WHERE conname IN "
+        "('ck_services_price_unit', 'ck_services_min_qty_unit')",
+    )
+
+
+# --- SVC-432: analytics materialized views -------------------------------------
+
+SVC_432 = "0319a6a0b99b"
+BEFORE_SVC_432 = "84057c00390d"
+
+
+def _matviews(url: URL) -> dict:
+    """``{name: (definition, populated, [unique index defs])}`` for the analytics views."""
+    from app.analytics.views import CURRENT_VIEWS
+
+    names = [v.name for v in CURRENT_VIEWS]
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            views = conn.execute(
+                text(
+                    "SELECT matviewname, definition, ispopulated FROM pg_matviews "
+                    "WHERE matviewname = ANY(:n)"
+                ),
+                {"n": names},
+            ).all()
+            indexes = conn.execute(
+                text("SELECT tablename, indexdef FROM pg_indexes WHERE tablename = ANY(:n)"),
+                {"n": names},
+            ).all()
+    finally:
+        engine.dispose()
+    return {
+        name: (definition, populated, sorted(i.indexdef for i in indexes if i.tablename == name))
+        for name, definition, populated in views
+    }
+
+
+def test_svc_432_views_round_trip_and_refresh_on_a_fresh_db(scratch_db):
+    from unittest.mock import patch
+
+    from sqlalchemy.orm import sessionmaker
+
+    from app.analytics.views import CURRENT_VIEWS
+    from app.tasks.analytics_tasks import refresh_analytics_views
+
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_432)
+    assert _matviews(scratch_db) == {}
+
+    _alembic(scratch_db, "upgrade", SVC_432)
+    views = _matviews(scratch_db)
+    assert set(views) == {v.name for v in CURRENT_VIEWS}
+    for name, (_, populated, indexes) in views.items():
+        # WITH DATA, and a unique index, or REFRESH ... CONCURRENTLY refuses.
+        assert populated, name
+        assert any(i.startswith("CREATE UNIQUE INDEX") for i in indexes), name
+
+    # The real beat task on a DB that has only ever been migrated.
+    engine = create_engine(scratch_db)
+    try:
+        with patch("app.database.SyncSessionLocal", sessionmaker(bind=engine)):
+            refresh_analytics_views()
+    finally:
+        engine.dispose()
+    [meta] = _query(scratch_db, "SELECT id, first_booking_at FROM mv_analytics_meta")
+    assert dict(meta) == {"id": 1, "first_booking_at": None}
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_432)
+    assert _matviews(scratch_db) == {}
+    _alembic(scratch_db, "upgrade", SVC_432)
+    assert set(_matviews(scratch_db)) == {v.name for v in CURRENT_VIEWS}
+
+
+def test_svc_432_migrated_views_match_create_all(scratch_db):
+    """The migration and the suite's create_all must build the same views."""
+    import app.models  # noqa: F401  (registers the create_all hook)
+    from app.database import Base
+
+    _alembic(scratch_db, "upgrade", "head")
+    test_db = make_url(TEST_DATABASE_URL).set(drivername="postgresql+psycopg2")
+    engine = create_engine(test_db)
+    try:
+        Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+    migrated, created = _matviews(scratch_db), _matviews(test_db)
+    assert migrated == created, (
+        "The analytics views built by create_all differ from the migrated ones. "
+        "If CURRENT_VIEWS changed, drop the analytics matviews in sc_test (the "
+        "create_all hook uses IF NOT EXISTS and keeps an old definition), or use "
+        "a fresh test DB."
+    )
+
+
+# --- SVC-433: support notes + bookings.dispatch_retried_at ---------------------------
+
+
+SVC_433 = "66ca0b0a9c76"
+BEFORE_SVC_433 = SVC_432
+
+
+def _check_constraints(url: URL, table: str) -> set[str]:
+    engine = create_engine(url)
+    try:
+        return {c["name"] for c in inspect(engine).get_check_constraints(table)}
+    finally:
+        engine.dispose()
+
+
+def test_svc_433_adds_notes_and_the_retry_column_and_round_trips(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_433)
+    bookings_before = _shape(scratch_db, "bookings")
+    views_before = _matviews(scratch_db)
+
+    _alembic(scratch_db, "upgrade", SVC_433)
+    bookings_after = _shape(scratch_db, "bookings")
+    assert set(bookings_after["columns"]) - set(bookings_before["columns"]) == {
+        ("dispatch_retried_at", "TIMESTAMP", True),
+    }
+    assert {k: v for k, v in bookings_after.items() if k != "columns"} == {
+        k: v for k, v in bookings_before.items() if k != "columns"
+    }
+    notes = _shape(scratch_db, "booking_support_notes")
+    assert notes["primary_key"] == ["id"]
+    assert sorted(fk[1:4] for fk in notes["foreign_keys"]) == [
+        (("author_user_id",), "users", ("id",)),
+        (("booking_id",), "bookings", ("id",)),
+    ]
+    assert (
+        "ix_booking_support_notes_booking_id_created_at",
+        ("booking_id", "created_at"),
+        False,
+        "None",
+    ) in notes["indexes"]
+    assert _check_constraints(scratch_db, "booking_support_notes") == {
+        "ck_booking_support_notes_kind",
+        "ck_booking_support_notes_note_has_body",
+        "ck_booking_support_notes_body_length",
+    }
+    # A new bookings column leaves the SVC-432 analytics views as they were.
+    assert _matviews(scratch_db) == views_before
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_433)
+    assert _shape(scratch_db, "bookings") == bookings_before
+    engine = create_engine(scratch_db)
+    try:
+        assert not inspect(engine).has_table("booking_support_notes")
+    finally:
+        engine.dispose()
+    assert _matviews(scratch_db) == views_before

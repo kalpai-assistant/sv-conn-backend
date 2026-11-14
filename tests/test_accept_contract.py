@@ -249,7 +249,8 @@ async def test_admin_cannot_accept_a_booking(client, db_session, auth_headers):
 
     resp = await _accept(client, booking.id, admin, auth_headers, role="admin")
 
-    assert resp.status_code == 403, resp.text
+    # SVC-422: an admin's console session isn't a token for this route at all.
+    assert resp.status_code == 401, resp.text
 
 
 @pytest.mark.asyncio

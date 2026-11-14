@@ -1,28 +1,29 @@
 """
 Admin router: user management, booking oversight, and KYC approval.
-All endpoints require the "admin" role.
+Each route names its roles with ``require_roles`` (SVC-422; table in ADMIN.md).
 """
 
-from datetime import UTC, datetime, timedelta
-from typing import Literal
+import re
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from redis.asyncio import Redis
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 
 from app.config import get_settings
 from app.database import get_db
-from app.dependencies import require_role
+from app.dependencies import authorize_admin_token, get_redis, require_roles
 from app.exceptions import BookingNotFound
 from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, SettlementStatus
+from app.models.booking_dispute import BookingDispute
 from app.models.payment import Payment
-from app.models.professional import Professional
-from app.models.provider_profile import KYCStatus, ProviderProfile
+from app.models.provider_profile import KYCStatus
 from app.models.user import User
 from app.schemas.admin_team import DeactivateUserRequest
 from app.schemas.booking import (
@@ -31,23 +32,62 @@ from app.schemas.booking import (
     BookingTimelineItem,
     ForceCancelBookingRequest,
 )
-from app.schemas.payout import PendingSettlementsResponse, ProviderPayoutHistoryResponse
+from app.schemas.payout import (
+    PayoutBookingsResponse,
+    PayoutDashboardResponse,
+    PendingSettlementsResponse,
+    ProviderPayoutHistoryResponse,
+)
 from app.schemas.provider import (
     KYCDocsResponse,
+    KYCQueueCountResponse,
     KYCQueueRow,
     KYCRejectionRequest,
     KYCReviewResponse,
     ProKYCDocsResponse,
 )
 from app.schemas.user import UserResponse
+from app.services.admin_audit import audit_actor, audit_admin_action, snapshot
 from app.services.admin_team_service import AdminTeamService
 from app.services.booking_service import BookingService
+from app.services.kyc_queue_service import (
+    KYCQueueFilter,
+    KYCQueueKind,
+    KYCQueueService,
+    kyc_queue_filter,
+)
+from app.services.payout_dashboard_service import PayoutDashboardService
 from app.services.payout_service import PayoutService
 from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
-_admin_dep = Depends(require_role("admin"))
+_admin_support_dep = Depends(require_roles("admin", "support"))
+_any_admin_role_dep = Depends(require_roles("admin", "ops", "support"))
+
+# India has no DST, so a fixed offset is exact (same as provider_service._IST).
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_midnight(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=_IST)
+
+
+def _disputed_exists(booking_id):
+    """A booking is disputed if it was ever disputed: a payment was charged back
+    (``payments.disputed_at``, SVC-134) or a customer dispute was logged for it
+    (any ``booking_disputes`` row, open or closed, SVC-431). Neither is ever
+    cleared, so the flag never flips back. One rule for the list, which correlates
+    on ``Booking.id``, and the detail, which passes an id."""
+    chargeback = (
+        select(Payment.id)
+        .where(Payment.booking_id == booking_id, Payment.disputed_at.is_not(None))
+        .exists()
+    )
+    customer_dispute = (
+        select(BookingDispute.id).where(BookingDispute.booking_id == booking_id).exists()
+    )
+    return or_(chargeback, customer_dispute)
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +95,7 @@ _admin_dep = Depends(require_role("admin"))
 # ---------------------------------------------------------------------------
 
 
-@router.get("/users", response_model=list[UserResponse], dependencies=[_admin_dep])
+@router.get("/users", response_model=list[UserResponse], dependencies=[_admin_support_dep])
 async def list_users(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
@@ -69,8 +109,9 @@ async def list_users(
 @router.patch("/users/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT)
 async def deactivate_user(
     user_id: UUID,
+    request: Request,
     body: DeactivateUserRequest | None = None,
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """Deactivate a user. An unknown id is a silent 204. The body (an optional
@@ -82,7 +123,7 @@ async def deactivate_user(
     ``admin_actions`` row is written in the same transaction.
     """
     reason = body.reason if body is not None else None
-    if await AdminTeamService(db).deactivate_user(admin.id, user_id, reason):
+    if await AdminTeamService(db).deactivate_user(audit_actor(request, admin), user_id, reason):
         await db.commit()
 
 
@@ -91,20 +132,24 @@ async def deactivate_user(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/providers/kyc/pending", response_model=list[KYCQueueRow], dependencies=[_admin_dep])
-async def list_kyc_queue(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=200),
+@dataclass(frozen=True)
+class _KYCQueueParams:
+    queue_filter: KYCQueueFilter
+    kind: KYCQueueKind
+
+
+def _kyc_queue_params(
     status_filter: str = Query(
         KYCStatus.SUBMITTED.value,
         alias="status",
         description=(
-            "Filter: one of the KYCStatus values (submitted/verified/rejected/pending), "
-            "OR the virtual value 'auto_approved' — profiles verified by the AI "
-            "verifier bot in the last 7 days (SVC-307), for the admin spot-check tab."
+            "Filter: one of the KYCStatus values (submitted/verified/rejected/pending); "
+            "'auto_approved', profiles verified by the AI verifier bot in the last 7 days "
+            "(SVC-307), for the spot-check tab; or 'all' (SVC-424): submitted + verified + "
+            "rejected, never a row with no documents uploaded."
         ),
     ),
-    kind: Literal["sp", "pro", "all"] = Query(
+    kind: KYCQueueKind = Query(
         "sp",
         description=(
             "SVC-327: which KYC records. 'sp' (default, the queue as it has always "
@@ -112,133 +157,62 @@ async def list_kyc_queue(
             "reviewed via /admin/pros/{professional_id}/kyc. 'all': both, merged."
         ),
     ),
+) -> _KYCQueueParams:
+    """The queue and its count take the same params, so they can't disagree."""
+    try:
+        return _KYCQueueParams(kyc_queue_filter(status_filter), kind)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Unknown status filter {status_filter!r}. Expected one of "
+                f"{[s.value for s in KYCStatus]}, 'auto_approved' or 'all'."
+            ),
+        ) from exc
+
+
+@router.get(
+    "/providers/kyc/pending",
+    response_model=list[KYCQueueRow],
+    dependencies=[_any_admin_role_dep],
+)
+async def list_kyc_queue(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    params: _KYCQueueParams = Depends(_kyc_queue_params),
     db: AsyncSession = Depends(get_db),
 ):
-    """List providers filtered by KYC status.
+    """List KYC records by status, leaving out deleted accounts and removed Pros.
 
-    SVC-298: same endpoint answers both the pending review queue (default) and
-    the rejected view — one query param instead of a sibling route keeps the
-    pagination + response shape DRY. Rejected rows sort by most-recent review
-    first (that's the useful order when hunting a specific past rejection);
-    submitted rows keep oldest-first so the admin drains the queue FIFO.
-
-    SVC-307: ``?status=auto_approved`` is a virtual filter (not a KYCStatus
-    enum value) that SVC-308's frontend spot-check tab consumes — profiles
-    the AI verifier bot moved to VERIFIED in the last 7 days. Semantics:
-    ``kyc_status = VERIFIED AND kyc_reviewed_by = <bot_id> AND
-    kyc_reviewed_at > now() - 7d``. Sorted by most-recent-review first, same
-    as the rejected tab.
+    One route for every tab keeps the pagination and response shape in one place.
+    Submitted (and pending) sort oldest submitted first, so the admin drains the
+    queue FIFO. Rejected, verified and auto_approved sort newest review first,
+    which is the useful order when hunting a past decision. ``all`` sorts newest
+    submitted first.
     """
-    settings = get_settings()
+    return await KYCQueueService(db).list_rows(params.queue_filter, params.kind, page, per_page)
 
-    # SVC-327: which rows. "sp" (default) is exactly the old queue, so today's
-    # admin UI, which opens every row through /admin/providers/{id}/kyc, never
-    # receives a Pro id. The admin chip frontend opts in with all / pro.
-    if status_filter == "auto_approved":
-        # SVC-307 spot-check tab. Deliberately not a KYCStatus value — the
-        # profile IS verified; the filter is on who verified it.
-        bot_id = UUID(settings.KYC_VERIFIER_BOT_USER_ID)
-        cutoff = datetime.now(UTC) - timedelta(days=7)
 
-        def where(model):
-            return (
-                model.kyc_status == KYCStatus.VERIFIED,
-                model.kyc_reviewed_by == bot_id,
-                model.kyc_reviewed_at > cutoff,
-            )
-
-        newest_review_first = True
-    else:
-        try:
-            kyc_status_filter = KYCStatus(status_filter)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"Unknown status filter {status_filter!r}. Expected one of "
-                    f"{[s.value for s in KYCStatus]} or 'auto_approved'."
-                ),
-            ) from exc
-
-        def where(model):
-            return (model.kyc_status == kyc_status_filter,)
-
-        newest_review_first = kyc_status_filter == KYCStatus.REJECTED
-
-    def order(model):
-        return model.kyc_reviewed_at.desc() if newest_review_first else model.kyc_submitted_at.asc()
-
-    def sp_stmt():
-        return (
-            select(User, ProviderProfile)
-            .join(ProviderProfile, ProviderProfile.user_id == User.id)
-            .where(*where(ProviderProfile))
-            .order_by(order(ProviderProfile))
-        )
-
-    def pro_stmt():
-        # Team Pros only: a Pro-for-self's KYC is its SP's, reviewed as the SP.
-        sp = aliased(ProviderProfile)
-        return (
-            select(User, Professional, sp.business_name)
-            .join(Professional, Professional.user_id == User.id)
-            .join(sp, sp.user_id == Professional.service_provider_id)
-            .where(Professional.user_id != Professional.service_provider_id)
-            .where(*where(Professional))
-            .order_by(order(Professional))
-        )
-
-    def sp_row(user, profile) -> KYCQueueRow:
-        return KYCQueueRow(
-            id=user.id,
-            phone=user.phone,
-            name=user.name,
-            email=user.email,
-            kyc_submitted_at=profile.kyc_submitted_at,
-            kyc_reviewed_at=profile.kyc_reviewed_at,
-            kyc_rejection_reason=profile.kyc_rejection_reason,
-        )
-
-    def pro_row(user, pro, business_name) -> KYCQueueRow:
-        return KYCQueueRow(
-            id=user.id,
-            phone=user.phone,
-            name=user.name,
-            email=user.email,
-            kyc_submitted_at=pro.kyc_submitted_at,
-            kyc_reviewed_at=pro.kyc_reviewed_at,
-            kyc_rejection_reason=pro.kyc_rejection_reason,
-            kind="pro",
-            professional_id=pro.id,
-            sp_user_id=pro.service_provider_id,
-            sp_business_name=business_name,
-        )
-
-    offset = (page - 1) * per_page
-    if kind == "sp":
-        result = await db.execute(sp_stmt().offset(offset).limit(per_page))
-        return [sp_row(*r) for r in result.all()]
-    if kind == "pro":
-        result = await db.execute(pro_stmt().offset(offset).limit(per_page))
-        return [pro_row(*r) for r in result.all()]
-
-    # all: the first page*per_page of each kind, merged in the same order, then
-    # this page cut out of the merge. Admin-scale volumes, so two bounded reads.
-    head = page * per_page
-    rows = [sp_row(*r) for r in (await db.execute(sp_stmt().limit(head))).all()]
-    rows += [pro_row(*r) for r in (await db.execute(pro_stmt().limit(head))).all()]
-    never = datetime.min.replace(tzinfo=UTC)
-    if newest_review_first:
-        rows.sort(key=lambda r: r.kyc_reviewed_at or never, reverse=True)
-    else:
-        rows.sort(key=lambda r: r.kyc_submitted_at or never)
-    return rows[offset : offset + per_page]
+@router.get(
+    "/providers/kyc/pending/count",
+    response_model=KYCQueueCountResponse,
+    dependencies=[_any_admin_role_dep],
+)
+async def count_kyc_queue(
+    params: _KYCQueueParams = Depends(_kyc_queue_params),
+    db: AsyncSession = Depends(get_db),
+):
+    """How many rows ``GET /providers/kyc/pending`` has across all pages, for the
+    console's sidebar badge (SVC-424). A badge that includes team Pros must ask
+    for ``kind=all``; the default is ``sp``, the same as the queue."""
+    count = await KYCQueueService(db).count(params.queue_filter, params.kind)
+    return KYCQueueCountResponse(count=count)
 
 
 @router.get(
     "/providers/{user_id}/kyc",
     response_model=KYCDocsResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def get_provider_kyc_review(user_id: UUID, db: AsyncSession = Depends(get_db)):
     """
@@ -248,29 +222,72 @@ async def get_provider_kyc_review(user_id: UUID, db: AsyncSession = Depends(get_
     return await ProviderService(db).get_kyc_review_payload(user_id)
 
 
-@router.post(
-    "/providers/{user_id}/kyc/verify",
-    response_model=KYCReviewResponse,
-    dependencies=[_admin_dep],
-)
-async def verify_provider_kyc(user_id: UUID, db: AsyncSession = Depends(get_db)):
-    profile = await ProviderService(db).verify_kyc(user_id)
+def _push_kyc_rejected(user_id: UUID) -> None:
+    """Enqueue the rejection push (SVC-444). Call only after the commit, so a worker
+    can't run before the rejection is saved. Best effort: the rejection and its audit
+    row are already saved, and a broker problem shouldn't report them as failed.
+    """
+    # Imported here to keep FastAPI cold start off the Celery broker path.
+    import structlog
+
+    from app.tasks.notification_tasks import send_kyc_rejected_notification
+
+    try:
+        send_kyc_rejected_notification.delay(user_id=str(user_id))
+    except Exception as exc:  # noqa: BLE001
+        structlog.get_logger(__name__).error(
+            "kyc.rejected_push_enqueue_failed", user_id=str(user_id), error=str(exc)
+        )
+
+
+@router.post("/providers/{user_id}/kyc/verify", response_model=KYCReviewResponse)
+async def verify_provider_kyc(
+    user_id: UUID,
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ProviderService(db)
+    before = snapshot("provider_profile", await service.get_profile(user_id))
+    profile = await service.verify_kyc(user_id)
+    await audit_admin_action(
+        db,
+        audit_actor(request, admin),
+        action="kyc.approve",
+        target_type="provider",
+        target_id=user_id,
+        sp_user_id=user_id,
+        before=before,
+        after=snapshot("provider_profile", profile),
+    )
     await db.commit()
     return profile
 
 
-@router.post(
-    "/providers/{user_id}/kyc/reject",
-    response_model=KYCReviewResponse,
-    dependencies=[_admin_dep],
-)
+@router.post("/providers/{user_id}/kyc/reject", response_model=KYCReviewResponse)
 async def reject_provider_kyc(
     user_id: UUID,
     body: KYCRejectionRequest,
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
-    profile = await ProviderService(db).reject_kyc(user_id, reason=body.reason)
+    service = ProviderService(db)
+    before = snapshot("provider_profile", await service.get_profile(user_id))
+    profile = await service.reject_kyc(user_id, reason=body.reason)
+    await audit_admin_action(
+        db,
+        audit_actor(request, admin),
+        action="kyc.reject",
+        target_type="provider",
+        target_id=user_id,
+        reason=body.reason,
+        sp_user_id=user_id,
+        before=before,
+        after=snapshot("provider_profile", profile),
+    )
     await db.commit()
+    _push_kyc_rejected(user_id)
     return profile
 
 
@@ -286,36 +303,63 @@ async def reject_provider_kyc(
 @router.get(
     "/pros/{professional_id}/kyc",
     response_model=ProKYCDocsResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def get_pro_kyc_review(professional_id: UUID, db: AsyncSession = Depends(get_db)):
     """A team Pro's KYC review payload, with which SP they work for."""
     return await ProviderService(db).get_pro_kyc_review_payload(professional_id)
 
 
-@router.post(
-    "/pros/{professional_id}/kyc/verify",
-    response_model=KYCReviewResponse,
-    dependencies=[_admin_dep],
-)
-async def verify_pro_kyc(professional_id: UUID, db: AsyncSession = Depends(get_db)):
-    pro = await ProviderService(db).verify_pro_kyc(professional_id)
+@router.post("/pros/{professional_id}/kyc/verify", response_model=KYCReviewResponse)
+async def verify_pro_kyc(
+    professional_id: UUID,
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ProviderService(db)
+    before = snapshot("professional", await service.get_team_pro(professional_id))
+    pro = await service.verify_pro_kyc(professional_id)
+    await audit_admin_action(
+        db,
+        audit_actor(request, admin),
+        action="kyc.approve",
+        target_type="professional",
+        target_id=professional_id,
+        sp_user_id=pro.service_provider_id,
+        before=before,
+        after=snapshot("professional", pro),
+    )
     await db.commit()
     return pro
 
 
-@router.post(
-    "/pros/{professional_id}/kyc/reject",
-    response_model=KYCReviewResponse,
-    dependencies=[_admin_dep],
-)
+@router.post("/pros/{professional_id}/kyc/reject", response_model=KYCReviewResponse)
 async def reject_pro_kyc(
     professional_id: UUID,
     body: KYCRejectionRequest,
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
-    pro = await ProviderService(db).reject_pro_kyc(professional_id, reason=body.reason)
+    service = ProviderService(db)
+    before = snapshot("professional", await service.get_team_pro(professional_id))
+    pro = await service.reject_pro_kyc(professional_id, reason=body.reason)
+    await audit_admin_action(
+        db,
+        audit_actor(request, admin),
+        action="kyc.reject",
+        target_type="professional",
+        target_id=professional_id,
+        reason=body.reason,
+        sp_user_id=pro.service_provider_id,
+        before=before,
+        after=snapshot("professional", pro),
+    )
     await db.commit()
+    # A removed Pro has left the team, though this route can still act on them.
+    if pro.is_active:
+        _push_kyc_rejected(pro.user_id)
     return pro
 
 
@@ -324,43 +368,115 @@ async def reject_pro_kyc(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/bookings", response_model=BookingListResponse, dependencies=[_admin_dep])
+@router.get("/bookings", response_model=BookingListResponse, dependencies=[_any_admin_role_dep])
 async def list_all_bookings(
     booking_status: str | None = Query(None, alias="status"),
     disputed: bool | None = Query(
-        None, description="Filter to bookings with (or without) a charged-back payment"
+        None,
+        description=(
+            "Filter to bookings that were (or were never) disputed: a charged-back"
+            " payment or any customer dispute"
+        ),
     ),
+    created_from: date | None = Query(
+        None, description="Created on or after this day, in IST (YYYY-MM-DD)"
+    ),
+    created_to: date | None = Query(
+        None, description="Created on or before this day, in IST (YYYY-MM-DD)"
+    ),
+    consumer_phone: str | None = Query(
+        None, description="Customer phone; any format, the last 10 digits must match exactly"
+    ),
+    provider_name: str | None = Query(
+        None, description="Case-insensitive substring of the SP's name"
+    ),
+    consumer_id: UUID | None = Query(
+        None, description="Exactly this customer (their user id); finds a deleted account too"
+    ),
+    provider_id: UUID | None = Query(None, description="Exactly this SP (its user id)"),
+    professional_id: UUID | None = Query(None, description="Exactly this Pro row"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    # A booking can have several payment rows (failed attempts + the captured one), so
-    # "is this booking disputed" is an EXISTS over its payments rather than a join —
-    # a join would duplicate booking rows once per payment (SVC-134).
-    disputed_exists = (
-        select(Payment.id)
-        .where(Payment.booking_id == Booking.id, Payment.disputed_at.is_not(None))
-        .exists()
-    )
+    # A booking can have several payment rows (failed attempts + the captured one) and
+    # several disputes, so "is this booking disputed" is an EXISTS rather than a join:
+    # a join would duplicate booking rows (SVC-134, SVC-431). The phone and
+    # name filters below are EXISTS for the same reason (SVC-425).
+    disputed_exists = _disputed_exists(Booking.id)
 
-    stmt = select(Booking, disputed_exists.label("is_disputed"))
-    count_stmt = select(func.count()).select_from(Booking)
+    # Every filter goes into both the page query and the count query, so `total`
+    # always describes the rows the pages walk through.
+    filters = []
 
     if booking_status:
         try:
-            status_enum = BookingStatus(booking_status)
-            stmt = stmt.where(Booking.status == status_enum)
-            count_stmt = count_stmt.where(Booking.status == status_enum)
+            filters.append(Booking.status == BookingStatus(booking_status))
         except ValueError:
+            # Unknown status is ignored, not a 422: the legacy screen relies on it.
             pass
 
     if disputed is not None:
-        clause = disputed_exists if disputed else ~disputed_exists
-        stmt = stmt.where(clause)
-        count_stmt = count_stmt.where(clause)
+        filters.append(disputed_exists if disputed else ~disputed_exists)
+
+    # SVC-425: dates are IST calendar days, both ends inclusive, so `created_to`
+    # is "before the next IST midnight".
+    if created_from and created_to and created_from > created_to:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="created_from must be on or before created_to",
+        )
+    if created_from:
+        filters.append(Booking.created_at >= _ist_midnight(created_from))
+    if created_to:
+        filters.append(Booking.created_at < _ist_midnight(created_to + timedelta(days=1)))
+
+    if consumer_phone is not None:
+        digits = re.sub(r"\D", "", consumer_phone)
+        if len(digits) < 10:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="consumer_phone needs at least 10 digits",
+            )
+        # users.phone is stored as +91XXXXXXXXXX, so an exact match keeps the index.
+        filters.append(
+            select(User.id)
+            .where(User.id == Booking.consumer_id, User.phone == f"+91{digits[-10:]}")
+            .exists()
+        )
+
+    if consumer_id is not None:
+        # SVC-433: the support console's "all bookings" link. A deleted account's
+        # phone is a placeholder, so consumer_phone can't find it.
+        filters.append(Booking.consumer_id == consumer_id)
+
+    name = (provider_name or "").strip()
+    if name:
+        # The admin types a name, not a pattern: % and _ match themselves.
+        pattern = "%" + re.sub(r"([\\%_])", r"\\\1", name) + "%"
+        filters.append(
+            select(User.id)
+            .where(User.id == Booking.provider_id, User.name.ilike(pattern, escape="\\"))
+            .exists()
+        )
+
+    # SVC-427: the SP page's "last 30 days" link and the Pro page's recent jobs.
+    if provider_id is not None:
+        filters.append(Booking.provider_id == provider_id)
+    if professional_id is not None:
+        filters.append(Booking.professional_id == professional_id)
+
+    stmt = select(Booking, disputed_exists.label("is_disputed")).where(*filters)
+    count_stmt = select(func.count()).select_from(Booking).where(*filters)
 
     total = (await db.execute(count_stmt)).scalar_one()
-    stmt = stmt.offset((page - 1) * per_page).limit(per_page)
+    # Newest first; `id` breaks created_at ties so a row never shows on two pages
+    # or on none (SVC-425).
+    stmt = (
+        stmt.order_by(Booking.created_at.desc(), Booking.id.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
     result = await db.execute(stmt)
     rows = list(result.all())
     bookings = [booking for booking, _ in rows]
@@ -440,7 +556,8 @@ async def list_all_bookings(
 async def force_cancel_booking(
     booking_id: UUID,
     body: ForceCancelBookingRequest,
-    admin: User = Depends(require_role("admin")),
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
     """Cancel a booking on a customer's behalf (SVC-299).
@@ -465,7 +582,7 @@ async def force_cancel_booking(
     was cancelled", not the internal detail that support did it.
     """
     booking = await BookingService(db).force_cancel(
-        booking_id=booking_id, admin_id=admin.id, reason=body.reason
+        booking_id=booking_id, actor=audit_actor(request, admin), reason=body.reason
     )
     # Mirror the consumer-cancel push. Both consumer and provider need to know:
     # the admin's id is neither party's, so the worker pushes both (SVC-348),
@@ -483,7 +600,7 @@ async def force_cancel_booking(
 @router.get(
     "/bookings/{booking_id}",
     response_model=BookingResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
     responses={404: {"description": "No such booking"}},
 )
 async def get_any_booking(booking_id: UUID, db: AsyncSession = Depends(get_db)):
@@ -515,7 +632,7 @@ async def get_any_booking(booking_id: UUID, db: AsyncSession = Depends(get_db)):
 @router.get(
     "/bookings/{booking_id}/timeline",
     response_model=list[BookingTimelineItem],
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
     responses={404: {"description": "No such booking"}},
 )
 async def get_booking_timeline(booking_id: UUID, db: AsyncSession = Depends(get_db)):
@@ -541,6 +658,10 @@ async def _for_admin_with_parties(db: AsyncSession, booking: Booking) -> Booking
     booking for +91XXXXXXXXXX" without a follow-up round trip. Assumes
     the ORM relationships (``consumer_address``, ``items``, ``status_logs``)
     are already hydrated by the caller.
+
+    SVC-425 adds what the admin detail panel shows and no other caller gets:
+    ``is_disputed`` (the list's rule, which ``for_viewer`` leaves False),
+    ``cancellation_reason`` and the settlement state.
     """
     ids: set[UUID] = {booking.consumer_id}
     if booking.provider_id is not None:
@@ -549,10 +670,17 @@ async def _for_admin_with_parties(db: AsyncSession, booking: Booking) -> Booking
     users_by_id = {u.id: u for u in rows.scalars()}
     consumer = users_by_id.get(booking.consumer_id)
     provider = users_by_id.get(booking.provider_id) if booking.provider_id else None
+    is_disputed = (await db.execute(select(_disputed_exists(booking.id)))).scalar_one()
     return BookingResponse.for_admin(booking).model_copy(
         update={
             "consumer_phone": consumer.phone if consumer else None,
             "provider_name": provider.name if provider else None,
+            "is_disputed": is_disputed,
+            "cancellation_reason": booking.cancellation_reason,
+            "settlement_status": (
+                booking.settlement_status.value if booking.settlement_status else None
+            ),
+            "settled_at": booking.settled_at,
         }
     )
 
@@ -568,7 +696,7 @@ async def _for_admin_with_parties(db: AsyncSession, booking: Booking) -> Booking
 @router.get(
     "/providers/pending-settlements",
     response_model=PendingSettlementsResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def list_pending_settlements(db: AsyncSession = Depends(get_db)):
     """Providers awaiting settlement, with the amount and booking count owed.
@@ -584,7 +712,7 @@ async def list_pending_settlements(db: AsyncSession = Depends(get_db)):
 @router.get(
     "/providers/{user_id}/payouts",
     response_model=ProviderPayoutHistoryResponse,
-    dependencies=[_admin_dep],
+    dependencies=[_any_admin_role_dep],
 )
 async def list_provider_payout_history(
     user_id: UUID,
@@ -607,7 +735,8 @@ async def list_provider_payout_history(
 @router.post("/providers/{user_id}/payout", status_code=status.HTTP_202_ACCEPTED)
 async def pay_out_provider(
     user_id: UUID,
-    admin: User = Depends(require_role("admin")),
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
     """Enqueue a RazorpayX payout for a provider's completed-but-unsettled bookings.
@@ -633,11 +762,33 @@ async def pay_out_provider(
     call fires; the admin payouts screen surfaces the outcome from there, and
     ``reconcile_payouts`` (nightly) resolves any breadcrumb whose task
     process died mid-flight.
+
+    SVC-423: one ``admin_actions`` row per accepted request, committed before the
+    enqueue, because an unaudited money move is worse than a row for a failed
+    enqueue. A refused batch writes none, and the task writes none: each
+    attempt's outcome stays in ``payout_audits``. That's why the preflight runs
+    first: a 402/404 raises before the row is written.
     """
     from app.tasks.payment_tasks import execute_provider_payout
 
     # The 202 body's amount is what the task will send: min(wallet, batch sum).
+    # An id with no provider profile is a 404 here, so past this line user_id is
+    # always a valid sp_user_id (an FK to users).
     plan = await PayoutService(db).preflight_payout(user_id)
+
+    await audit_admin_action(
+        db,
+        audit_actor(request, admin),
+        action="payout.enqueue",
+        target_type="provider",
+        target_id=user_id,
+        sp_user_id=user_id,
+        details={
+            "amount_paise": plan["amount_paise"],
+            "booking_count": plan["booking_count"],
+        },
+    )
+    await db.commit()
 
     task = execute_provider_payout.delay(str(user_id), str(admin.id))
     return {
@@ -651,7 +802,8 @@ async def pay_out_provider(
 @router.post("/providers/{user_id}/payout/requeue-failed", status_code=status.HTTP_200_OK)
 async def requeue_failed_settlements(
     user_id: UUID,
-    admin: User = Depends(require_role("admin")),
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
     db: AsyncSession = Depends(get_db),
 ):
     """Reset a provider's FAILED settlements to PENDING so they can be paid again.
@@ -661,15 +813,28 @@ async def requeue_failed_settlements(
     eligible for the next payout run. The triggering admin is recorded in the audit
     trail.
     """
-    return await PayoutService(db).requeue_settlements(
+    result = await PayoutService(db).requeue_settlements(
         user_id, admin.id, from_status=SettlementStatus.FAILED
     )
+    await audit_admin_action(
+        db,
+        audit_actor(request, admin),
+        action="payout.requeue_failed",
+        target_type="provider",
+        target_id=user_id,
+        sp_user_id=user_id,
+        before={"settlement_status": SettlementStatus.FAILED},
+        after={"settlement_status": SettlementStatus.PENDING},
+        details={"booking_count": result["requeued"]},
+    )
+    return result
 
 
 @router.post("/providers/{user_id}/payout/requeue-reversed", status_code=status.HTTP_200_OK)
 async def requeue_reversed_settlements(
     user_id: UUID,
-    admin: User = Depends(require_role("admin")),
+    request: Request,
+    admin: User = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """Reset a provider's REVERSED settlements to PENDING so they can be paid again.
@@ -680,8 +845,98 @@ async def requeue_reversed_settlements(
     fixed; otherwise the re-payment will likely bounce again. Admin-only and
     recorded in the audit trail.
     """
-    return await PayoutService(db).requeue_settlements(
+    result = await PayoutService(db).requeue_settlements(
         user_id, admin.id, from_status=SettlementStatus.REVERSED
+    )
+    await audit_admin_action(
+        db,
+        audit_actor(request, admin),
+        action="payout.requeue_reversed",
+        target_type="provider",
+        target_id=user_id,
+        sp_user_id=user_id,
+        before={"settlement_status": SettlementStatus.REVERSED},
+        after={"settlement_status": SettlementStatus.PENDING},
+        details={"booking_count": result["requeued"]},
+    )
+    return result
+
+
+# The 3 dashboard reads (SVC-426). Read-only, so not audited; open to every admin
+# role, since support reads payouts too.
+_EXPORT_MAX_DAYS = 366
+
+
+@router.get(
+    "/payouts/providers",
+    response_model=PayoutDashboardResponse,
+    dependencies=[_any_admin_role_dep],
+)
+async def list_payout_providers(
+    status_: SettlementStatus | None = Query(None, alias="status"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """One row per SP with any payout-scope booking (completed, PAID, not cash).
+
+    Count + paise per settlement status, ``earned_paise`` across all five, and
+    ``payable_paise``, the net a payout would send now. ``status`` keeps SPs with a
+    booking in that bucket; omit it for all. Largest pending amount first.
+    """
+    return await PayoutDashboardService(db).list_providers(
+        status=status_, page=page, per_page=per_page
+    )
+
+
+@router.get(
+    "/providers/{user_id}/payout-bookings",
+    response_model=PayoutBookingsResponse,
+    dependencies=[_any_admin_role_dep],
+)
+async def list_provider_payout_bookings(
+    user_id: UUID,
+    settlement_status: SettlementStatus | None = Query(None),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bookings behind an SP's payout figures, newest completion first, with the
+    price, commission and payout split each one contributed."""
+    return await PayoutDashboardService(db).list_bookings(
+        user_id, settlement_status=settlement_status, page=page, per_page=per_page
+    )
+
+
+@router.get(
+    "/payouts/export.csv",
+    dependencies=[_any_admin_role_dep],
+    response_class=Response,
+    responses={200: {"content": {"text/csv": {}}, "description": "Payout CSV"}},
+)
+async def export_payouts_csv(
+    from_: date = Query(..., alias="from"),
+    to: date = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Payout-scope bookings completed on IST days ``from``..``to`` inclusive, as CSV
+    for the accounting import. At most 366 days. Cash bookings are left out."""
+    if from_ > to:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "`from` is after `to`")
+    if (to - from_).days + 1 > _EXPORT_MAX_DAYS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Range is longer than {_EXPORT_MAX_DAYS} days",
+        )
+    body = await PayoutDashboardService(db).export_csv(from_, to)
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="payouts_{from_.isoformat()}_{to.isoformat()}.csv"'
+            )
+        },
     )
 
 
@@ -692,11 +947,14 @@ async def requeue_reversed_settlements(
 
 async def _require_admin_or_release_token(
     request: Request,
+    response: Response,
     x_internal_release_token: str | None = Header(default=None),
     credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False)),
     db: AsyncSession = Depends(get_db),
-) -> None:
-    """Alt-auth for the release endpoint (SVC-227.2).
+    redis: Redis = Depends(get_redis),
+) -> User | None:
+    """Alt-auth for the release endpoint (SVC-227.2). Returns the admin, or None
+    for the CI token, where no admin acted.
 
     Accepts EITHER:
       - `X-Internal-Release-Token` header matching
@@ -709,7 +967,7 @@ async def _require_admin_or_release_token(
     entirely; the endpoint then behaves like every other admin route.
 
     Written as one dep (rather than two Depends parameters) because
-    FastAPI runs deps eagerly — a `require_role("admin")` dep alongside
+    FastAPI runs deps eagerly — a `require_roles("admin")` dep alongside
     this one would hard-401 on missing JWT even when the header path
     already succeeded. The `HTTPBearer(auto_error=False)` in this
     signature is the trick that lets us decide the branch ourselves.
@@ -721,9 +979,6 @@ async def _require_admin_or_release_token(
     """
     import hmac
 
-    from app.config import get_settings
-    from app.dependencies import _tag_sentry_user
-
     settings = get_settings()
     if (
         x_internal_release_token
@@ -731,12 +986,11 @@ async def _require_admin_or_release_token(
         and hmac.compare_digest(x_internal_release_token, settings.INTERNAL_RELEASE_TOKEN)
     ):
         request.state.release_auth = "token"
-        return
+        return None
 
-    # JWT path — inline the check rather than delegating to the standard
-    # `require_role("admin")` dep so we can return a specific 401 when
-    # neither auth method was provided at all (vs 403 for a wrong-role
-    # JWT). Same JWT decode + user lookup as `get_current_user`.
+    # JWT path — not the standard `require_roles("admin")` dep, so we can
+    # return a specific 401 when neither auth method was provided at all
+    # (vs 403 for a wrong-role JWT).
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -746,22 +1000,9 @@ async def _require_admin_or_release_token(
             ),
         )
 
-    from app.utils.security import decode_jwt
-
-    payload = decode_jwt(credentials.credentials)
-    if not payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token"
-        )
-    user = await db.get(User, UUID(payload["sub"]))
-    if not user or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive"
-        )
-    if user.role.value != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
-    _tag_sentry_user(str(user.id), user.role.value)
+    admin = await authorize_admin_token(credentials.credentials, ("admin",), response, db, redis)
     request.state.release_auth = "jwt"
+    return admin
 
 
 class PublishReleaseRequest(BaseModel):
@@ -814,12 +1055,12 @@ class PublishReleaseResponse(BaseModel):
 @router.post(
     "/app-versions/{platform}/release",
     response_model=PublishReleaseResponse,
-    dependencies=[Depends(_require_admin_or_release_token)],
 )
 async def publish_app_release(
     platform: str,
     request: PublishReleaseRequest,
     http_request: Request,
+    admin: User | None = Depends(_require_admin_or_release_token),
     db: AsyncSession = Depends(get_db),
 ):
     """One-shot publish: bump `app_versions.{platform}` + (optionally) push
@@ -855,6 +1096,7 @@ async def publish_app_release(
             f"No app_versions row for platform={platform}. Missing seed migration?",
         )
 
+    before = snapshot("app_version", row)
     row.version = request.version
     if request.min_supported_version is not None:
         row.min_supported_version = request.min_supported_version
@@ -868,6 +1110,20 @@ async def publish_app_release(
     # a fresh release. See app_versions.released_at.
     row.released_at = datetime.now(UTC)
     await db.flush()
+
+    # SVC-423: the CI token writes no row, because no admin acted. The log line
+    # below is its record.
+    if admin is not None:
+        await audit_admin_action(
+            db,
+            audit_actor(http_request, admin),
+            action="app_version.release",
+            target_type="app_version",
+            target_id=platform,
+            before=before,
+            after=snapshot("app_version", row),
+            details={"notify": request.notify},
+        )
 
     # Log auth path so we can tell CI vs human releases apart in Sentry /
     # CloudWatch — the alt-auth path has no user object to attribute it to.

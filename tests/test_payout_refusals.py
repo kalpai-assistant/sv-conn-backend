@@ -307,9 +307,15 @@ async def test_wallet_owes_writes_no_statement_on_either_path(
 
 
 @pytest.mark.asyncio
-async def test_route_amount_is_what_the_task_sends(client, db_session, auth_headers, mock_delay):
+async def test_route_amount_is_what_the_task_sends(
+    client, db_session, auth_headers, mock_delay, monkeypatch
+):
     """The 202's amount is min(wallet, batch): here cash commission nets the
     wallet below the batch sum, and the queued figure matches the wire amount."""
+    # An accepted payout commits its admin_actions row before queuing (SVC-423).
+    # A real commit here would leave owed bookings behind for other files'
+    # pending-settlements tests, so it flushes into the test session instead.
+    monkeypatch.setattr(db_session, "commit", db_session.flush)
     consumer, provider, admin = await _people(db_session)
     await _provider_with_payout_vpa(db_session, provider)
     await _booking_for(db_session, consumer, provider, provider_payout=80.0)

@@ -4,8 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_redis
+from app.exceptions import AdminPhoneLoginGone
 from app.schemas.auth import (
-    AdminVerifyOTPRequest,
     LogoutRequest,
     RefreshTokenRequest,
     SendOTPRequest,
@@ -39,32 +39,19 @@ async def verify_otp(
 
 
 # ---------------------------------------------------------------------------
-# SVC-345: dedicated admin login endpoints
-#
-# Live under /auth/admin/* so they share the auth router's prefix without
-# tripping AdminIPAllowlistMiddleware (which gates /api/v1/admin/*, not
-# /api/v1/auth/admin/*). Admins must be able to log in from any IP; the
-# actual admin API endpoints stay allowlist-gated.
+# SVC-422: the SVC-345 admin phone login is retired. No body is read, so any
+# old client gets the 410 rather than a validation error.
 # ---------------------------------------------------------------------------
 
 
-@router.post("/admin/send-otp", status_code=status.HTTP_200_OK)
-async def admin_send_otp(
-    request: SendOTPRequest,
-    db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
-):
-    await AuthService(db, redis).admin_send_otp(request.phone)
-    return {"message": "OTP sent successfully"}
+@router.post("/admin/send-otp", status_code=status.HTTP_410_GONE, deprecated=True)
+async def admin_send_otp():
+    raise AdminPhoneLoginGone()
 
 
-@router.post("/admin/verify-otp", response_model=TokenResponse)
-async def admin_verify_otp(
-    request: AdminVerifyOTPRequest,
-    db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis),
-):
-    return await AuthService(db, redis).admin_verify_otp(phone=request.phone, otp=request.otp)
+@router.post("/admin/verify-otp", status_code=status.HTTP_410_GONE, deprecated=True)
+async def admin_verify_otp():
+    raise AdminPhoneLoginGone()
 
 
 @router.post("/refresh", response_model=TokenResponse)

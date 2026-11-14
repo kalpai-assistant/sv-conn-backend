@@ -714,6 +714,12 @@ class PaymentService:
             logger.warning("Razorpay %s webhook missing refund.entity.id", event)
             return
 
+        # SVC-431: a dispute refund is settled on its dispute row only, and must
+        # never reach the cancel-refund code below: that would flip the booking
+        # to REFUNDED and drop the provider's whole payout (_owed_filter).
+        if await self._handle_dispute_refund_event(event, refund_entity):
+            return
+
         result = await self.db.execute(select(Payment).where(Payment.refund_id == refund_id))
         payment = result.scalar_one_or_none()
         if payment is None:
@@ -764,6 +770,163 @@ class PaymentService:
             )
         else:
             logger.info("Ignoring unhandled refund event: %s", event)
+
+    # ------------------------------------------------------------------
+    # Dispute refunds (SVC-431)
+    # ------------------------------------------------------------------
+
+    async def create_dispute_refund(
+        self, *, payment: Payment, dispute_id: UUID, booking_id: UUID, amount_paise: int
+    ) -> dict:
+        """Refund ``amount_paise`` on ``payment`` for one dispute; returns
+        Razorpay's refund entity.
+
+        Unlike ``initiate_refund`` this writes nothing: the caller records the
+        refund on the dispute row. ``payments.refund_*`` and both payment statuses
+        stay as they are, so the provider's payout is untouched.
+
+        Safe to retry after a timeout. Razorpay's SDK can't send an
+        Idempotency-Key, so every refund carries ``notes.dispute_id``, and the
+        payment's existing refunds are checked first: one already made for this
+        dispute is returned instead of refunding again.
+
+        Raises ``DisputeRefundRejected`` (Razorpay said no: 422) or
+        ``DisputeRefundGatewayError`` (no answer: 502, outcome unknown).
+        """
+        from razorpay.errors import BadRequestError
+
+        from app.exceptions import DisputeRefundGatewayError, DisputeRefundRejected
+
+        pay_id = payment.razorpay_payment_id
+        try:
+            existing = await asyncio.to_thread(
+                razorpay_client.payment.fetch_multiple_refund, pay_id, {"count": 100}
+            )
+            for item in (existing or {}).get("items") or []:
+                if (item.get("notes") or {}).get("dispute_id") == str(dispute_id):
+                    logger.warning(
+                        "dispute.refund_adopted dispute=%s payment=%s refund=%s amount_paise=%s",
+                        dispute_id,
+                        pay_id,
+                        item.get("id"),
+                        item.get("amount"),
+                    )
+                    return item
+
+            refund = await asyncio.to_thread(
+                razorpay_client.payment.refund,
+                pay_id,
+                {
+                    "amount": amount_paise,
+                    "notes": {
+                        "reason": "dispute",
+                        "dispute_id": str(dispute_id),
+                        "booking_id": str(booking_id),
+                    },
+                },
+            )
+        except BadRequestError as exc:
+            logger.error(
+                "dispute.refund_rejected dispute=%s payment=%s amount_paise=%s error=%s",
+                dispute_id,
+                pay_id,
+                amount_paise,
+                exc,
+            )
+            raise DisputeRefundRejected(str(exc)) from exc
+        except Exception as exc:
+            logger.error(
+                "dispute.refund_gateway_error dispute=%s payment=%s amount_paise=%s error=%r",
+                dispute_id,
+                pay_id,
+                amount_paise,
+                exc,
+            )
+            raise DisputeRefundGatewayError() from exc
+
+        # Loud, and before the caller commits: if the commit then fails, this
+        # line is the trail back to money that has already moved.
+        logger.warning(
+            "dispute.refund_created dispute=%s payment=%s refund=%s amount_paise=%s",
+            dispute_id,
+            pay_id,
+            refund.get("id"),
+            amount_paise,
+        )
+        return refund
+
+    async def _handle_dispute_refund_event(self, event: str, refund_entity: dict) -> bool:
+        """Settle a dispute refund's webhook on its dispute. True if it was one.
+
+        Looked up by ``notes.dispute_id`` first, with the row locked: Razorpay can
+        deliver the webhook before the resolve that made the refund commits, and
+        the lock waits for that commit. ``razorpay_refund_id`` is the fallback.
+        A refund whose notes name a dispute is never treated as a cancel refund,
+        even when no dispute matches (logged and acked).
+        """
+        from app.models.booking_dispute import BookingDispute
+
+        refund_id = refund_entity.get("id")
+        notes = refund_entity.get("notes")
+        noted = notes.get("dispute_id") if isinstance(notes, dict) else None
+        dispute = None
+        if noted:
+            try:
+                noted_id = UUID(str(noted))
+            except ValueError:
+                noted_id = None
+            if noted_id is not None:
+                dispute = await self.db.scalar(
+                    select(BookingDispute)
+                    .where(BookingDispute.id == noted_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            if dispute is not None and dispute.razorpay_refund_id != refund_id:
+                logger.error(
+                    "Razorpay %s refund=%s names dispute=%s, which holds refund=%s — acking",
+                    event,
+                    refund_id,
+                    noted,
+                    dispute.razorpay_refund_id,
+                )
+                return True
+        if dispute is None:
+            dispute = await self.db.scalar(
+                select(BookingDispute)
+                .where(BookingDispute.razorpay_refund_id == refund_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        if dispute is None:
+            if noted:
+                logger.error(
+                    "Razorpay %s refund=%s for unknown dispute=%s — acking", event, refund_id, noted
+                )
+                return True
+            return False
+
+        if event == "refund.processed":
+            if dispute.refund_status != "PROCESSED":
+                dispute.refund_status = "PROCESSED"
+                dispute.refund_failed_reason = None
+            if dispute.status != "CLOSED":
+                dispute.status = "CLOSED"
+                dispute.closed_at = datetime.now(UTC)
+            await self.db.flush()
+            logger.info("dispute.refund_processed dispute=%s refund=%s", dispute.id, refund_id)
+        elif event == "refund.failed":
+            # Never undo a refund already reported processed.
+            if dispute.refund_status != "PROCESSED":
+                dispute.refund_status = "FAILED"
+                dispute.refund_failed_reason = (
+                    refund_entity.get("error_description") or "Razorpay reported the refund failed"
+                )
+                await self.db.flush()
+            logger.error("dispute.refund_failed dispute=%s refund=%s", dispute.id, refund_id)
+        else:
+            logger.info("Ignoring unhandled dispute refund event: %s", event)
+        return True
 
     async def _find_captured_payment(self, booking_id: UUID) -> Payment | None:
         """Return the (single) CAPTURED payment on a booking, or None.
