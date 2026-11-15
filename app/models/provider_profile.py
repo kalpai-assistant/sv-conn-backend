@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from geoalchemy2 import Geography
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -130,6 +130,16 @@ class ProviderProfile(Base):
     )
 
     is_online: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # SVC-408: new-SP boost state (epic SVC-406). Lives on the SP row because it
+    # is 1:1 and needs no history at v1. NULL = the boost window hasn't started.
+    # Nothing writes either column yet; the boost hook is SVC-414.
+    boost_eligible_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    boost_completed_jobs_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
 
     # SVC-319 (team model, Phase A): the team owner this provider works under.
     # NULL = a solo provider, or a team owner — the two look the same until a

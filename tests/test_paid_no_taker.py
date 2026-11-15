@@ -422,6 +422,7 @@ def _seed(sync_factory, made, *, paid=True, method=PaymentMethod.ONLINE, age=130
             consumer_address_id=address.id,
             status=BookingStatus.REQUESTED,
             service_amount=Decimal("799"),
+            locked_price=Decimal("799"),
             discount_amount=Decimal("0"),
             platform_commission=Decimal("160"),
             provider_payout=Decimal("639"),

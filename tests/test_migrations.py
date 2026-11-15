@@ -1,6 +1,6 @@
 """
 Migration round trips on a scratch database (SVC-319, SVC-339, SVC-340, SVC-320,
-SVC-344, SVC-333, SVC-329, SVC-366).
+SVC-344, SVC-333, SVC-329, SVC-366, SVC-408).
 
 The rest of the suite builds its schema with ``Base.metadata.create_all``, and CI
 only ever runs ``alembic upgrade head`` — so a migration's ``downgrade()`` is not
@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -1597,6 +1598,185 @@ def test_svc_433_adds_notes_and_the_retry_column_and_round_trips(scratch_db):
     engine = create_engine(scratch_db)
     try:
         assert not inspect(engine).has_table("booking_support_notes")
+    finally:
+        engine.dispose()
+    assert _matviews(scratch_db) == views_before
+
+
+# --- SVC-408: sp_service_pricing, SP boost columns, bookings.locked_price ---------
+
+
+SVC_408 = "ed0ba663c93c"
+BEFORE_SVC_408 = SVC_433
+SVC_408_FILE = (
+    REPO_ROOT / "alembic" / "versions" / "ed0ba663c93c_svc_408_marketplace_pricing_data_model.py"
+)
+
+
+def test_svc_408_frozen_check_matches_the_model():
+    from app.models.price_unit import PRICE_UNIT_CHECK
+
+    spec = importlib.util.spec_from_file_location("svc_408_migration", SVC_408_FILE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.PRICE_UNIT_CHECK == PRICE_UNIT_CHECK
+
+
+def _seed_before_svc_408(url: URL) -> dict:
+    """A provider and two bookings, one with a coupon discount, before SVC-408."""
+    ids = {key: uuid.uuid4() for key in ("consumer", "sp", "address", "plain", "discounted")}
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            for key, role in (("consumer", "CONSUMER"), ("sp", "PROVIDER")):
+                conn.execute(
+                    text(
+                        "INSERT INTO users (id, phone, role, is_active) "
+                        "VALUES (:id, :phone, :role, true)"
+                    ),
+                    {"id": ids[key], "phone": f"+9{ids[key].int % 10**11:011d}", "role": role},
+                )
+            conn.execute(
+                text(
+                    "INSERT INTO provider_profiles (id, user_id, service_area_radius_km, "
+                    "avg_rating, total_completed_jobs, kyc_status, is_online) "
+                    "VALUES (:id, :user_id, 10, 4.5, 7, 'VERIFIED', true)"
+                ),
+                {"id": uuid.uuid4(), "user_id": ids["sp"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO addresses (id, user_id, label, full_address, is_default) "
+                    "VALUES (:id, :user_id, 'Home', '1 Test Road', true)"
+                ),
+                {"id": ids["address"], "user_id": ids["consumer"]},
+            )
+            for key, amount, discount in (
+                ("plain", "499.00", "0"),
+                ("discounted", "1000.00", "200.00"),
+            ):
+                conn.execute(
+                    text(
+                        "INSERT INTO bookings (id, consumer_id, provider_id, consumer_address_id, "
+                        "status, service_amount, platform_commission, provider_payout, "
+                        "payment_status, discount_amount, tip_amount) "
+                        "VALUES (:id, :consumer, :sp, :address, 'COMPLETED', :amount, "
+                        ":amount * 0.2, :amount * 0.8, 'PAID', :discount, 0)"
+                    ),
+                    {
+                        "id": ids[key],
+                        "consumer": ids["consumer"],
+                        "sp": ids["sp"],
+                        "address": ids["address"],
+                        "amount": Decimal(amount),
+                        "discount": Decimal(discount),
+                    },
+                )
+    finally:
+        engine.dispose()
+    return ids
+
+
+def test_svc_408_adds_pricing_schema_backfills_and_round_trips(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_408)
+    ids = _seed_before_svc_408(scratch_db)
+    tables = ("bookings", "provider_profiles")
+    before = {t: _shape(scratch_db, t) for t in tables}
+    checks_before = {t: _check_constraints(scratch_db, t) for t in tables}
+    views_before = _matviews(scratch_db)
+
+    _alembic(scratch_db, "upgrade", SVC_408)
+    after = {t: _shape(scratch_db, t) for t in tables}
+    assert set(after["bookings"]["columns"]) - set(before["bookings"]["columns"]) == {
+        ("locked_price", "NUMERIC(12, 2)", False),
+    }
+    assert set(after["provider_profiles"]["columns"]) - set(
+        before["provider_profiles"]["columns"]
+    ) == {
+        ("boost_eligible_at", "TIMESTAMP", True),
+        ("boost_completed_jobs_count", "INTEGER", False),
+    }
+    for t in tables:
+        assert {k: v for k, v in after[t].items() if k != "columns"} == {
+            k: v for k, v in before[t].items() if k != "columns"
+        }
+
+    # Existing rows: locked_price is the pre-discount service_amount, not the net.
+    locked = {
+        row["id"]: (row["locked_price"], row["service_amount"])
+        for row in _query(scratch_db, "SELECT id, locked_price, service_amount FROM bookings")
+    }
+    assert locked == {
+        ids["plain"]: (Decimal("499.00"), Decimal("499.00")),
+        ids["discounted"]: (Decimal("1000.00"), Decimal("1000.00")),
+    }
+    [sp] = _query(
+        scratch_db, "SELECT boost_eligible_at, boost_completed_jobs_count FROM provider_profiles"
+    )
+    assert dict(sp) == {"boost_eligible_at": None, "boost_completed_jobs_count": 0}
+
+    pricing = _shape(scratch_db, "sp_service_pricing")
+    assert pricing["columns"] == sorted(
+        [
+            ("id", "UUID", False),
+            ("sp_id", "UUID", False),
+            ("service_id", "UUID", False),
+            ("price_amount", "NUMERIC(12, 2)", False),
+            ("price_unit", "VARCHAR(16)", False),
+            ("is_active", "BOOLEAN", False),
+            ("created_at", "TIMESTAMP", False),
+            ("updated_at", "TIMESTAMP", False),
+        ]
+    )
+    assert pricing["primary_key"] == ["id"]
+    assert pricing["foreign_keys"] == sorted(
+        [
+            (
+                "fk_sp_service_pricing_service_id",
+                ("service_id",),
+                "services",
+                ("id",),
+                "RESTRICT",
+            ),
+            (
+                "fk_sp_service_pricing_sp_id",
+                ("sp_id",),
+                "provider_profiles",
+                ("user_id",),
+                "RESTRICT",
+            ),
+        ]
+    )
+    assert pricing["unique_constraints"] == [
+        ("uq_sp_service_pricing_sp_service", ("sp_id", "service_id"))
+    ]
+    assert (
+        "ix_sp_service_pricing_service_active",
+        ("service_id", "is_active"),
+        False,
+        "None",
+    ) in pricing["indexes"]
+    assert _check_constraints(scratch_db, "sp_service_pricing") == {
+        "ck_sp_service_pricing_price_unit"
+    }
+    # A booking written without locked_price is refused, not defaulted.
+    _refused_by(
+        scratch_db,
+        f"INSERT INTO bookings (id, consumer_id, consumer_address_id, status, service_amount, "
+        f"platform_commission, provider_payout, payment_status, discount_amount, tip_amount) "
+        f"VALUES ('{uuid.uuid4()}', '{ids['consumer']}', '{ids['address']}', 'REQUESTED', "
+        f"100, 20, 80, 'PENDING', 0, 0)",
+        "locked_price",
+    )
+    # New columns leave the SVC-432 analytics views as they were.
+    assert _matviews(scratch_db) == views_before
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_408)
+    assert {t: _shape(scratch_db, t) for t in tables} == before
+    assert {t: _check_constraints(scratch_db, t) for t in tables} == checks_before
+    engine = create_engine(scratch_db)
+    try:
+        assert not inspect(engine).has_table("sp_service_pricing")
     finally:
         engine.dispose()
     assert _matviews(scratch_db) == views_before

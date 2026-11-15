@@ -78,6 +78,7 @@ class BookingFactory:
             # a float until it round-trips through the DB, and any Decimal
             # arithmetic against it raises TypeError.
             service_amount=to_decimal(service_amount),
+            locked_price=to_decimal(service_amount),
             platform_commission=to_decimal(platform_commission),
             provider_payout=to_decimal(provider_payout),
             payment_method=payment_method,

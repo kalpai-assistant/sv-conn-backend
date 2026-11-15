@@ -154,6 +154,11 @@ class Booking(Base):
     service_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     platform_commission: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     provider_payout: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # SVC-408: the price frozen at booking creation. A copy, not an FK to
+    # sp_service_pricing, so a later SP price change never moves a booking.
+    # Pre-discount, like service_amount, which it equals until SVC-411 sets it
+    # from the SP's price. No server default: a missing write must fail loudly.
+    locked_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     # Coupon reduction applied at booking creation. Comes out of the
     # platform side — provider_payout stays anchored to service_amount.
     # See coupon module docstring for the money split. Numeric per SVC-150

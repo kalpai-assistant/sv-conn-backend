@@ -346,6 +346,7 @@ async def _stub_booking(db_session, consumer_id, address_id) -> Booking:
         payment_method=PaymentMethod.ONLINE,
         doorstep_otp="0000",
         service_amount=100.0,
+        locked_price=100.0,
         platform_commission=20.0,
         provider_payout=80.0,
     )
