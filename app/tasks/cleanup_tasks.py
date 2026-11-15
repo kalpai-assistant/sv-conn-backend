@@ -22,7 +22,9 @@ def expire_stale_bookings():
     offer has expired (``Booking.offer_expires_at``).
 
     * **Unpaid** (``payment_status == PENDING``, cash included): bulk-expired,
-      as always. Nothing to refund.
+      as always. Nothing to refund. One whose customer picked the SP (SVC-479)
+      also pushes them ``chosen_sp_unavailable`` after the commit, so they can
+      pick another.
     * **PAID** (SVC-344; skipped entirely before, SVC-251): never expired,
       since expiry doesn't refund. Instead each one moves one step, in its own
       transaction: first a second offer (one more broadcast, 90 s more), then,
@@ -42,16 +44,13 @@ def expire_stale_bookings():
     ]
 
     with SyncSessionLocal() as db:
-        expired_ids = (
-            db.execute(
-                update(Booking)
-                .where(*due, Booking.payment_status == PaymentStatus.PENDING)
-                .values(status=BookingStatus.EXPIRED)
-                .returning(Booking.id)
-            )
-            .scalars()
-            .all()
-        )
+        expired_rows = db.execute(
+            update(Booking)
+            .where(*due, Booking.payment_status == PaymentStatus.PENDING)
+            .values(status=BookingStatus.EXPIRED)
+            .returning(Booking.id, Booking.chosen_sp_id)
+        ).all()
+        expired_ids = [row.id for row in expired_rows]
         # The system's own transition (changed_by NULL), one row per booking,
         # so the admin timeline shows the expiry instead of stopping at
         # "requested". Same commit as the UPDATE.
@@ -71,6 +70,7 @@ def expire_stale_bookings():
             )
         db.commit()
         expired = len(expired_ids)
+        _push_chosen_sp_unavailable(row.id for row in expired_rows if row.chosen_sp_id)
         for booking_id, counts in _offer_counts(db, expired_ids).items():
             _log_no_acceptance(booking_id, *counts, outcome="expired")
 
@@ -103,6 +103,15 @@ def expire_stale_bookings():
         f"{outcomes.count('refunded')} refunded, "
         f"{outcomes.count('failed')} failed"
     )
+
+
+def _push_chosen_sp_unavailable(booking_ids) -> None:
+    """Tell each customer whose chosen SP let the offer run out (SVC-479).
+    Called after the expiry commits."""
+    from app.tasks.notification_tasks import send_booking_notification
+
+    for booking_id in booking_ids:
+        send_booking_notification.delay(booking_id=str(booking_id), event="chosen_sp_unavailable")
 
 
 def _offer_counts(db, booking_ids) -> dict:

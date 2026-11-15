@@ -105,6 +105,12 @@ class Booking(Base):
             "professional_id",
             postgresql_where="professional_id IS NOT NULL",
         ),
+        # SVC-479: partial, since only marketplace bookings name an SP.
+        Index(
+            "ix_bookings_chosen_sp_id",
+            "chosen_sp_id",
+            postgresql_where="chosen_sp_id IS NOT NULL",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -122,6 +128,19 @@ class Booking(Base):
     # through ``professional.service_provider_id`` once code reads it.
     professional_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("professionals.id"), nullable=True
+    )
+    # SVC-479: the SP the customer picked in the marketplace, at that SP's
+    # price. When set, only this SP is offered the booking (the rule is in
+    # ``provider_matching``), and its decline or release ends the booking
+    # instead of re-broadcasting it. NULL = the open broadcast, as before.
+    chosen_sp_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "provider_profiles.user_id",
+            name="fk_bookings_chosen_sp_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
     )
     # The catalogue used to live directly on this row via `service_id`. It's
     # in `booking_items` now (one row per service in the cart) — a single

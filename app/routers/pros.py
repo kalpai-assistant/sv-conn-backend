@@ -36,7 +36,7 @@ from app.schemas.team import (
 )
 from app.services.booking_service import BookingService
 from app.services.pro_service import ProService
-from app.tasks.notification_tasks import notify_reopened, send_booking_notification
+from app.tasks.notification_tasks import notify_reopen_outcome, send_booking_notification
 from app.utils.rate_limiter import rate_limit
 
 router = APIRouter(prefix="/pros", tags=["Pros"])
@@ -203,7 +203,7 @@ async def decline_job(
     """
     booking, outcome = await BookingService(db).decline_job(booking_id, current_user.id)
     if outcome == "reopened":
-        notify_reopened(booking.id)
+        notify_reopen_outcome(booking)
     elif booking.provider_id != current_user.id:
         # An SP declining their own Pro-for-self's job doesn't need telling.
         send_booking_notification.delay(

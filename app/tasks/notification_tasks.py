@@ -144,6 +144,19 @@ NOTIFICATION_TEMPLATES: dict[str, dict[str, str]] = {
             "Your full refund of {amount} has been started."
         ),
     },
+    # SVC-479: the SP the customer picked declined, gave the job back, or
+    # didn't answer in time, and the booking has ended. Consumer only, English.
+    # {sp} is the SP's business name (or their name). "body_refunded" is for a
+    # paid booking, which was refunded in full; it replaces no_taker_refunded,
+    # so the customer is told once.
+    "chosen_sp_unavailable": {
+        "title": "Pick another pro",
+        "body": "{sp} couldn't take your booking — pick another pro.",
+        "body_refunded": (
+            "{sp} couldn't take your booking — pick another pro. "
+            "Your full refund of {amount} has been started."
+        ),
+    },
     # SVC-431: support settled a dispute the customer raised. Consumer only,
     # English. {amount} is the dispute's refund, pre-formatted with the ₹ sign.
     "dispute_refunded": {
@@ -568,6 +581,38 @@ def _assigned_pro_who_parts(db, booking) -> tuple | None:
     return (row.display_name, row.business_name, row.user_id == row.service_provider_id)
 
 
+def _chosen_sp_unavailable_body(db, booking, template) -> str:
+    """The ``chosen_sp_unavailable`` copy (SVC-479): the chosen SP's business
+    name, else their name, else "Your pro"; with the refund line when the
+    booking was refunded (a paid one, cancelled by the system)."""
+    from sqlalchemy import select as sync_select
+
+    from app.models.provider_profile import ProviderProfile
+    from app.models.user import User
+
+    name = None
+    if booking.chosen_sp_id is not None:
+        # provider_profiles' key is its own id; the SP is its user_id.
+        row = db.execute(
+            sync_select(ProviderProfile.business_name, User.name)
+            .join(User, User.id == ProviderProfile.user_id)
+            .where(ProviderProfile.user_id == booking.chosen_sp_id)
+        ).one_or_none()
+        if row is not None:
+            name = row.business_name or row.name
+    sp = _truncate(name.strip(), 40) if name and name.strip() else "Your pro"
+    if booking.status is BookingStatus.CANCELLED and booking.payment_status in (
+        PaymentStatus.PAID,
+        PaymentStatus.REFUND_PROCESSING,
+        PaymentStatus.REFUNDED,
+    ):
+        from app.utils.money import to_paise
+
+        amount = _format_rupees(to_paise(booking.service_amount - booking.discount_amount))
+        return template["body_refunded"].format(sp=sp, amount=amount)
+    return template["body"].format(sp=sp)
+
+
 def _team_pro_user(db, professional_id):
     """The user behind a team Pro, or None for no Pro or the Pro-for-self (SVC-348).
 
@@ -667,6 +712,10 @@ def _expire_unbroadcastable(db, booking, reason: str) -> None:
         booking.id,
         reason,
     )
+    # SVC-479: the customer picked this SP, so "nobody nearby" isn't the story,
+    # and the app can re-pick. After the commit, so the push names a real end.
+    if booking.chosen_sp_id is not None:
+        send_booking_notification.delay(booking_id=str(booking.id), event="chosen_sp_unavailable")
 
 
 def _log_no_providers(db, booking, service_ids, address) -> None:
@@ -709,6 +758,22 @@ def notify_reopened(booking_id) -> None:
     other booking push."""
     send_booking_notification.delay(booking_id=str(booking_id), event="reopened")
     send_booking_notification.delay(booking_id=str(booking_id), event="new_request")
+
+
+def notify_reopen_outcome(booking) -> None:
+    """What the three reopen routes (release, provider cancel, Pro decline) send
+    after ``BookingService.reopen``.
+
+    A booking back at REQUESTED is a reopen, told and re-broadcast as before
+    (``notify_reopened``). One with a chosen SP has ended there instead
+    (SVC-479); the service has already queued its ``chosen_sp_unavailable``
+    push, so there is no "reopened" push and nothing to broadcast. Only those
+    two are skipped; every other push of those routes is sent as before.
+    """
+    from app.models.booking import BookingStatus
+
+    if booking.status is BookingStatus.REQUESTED:
+        notify_reopened(booking.id)
 
 
 @celery_app.task(
@@ -956,6 +1021,9 @@ def send_booking_notification(
                     return provider_push_copy("pro_declined", lang, pro=pro_name)
 
                 recipients = [booking.provider]
+            elif event == "chosen_sp_unavailable":
+                body = _chosen_sp_unavailable_body(db, booking, template)
+                recipients = [booking.consumer]
             elif event in DISPUTE_PUSH_EVENTS:
                 from app.models.booking_dispute import BookingDispute
 
