@@ -1050,8 +1050,12 @@ async def test_expire_abandoned_payments_flips_stale_pending(db_session):
         .where(Booking.payment_status == PaymentStatus.PENDING)
         .where(Booking.created_at < cutoff)
         .values(payment_status=PaymentStatus.EXPIRED)
+        .returning(Booking.id)
     )
-    assert result.rowcount == 1
+    # Checked against this test's own booking, not rowcount: the query covers the
+    # whole table, so rows other tests committed to the shared DB can match too
+    # once a slow run ages them past the cutoff (SVC-264).
+    assert booking.id in set(result.scalars().all())
 
     await db_session.refresh(booking)
     assert booking.payment_status is PaymentStatus.EXPIRED
@@ -1089,8 +1093,10 @@ async def test_expire_abandoned_payments_leaves_fresh_pending_alone(db_session):
         .where(Booking.payment_status == PaymentStatus.PENDING)
         .where(Booking.created_at < cutoff)
         .values(payment_status=PaymentStatus.EXPIRED)
+        .returning(Booking.id)
     )
-    assert result.rowcount == 0
+    # Scoped to this test's booking; see the stale-pending test above (SVC-264).
+    assert booking.id not in set(result.scalars().all())
 
     await db_session.refresh(booking)
     assert booking.payment_status is PaymentStatus.PENDING
@@ -1174,8 +1180,12 @@ async def test_expire_abandoned_payments_ignores_paid_and_cash(db_session):
         .where(Booking.payment_status == PaymentStatus.PENDING)
         .where(Booking.created_at < cutoff)
         .values(payment_status=PaymentStatus.EXPIRED)
+        .returning(Booking.id)
     )
-    assert result.rowcount == 0
+    # Scoped to this test's bookings; see the stale-pending test above (SVC-264).
+    expired = set(result.scalars().all())
+    assert paid.id not in expired
+    assert cash.id not in expired
 
     await db_session.refresh(paid)
     await db_session.refresh(cash)
