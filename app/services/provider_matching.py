@@ -104,9 +104,35 @@ def _eligibility_stages(address_location) -> list[tuple[str, object]]:
     ]
 
 
-def _base_conditions(address_location) -> list:
-    """``_eligibility_stages`` without the names: the WHERE list."""
-    return [condition for _, condition in _eligibility_stages(address_location)]
+def _chosen_sp_only(booking_id):
+    """The booking names no chosen SP, or names this one (SVC-479).
+
+    The marketplace rule: a customer who picked an SP is offered to that SP
+    alone. Being here, in the conditions every eligibility statement shares,
+    is what makes the push, the offer view and poll, accept, the paid second
+    offer and support's retry all follow it with no check of their own.
+
+    TRUE for a booking whose ``chosen_sp_id`` is NULL, so those match exactly
+    as before. The booking is aliased so this subquery reads its own
+    ``bookings`` row even inside a query that already selects from bookings.
+    Correlated on ``ProviderProfile.user_id``.
+    """
+    chosen = aliased(Booking)
+    return ~exists().where(
+        chosen.id == booking_id,
+        chosen.chosen_sp_id.is_not(None),
+        chosen.chosen_sp_id != ProviderProfile.user_id,
+    )
+
+
+def _base_conditions(address_location, booking_id=None) -> list:
+    """``_eligibility_stages`` without the names: the WHERE list. With a
+    ``booking_id``, also the chosen-SP rule (SVC-479); without one (a booking
+    not created yet, or a test of the rules alone), only the SP's own state."""
+    conditions = [condition for _, condition in _eligibility_stages(address_location)]
+    if booking_id is not None:
+        conditions.append(_chosen_sp_only(booking_id))
+    return conditions
 
 
 def _not_already_answered(booking_id):
@@ -119,7 +145,7 @@ def _not_already_answered(booking_id):
     )
 
 
-def eligible_provider_conditions(service_id, address_location) -> list:
+def eligible_provider_conditions(service_id, address_location, booking_id=None) -> list:
     """WHERE conditions selecting the providers eligible for one booking.
 
     A provider qualifies when they are subscribed to the booked service, online,
@@ -143,15 +169,16 @@ def eligible_provider_conditions(service_id, address_location) -> list:
     assigned the job.
 
     ``address_location`` is the address's geography value, passed in rather than
-    re-queried so the caller controls the fetch.
+    re-queried so the caller controls the fetch. ``booking_id`` adds the
+    chosen-SP rule (SVC-479, ``_chosen_sp_only``).
     """
     return [
         ProviderServiceModel.service_id == service_id,
-        *_base_conditions(address_location),
+        *_base_conditions(address_location, booking_id),
     ]
 
 
-def eligible_providers_stmt(service_id, address_location) -> Select:
+def eligible_providers_stmt(service_id, address_location, booking_id=None) -> Select:
     """Select the ``User`` rows that should receive a broadcast for one service.
 
     Preserved verbatim from the pre-cart era for callers that still need the
@@ -162,11 +189,11 @@ def eligible_providers_stmt(service_id, address_location) -> Select:
         select(User)
         .join(ProviderProfile, User.id == ProviderProfile.user_id)
         .join(ProviderServiceModel, ProviderServiceModel.provider_id == ProviderProfile.user_id)
-        .where(*eligible_provider_conditions(service_id, address_location))
+        .where(*eligible_provider_conditions(service_id, address_location, booking_id))
     )
 
 
-def is_eligible_provider_stmt(service_id, address_location, provider_id) -> Select:
+def is_eligible_provider_stmt(service_id, address_location, provider_id, booking_id=None) -> Select:
     """Select ``1`` when this specific provider is eligible for one service.
 
     The membership test behind the broadcast: narrowing the same query rather than
@@ -178,7 +205,7 @@ def is_eligible_provider_stmt(service_id, address_location, provider_id) -> Sele
         .join(ProviderServiceModel, ProviderServiceModel.provider_id == ProviderProfile.user_id)
         .where(
             ProviderProfile.user_id == provider_id,
-            *eligible_provider_conditions(service_id, address_location),
+            *eligible_provider_conditions(service_id, address_location, booking_id),
         )
         .limit(1)
     )
@@ -189,7 +216,9 @@ def is_eligible_provider_stmt(service_id, address_location, provider_id) -> Sele
 # ---------------------------------------------------------------------------
 
 
-def eligible_providers_multi_stmt(service_ids: Sequence, address_location) -> Select:
+def eligible_providers_multi_stmt(
+    service_ids: Sequence, address_location, booking_id=None
+) -> Select:
     """``User`` rows that should receive a broadcast for a whole cart.
 
     A provider qualifies only if they are subscribed to **every** service in
@@ -213,11 +242,11 @@ def eligible_providers_multi_stmt(service_ids: Sequence, address_location) -> Se
     """
     service_ids = list(service_ids)
     if len(service_ids) == 1:
-        return eligible_providers_stmt(service_ids[0], address_location)
+        return eligible_providers_stmt(service_ids[0], address_location, booking_id)
 
     # Same conditions as the single-service form, minus the single-service
     # equality — that's replaced by the IN + HAVING pair below.
-    base_conditions = _base_conditions(address_location)
+    base_conditions = _base_conditions(address_location, booking_id)
     return (
         select(User)
         .join(ProviderProfile, User.id == ProviderProfile.user_id)
@@ -246,9 +275,10 @@ def broadcast_recipients_stmt(service_ids: Sequence, address_location, booking_i
     unanswered, so for those this is exactly ``eligible_providers_multi_stmt``.
 
     Eligibility itself, and so who may *accept*, is unchanged: this narrows who
-    is pushed, not who is allowed.
+    is pushed, not who is allowed. Passing ``booking_id`` on is what applies the
+    chosen-SP rule (SVC-479) to every broadcast.
     """
-    return eligible_providers_multi_stmt(service_ids, address_location).where(
+    return eligible_providers_multi_stmt(service_ids, address_location, booking_id).where(
         _not_already_answered(booking_id)
     )
 
@@ -263,6 +293,9 @@ FUNNEL_REASONS = {
     "online": "none_online",
     "in_service_area": "none_in_service_area",
     "has_someone_to_do_it": "none_has_someone_to_do_it",
+    # SVC-479: only for a booking with a chosen SP. Other SPs passed every
+    # stage above, but the one the customer picked didn't.
+    "chosen_sp": "chosen_sp_not_eligible",
     "not_already_answered": "all_already_answered",
 }
 
@@ -282,9 +315,16 @@ def broadcast_funnel(db, service_ids: Sequence, address_location, booking_id) ->
     ``has_someone_to_do_it`` EXISTS clauses correlate on it by name, so an alias
     there would silently bind them to the wrong table.
 
-    Takes the sync session: its only caller is the Celery broadcast.
+    A booking with a chosen SP (SVC-479) gets a ``chosen_sp`` stage after the
+    SP's own conditions, so a zero there reads ``chosen_sp_not_eligible``
+    rather than a bare count. A booking without one has no such key, and its
+    counts are exactly what they were.
+
+    Takes a sync session: the Celery broadcast's, or support's retry through
+    ``run_sync``.
     """
     service_ids = list(service_ids)
+    chosen_sp_id = db.scalar(select(Booking.chosen_sp_id).where(Booking.id == booking_id))
     covers = (
         select(ProviderServiceModel.provider_id)
         .where(ProviderServiceModel.service_id.in_(service_ids))
@@ -294,6 +334,7 @@ def broadcast_funnel(db, service_ids: Sequence, address_location, booking_id) ->
     )
     stages = [
         *_eligibility_stages(address_location),
+        *([("chosen_sp", _chosen_sp_only(booking_id))] if chosen_sp_id is not None else []),
         ("not_already_answered", _not_already_answered(booking_id)),
     ]
     # One provider_profiles row per SP, so a plain COUNT is per SP.
@@ -320,7 +361,9 @@ def funnel_reason(counts: dict[str, int]) -> str:
     return "unknown"
 
 
-def is_eligible_provider_multi_stmt(service_ids: Sequence, address_location, provider_id) -> Select:
+def is_eligible_provider_multi_stmt(
+    service_ids: Sequence, address_location, provider_id, booking_id=None
+) -> Select:
     """Select ``1`` when this specific provider is eligible for every service
     in the cart.
 
@@ -329,12 +372,16 @@ def is_eligible_provider_multi_stmt(service_ids: Sequence, address_location, pro
     function (rather than "call the multi variant with a list") so the
     single-service call site's error messages and OpenAPI descriptions
     remain unambiguous.
+
+    Every caller acting on an existing booking passes its ``booking_id``, which
+    adds the chosen-SP rule (SVC-479). ``create_booking`` checks the chosen SP
+    before the booking exists, so it passes none.
     """
     service_ids = list(service_ids)
     if len(service_ids) == 1:
-        return is_eligible_provider_stmt(service_ids[0], address_location, provider_id)
+        return is_eligible_provider_stmt(service_ids[0], address_location, provider_id, booking_id)
 
-    base_conditions = _base_conditions(address_location)
+    base_conditions = _base_conditions(address_location, booking_id)
     return (
         select(ProviderProfile.user_id)
         .join(User, User.id == ProviderProfile.user_id)

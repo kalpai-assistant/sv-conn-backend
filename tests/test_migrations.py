@@ -1780,3 +1780,65 @@ def test_svc_408_adds_pricing_schema_backfills_and_round_trips(scratch_db):
     finally:
         engine.dispose()
     assert _matviews(scratch_db) == views_before
+
+
+# --- SVC-479: bookings.chosen_sp_id ------------------------------------------------
+
+
+SVC_479 = "d9bbf36bb62a"
+BEFORE_SVC_479 = SVC_408
+
+
+def test_svc_479_adds_chosen_sp_id_and_round_trips(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_408)
+    ids = _seed_before_svc_408(scratch_db)
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_479)
+    before = _shape(scratch_db, "bookings")
+    views_before = _matviews(scratch_db)
+
+    _alembic(scratch_db, "upgrade", SVC_479)
+    after = _shape(scratch_db, "bookings")
+    assert ("chosen_sp_id", "UUID", True) in after["columns"]
+    assert (
+        "fk_bookings_chosen_sp_id",
+        ("chosen_sp_id",),
+        "provider_profiles",
+        ("user_id",),
+        "RESTRICT",
+    ) in after["foreign_keys"]
+    assert (
+        "ix_bookings_chosen_sp_id",
+        ("chosen_sp_id",),
+        False,
+        "(chosen_sp_id IS NOT NULL)",
+    ) in after["indexes"]
+    # Existing bookings stay the open broadcast: no backfill.
+    rows = _query(scratch_db, "SELECT chosen_sp_id FROM bookings")
+    assert rows and all(row["chosen_sp_id"] is None for row in rows)
+
+    # Only an SP can be chosen, and a chosen SP can't be hard-deleted.
+    _refused_by(
+        scratch_db,
+        f"UPDATE bookings SET chosen_sp_id = '{ids['consumer']}' WHERE id = '{ids['plain']}'",
+        "fk_bookings_chosen_sp_id",
+    )
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE bookings SET chosen_sp_id = :sp WHERE id = :b"),
+                {"sp": ids["sp"], "b": ids["plain"]},
+            )
+    finally:
+        engine.dispose()
+    _refused_by(
+        scratch_db,
+        f"DELETE FROM provider_profiles WHERE user_id = '{ids['sp']}'",
+        "fk_bookings_chosen_sp_id",
+    )
+    assert _matviews(scratch_db) == views_before
+
+    # Down with a chosen SP still set: the column just goes.
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_479)
+    assert _shape(scratch_db, "bookings") == before
+    assert _matviews(scratch_db) == views_before

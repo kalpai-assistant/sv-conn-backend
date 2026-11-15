@@ -21,7 +21,7 @@ from app.schemas.booking import (
 )
 from app.schemas.team import AssignRequest, TeamPickPro, TeamPickResponse
 from app.services.booking_service import BookingService
-from app.tasks.notification_tasks import notify_reopened, send_booking_notification
+from app.tasks.notification_tasks import notify_reopen_outcome, send_booking_notification
 from app.tasks.payment_tasks import process_cash_payment
 from app.utils.idempotency import IdempotencyStore, hash_body
 from app.utils.rate_limiter import rate_limit
@@ -43,7 +43,9 @@ router = APIRouter(prefix="/bookings", tags=["Bookings"])
     responses={
         409: {
             "description": "A request with this Idempotency-Key is already in "
-            "progress. Retry after a short backoff."
+            "progress. Retry after a short backoff. Or SP_UNAVAILABLE (SVC-479): "
+            "the chosen sp_id can't take this cart right now; no booking was "
+            "created, so pick another SP."
         },
         422: {
             "description": "Idempotency-Key was reused with a different request "
@@ -74,6 +76,7 @@ async def create_booking(
             scheduled_at=request.scheduled_at,
             payment_method=request.payment_method,
             coupon_code=request.coupon_code,
+            sp_id=request.sp_id,
         )
         send_booking_notification.delay(booking_id=str(booking.id), event="new_request")
         return BookingResponse.for_viewer(booking, current_user.id)
@@ -261,7 +264,7 @@ async def release_booking(
     it is broadcast again to everyone except me. Only before anyone sets off.
     """
     booking = await BookingService(db).release(booking_id=booking_id, sp_id=current_user.id)
-    notify_reopened(booking.id)
+    notify_reopen_outcome(booking)
     return BookingResponse.for_viewer(booking, current_user.id)
 
 
@@ -395,7 +398,7 @@ async def cancel_booking(
         booking_id=booking_id, user_id=current_user.id, reason=request.reason
     )
     if outcome == "reopened":
-        notify_reopened(booking.id)
+        notify_reopen_outcome(booking)
         return BookingResponse.for_viewer(booking, current_user.id)
     # SVC-278: cancel was the only lifecycle transition that told nobody, so
     # the other party found out by opening the app — a provider could travel to

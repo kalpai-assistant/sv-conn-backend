@@ -78,6 +78,8 @@ JOB_NOT_FOUND = "JOB_NOT_FOUND"
 PROVIDER_EN_ROUTE = "PROVIDER_EN_ROUTE"
 # SVC-326: the SP has switched off taking jobs itself.
 SELF_NOT_TAKING_JOBS = "SELF_NOT_TAKING_JOBS"
+# SVC-479: the SP the customer picked can't be offered this booking right now.
+SP_UNAVAILABLE = "SP_UNAVAILABLE"
 
 # Admin timeline tie-break (SVC-333), see ``admin_timeline``. A Pro arriving
 # (claimed / repicked) sorts after a status row stamped the same instant; any
@@ -337,6 +339,7 @@ class BookingService:
         scheduled_at: datetime | None = None,
         payment_method: str = "online",
         coupon_code: str | None = None,
+        sp_id: uuid.UUID | None = None,
     ) -> Booking:
         """Create a booking from a cart of one or more services.
 
@@ -357,6 +360,13 @@ class BookingService:
            cart at creation because no provider is currently online would
            surface "no pros nearby" as a POST failure instead of the
            tracking-screen state the frontend already handles (5.7).
+
+        ``sp_id`` (SVC-479) is the SP the customer picked in the marketplace.
+        That one SP *is* checked here, with the same rules the broadcast uses,
+        for every service in the cart: the customer chose them, so "they can't
+        take it" is an answer the app can act on at once by re-picking (409
+        ``SP_UNAVAILABLE``, nothing written). Without ``sp_id`` none of this
+        runs and the booking is the open broadcast it always was.
         """
         if not items:
             raise ValueError("Booking must have at least one service")
@@ -399,6 +409,9 @@ class BookingService:
                         f"Variant {item.service_variant_id} not found, inactive, "
                         f"or does not belong to service {item.service_id}"
                     )
+
+        if sp_id is not None:
+            await self._require_chosen_sp_eligible(sp_id, service_ids, address_id)
 
         # Legacy split (SVC-150) used for services that don't yet carry
         # variants — the pre-Pune-pricing rows. Once every seed row has a
@@ -504,6 +517,10 @@ class BookingService:
             discount_amount=discount_amount,
             payment_method=payment_method,
         )
+        if sp_id is not None:
+            # Set only when given, so a booking without one is built exactly
+            # as before.
+            booking.chosen_sp_id = sp_id
         self.db.add(booking)
         await self.db.flush()
 
@@ -598,6 +615,30 @@ class BookingService:
 
         return booking
 
+    async def _require_chosen_sp_eligible(
+        self, sp_id: uuid.UUID, service_ids: list[uuid.UUID], address_id: uuid.UUID
+    ) -> None:
+        """409 ``SP_UNAVAILABLE`` unless ``sp_id`` passes the broadcast's
+        eligibility rules for the whole cart at this address (SVC-479).
+
+        No ``booking_id`` goes to the statement: the booking doesn't exist yet,
+        and the chosen-SP rule it would add is about this very SP. An address
+        with no location fails it, as the broadcast would.
+        """
+        address = await self.db.get(Address, address_id)
+        location = address.location if address is not None else None
+        eligible = None
+        if location is not None:
+            eligible = (
+                await self.db.execute(is_eligible_provider_multi_stmt(service_ids, location, sp_id))
+            ).scalar_one_or_none()
+        if eligible is None:
+            raise AppException(
+                "This professional can't take your booking right now. Please pick another.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=SP_UNAVAILABLE,
+            )
+
     # ------------------------------------------------------------------
     # Fetch single booking
     # ------------------------------------------------------------------
@@ -673,7 +714,9 @@ class BookingService:
 
         service_ids = [item.service_id for item in booking.items]
         eligible = await self.db.execute(
-            is_eligible_provider_multi_stmt(service_ids, address.location, provider_id)
+            is_eligible_provider_multi_stmt(
+                service_ids, address.location, provider_id, booking_id=booking.id
+            )
         )
         if eligible.scalar_one_or_none() is None:
             raise UnauthorizedAction("You were not offered this booking", code="NOT_OFFERED")
@@ -824,6 +867,7 @@ class BookingService:
                         [item.service_id for item in booking.items],
                         address.location,
                         provider_id,
+                        booking_id=booking.id,
                     )
                 )
                 if eligible.scalar_one_or_none() is None:
@@ -862,6 +906,10 @@ class BookingService:
         exist. Declining an already-answered offer is a no-op rather than an
         error: the provider's intent is satisfied either way, and the common
         cause is a double tap.
+
+        SVC-479: when the decliner is the booking's chosen SP, nobody else can
+        be offered it, so the booking ends here (``_end_for_chosen_sp``) instead
+        of waiting out the timer.
         """
         row = (
             await self.db.execute(
@@ -877,6 +925,20 @@ class BookingService:
 
         if row.response is not None:
             return
+
+        booking = await self.db.get(Booking, booking_id)
+        if booking is not None and booking.chosen_sp_id == provider_id:
+            # Locked and re-read, so a sweep or an accept that got there first
+            # is seen: then it's only a decline, as below.
+            booking = await self.db.get(
+                Booking, booking_id, with_for_update=True, populate_existing=True
+            )
+            if booking.status is BookingStatus.REQUESTED and booking.provider_id is None:
+                row.response = OfferResponse.DECLINED
+                row.responded_at = datetime.now(UTC)
+                await self._end_for_chosen_sp(booking, reason="chosen_sp_declined")
+                await self.db.commit()
+                return
 
         row.response = OfferResponse.DECLINED
         row.responded_at = datetime.now(UTC)
@@ -1014,7 +1076,9 @@ class BookingService:
             await self.attach_items([booking])
             service_ids = [item.service_id for item in booking.items]
             eligible = await self.db.execute(
-                is_eligible_provider_multi_stmt(service_ids, address.location, provider_id)
+                is_eligible_provider_multi_stmt(
+                    service_ids, address.location, provider_id, booking_id=booking.id
+                )
             )
             if eligible.scalar_one_or_none() is None:
                 # 403 here is correct — this is "you should never have been able
@@ -1410,6 +1474,13 @@ class BookingService:
           cycle afresh: a full window, then the second offer (SVC-344).
 
         The router enqueues the consumer push and the re-broadcast after commit.
+
+        SVC-479: a booking with a chosen SP has nobody else to go to, so once it
+        is back at REQUESTED it ends straight away (``_end_for_chosen_sp``), for
+        all three callers. Ended from REQUESTED, not ACCEPTED, so a paid one
+        refunds in full with no cancellation fee. The router's
+        ``notify_reopen_outcome`` then sends no "reopened" push and no
+        re-broadcast.
         """
         allowed = VALID_TRANSITIONS.get(booking.status, [])
         if BookingStatus.REQUESTED not in allowed:
@@ -1449,6 +1520,10 @@ class BookingService:
                 "released_by_provider": str(releasing_sp) if releasing_sp else None,
             },
         )
+        if booking.chosen_sp_id is not None:
+            await self._end_for_chosen_sp(
+                booking, reason="chosen_sp_released", reopen_reason=reason
+            )
         await self.db.flush()
         await self.attach_addresses([booking])
         await self.attach_items([booking])
@@ -1461,6 +1536,54 @@ class BookingService:
             releasing_sp,
         )
         return booking
+
+    async def _end_for_chosen_sp(
+        self, booking: Booking, reason: str, reopen_reason: str | None = None
+    ) -> None:
+        """End a REQUESTED booking whose chosen SP won't take it (SVC-479).
+
+        The caller holds the row lock. No re-broadcast and no timer: the
+        customer picked this SP, and offering it to someone else at this SP's
+        price is what the marketplace must not do.
+
+        * PAID → the no-taker system cancel, a full refund. If Razorpay refuses,
+          that raises and the caller's whole transaction rolls back.
+        * otherwise (cash, or not paid yet) → EXPIRED, which needs no refund.
+
+        Then one consumer push, ``chosen_sp_unavailable``, after commit. It
+        replaces ``no_taker_refunded``, so a refunded customer hears once.
+        """
+        metadata = {"actor": "system", "reason": reason}
+        if reopen_reason is not None:
+            metadata["reopen_reason"] = reopen_reason
+        if booking.payment_status is PaymentStatus.PAID:
+            await self._system_cancel_no_taker(booking, metadata=metadata)
+        else:
+            booking.status = BookingStatus.EXPIRED
+            booking.doorstep_otp = None
+            await self._log_transition(
+                booking_id=booking.id,
+                from_status=BookingStatus.REQUESTED.value,
+                to_status=BookingStatus.EXPIRED.value,
+                changed_by=None,
+                metadata=metadata,
+                note=f"system: {reason}",
+            )
+            await self.db.flush()
+        logger.info(
+            "booking.chosen_sp_ended booking_id=%s reason=%s status=%s",
+            booking.id,
+            reason,
+            booking.status.value,
+        )
+        booking_key = str(booking.id)
+
+        def _push() -> None:
+            from app.tasks.notification_tasks import send_booking_notification
+
+            send_booking_notification.delay(booking_id=booking_key, event="chosen_sp_unavailable")
+
+        call_after_commit(self.db, _push)
 
     async def transition_status(
         self,
@@ -1718,7 +1841,7 @@ class BookingService:
         await self._system_cancel_no_taker(booking)
         return "refunded"
 
-    async def _system_cancel_no_taker(self, booking: Booking) -> None:
+    async def _system_cancel_no_taker(self, booking: Booking, metadata: dict | None = None) -> None:
         """REQUESTED → CANCELLED by the system, refunding everything the
         customer paid.
 
@@ -1727,6 +1850,9 @@ class BookingService:
         is idempotent on the payment row. If Razorpay refuses, that raises and
         the caller's transaction rolls this whole cancel back: the booking stays
         REQUESTED + PAID for the next sweep, never "cancelled" without a refund.
+
+        ``metadata`` replaces the status log's ``no_taker`` reason, for a chosen
+        SP that turned the booking down (SVC-479).
         """
         old_status = booking.status
         booking.status = BookingStatus.CANCELLED
@@ -1739,7 +1865,7 @@ class BookingService:
             to_status=BookingStatus.CANCELLED.value,
             # NULL: the system, not a person.
             changed_by=None,
-            metadata={"actor": "system", "reason": "no_taker"},
+            metadata=metadata or {"actor": "system", "reason": "no_taker"},
             note="system: no professional available",
         )
         await self.db.flush()

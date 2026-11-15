@@ -52,6 +52,11 @@ class CreateBookingRequest(BaseModel):
     # stale/invalid code fails the whole request rather than silently placing
     # a booking at the un-discounted price the app didn't render.
     coupon_code: str | None = Field(default=None, max_length=32)
+    # SVC-479: the SP the customer picked in the marketplace
+    # (``provider_profiles.user_id``, as in ``sp_service_pricing.sp_id``). Only
+    # that SP is offered the booking; one who can't take it right now is a 409
+    # ``SP_UNAVAILABLE`` and no booking. Omitted = the open broadcast.
+    sp_id: UUID | None = None
 
     @model_validator(mode="after")
     def _normalise_items(self) -> "CreateBookingRequest":
