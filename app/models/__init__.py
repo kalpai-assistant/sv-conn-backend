@@ -43,6 +43,7 @@ from app.models.service import Service  # noqa: F401
 from app.models.service_relationship import RelationshipType, ServiceRelationship  # noqa: F401
 from app.models.service_variant import ServiceVariant  # noqa: F401
 from app.models.settlement_statement import SettlementStatement  # noqa: F401
+from app.models.sp_service_pricing import SpServicePricing  # noqa: F401
 from app.models.user import User, UserRole  # noqa: F401
 
 register_create_all_hook(Base.metadata)

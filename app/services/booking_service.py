@@ -495,6 +495,8 @@ class BookingService:
             scheduled_at=scheduled_at,
             doorstep_otp=self._generate_doorstep_otp(),
             service_amount=total_service_amount,
+            # SVC-408: the cart total until SVC-411 locks in the SP's price.
+            locked_price=total_service_amount,
             platform_commission=total_platform_commission,
             provider_payout=total_provider_payout,
             # Decimal end to end since SVC-181 (was via float(); see the
