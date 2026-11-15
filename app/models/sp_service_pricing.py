@@ -34,8 +34,8 @@ class SpServicePricing(Base):
     services are soft-deleted, so a hard delete that would orphan a price has to
     clean the price up first.
 
-    Nothing reads or writes this table yet: the SP pricing surface is SVC-412 and
-    the ranking SVC-409.
+    The ranking sheet (SVC-409) reads it: an SP is listed for a service only
+    with an active row. Nothing writes it yet; the SP pricing surface is SVC-412.
     """
 
     __tablename__ = "sp_service_pricing"
