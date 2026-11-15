@@ -26,8 +26,9 @@ SUPPORT_REFUND_LIMIT_DEFAULT = 500
 class PricingConfig(Base):
     """Marketplace-wide pricing knobs, one JSON value per key (SVC-428).
 
-    Edited at /admin/pricing/config. Nothing reads them yet: the ranking formula
-    and boost window are SVC-406 / SVC-414, the sheet TTL SVC-411.
+    Edited at /admin/pricing/config. The ranking sheet (SVC-409,
+    ``ranking_service``) reads ``ranking_weights``, the boost window and
+    ``sheet_ttl_seconds``, cached 60 s; the price lock is SVC-411.
     ``updated_by`` is NULL on the migration's seed rows.
     """
 

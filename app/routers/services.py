@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import require_roles
+from app.dependencies import get_current_user, require_roles
 from app.models.service import Service
 from app.models.user import User
+from app.schemas.ranking import ServiceProvidersResponse
 from app.schemas.service import (
     CategoryResponse,
     CreateServiceRequest,
@@ -16,6 +17,7 @@ from app.schemas.service import (
 )
 from app.services.admin_audit import audit_actor, audit_admin_action, snapshot
 from app.services.catalog_service import CatalogService
+from app.services.ranking_service import RankingService
 
 router = APIRouter(tags=["Catalog"])
 
@@ -58,6 +60,25 @@ async def get_service(
     request.
     """
     return await CatalogService(db).get_service_detail(service_id)
+
+
+@router.get("/services/{service_id}/providers", response_model=ServiceProvidersResponse)
+async def rank_service_providers(
+    service_id: UUID,
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    limit: int = Query(50, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The SPs a customer at (lat, lng) can book this service with, best first
+    (SVC-409): the ones dispatch would offer it to that have an active price
+    for it, each with its price, signals, score and up to three "why" chips.
+
+    Needs a login, unlike the catalog: each row's distance is measured from the
+    SP's service-area centre. 404 for an unknown or inactive service.
+    """
+    return await RankingService(db).rank_providers(service_id, lat, lng, limit)
 
 
 @router.post("/services", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED)
