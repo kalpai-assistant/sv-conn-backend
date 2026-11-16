@@ -1,6 +1,6 @@
 """
 Migration round trips on a scratch database (SVC-319, SVC-339, SVC-340, SVC-320,
-SVC-344, SVC-333, SVC-329, SVC-366, SVC-408, SVC-480).
+SVC-344, SVC-333, SVC-329, SVC-366, SVC-408, SVC-480, SVC-418).
 
 The rest of the suite builds its schema with ``Base.metadata.create_all``, and CI
 only ever runs ``alembic upgrade head`` — so a migration's ``downgrade()`` is not
@@ -15,6 +15,7 @@ this one. The scratch database reaches it through ``ALEMBIC_DATABASE_URL``,
 which ``env.py`` honours in online mode.
 """
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -2173,3 +2174,278 @@ def test_seed_wipe_clears_sp_prices_first(scratch_db):
     [cat] = _query(scratch_db, f"SELECT count(*) AS n FROM categories WHERE id = '{ids['cat']}'")
     [sps] = _query(scratch_db, "SELECT count(*) AS n FROM provider_profiles")
     assert (cat["n"], sps["n"]) == (1, 1)
+
+
+# --- SVC-418: default SP price per variant (data migration) ------------------------
+
+
+SVC_418 = "471bb682ac1b"
+BEFORE_SVC_418 = SVC_480
+
+# key: (is_active, price_unit, [(variant key, base_price, is_active)])
+_SVC_418_SERVICES = {
+    "multi": (True, "PER_VISIT", [("m1", "2499.00", True), ("m2", "3999.00", True)]),
+    "multi_off_variant": (True, "PER_VISIT", [("m_off", "1999.00", False)]),
+    "per_item": (True, "PER_ITEM", [("u1", "149.50", True)]),
+    "off_service": (False, "PER_VISIT", [("o1", "999.00", True)]),
+    "unsubscribed": (True, "PER_VISIT", [("n1", "599.00", True)]),
+}
+# Who subscribes to what. sp_c subscribes to nothing.
+_SVC_418_SUBSCRIPTIONS = {
+    "sp_a": ("multi", "multi_off_variant", "per_item", "off_service"),
+    "sp_b": ("multi",),
+}
+
+
+def _engine_run(url: URL, sql: str, params: dict | None = None) -> None:
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql), params or {})
+    finally:
+        engine.dispose()
+
+
+def _seed_svc_418(url: URL) -> dict:
+    """Three SPs, a category and five services, at SVC-480. Of the subscriptions,
+    a default price is due for sp_a × (m1, m2, u1) and sp_b × (m1, m2): not for an
+    inactive variant, an inactive service, or a service nobody subscribes to."""
+    ids = {"cat": uuid.uuid4()}
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            for sp in ("sp_a", "sp_b", "sp_c"):
+                ids[sp] = uuid.uuid4()
+                conn.execute(
+                    text(
+                        "INSERT INTO users (id, phone, role, is_active) "
+                        "VALUES (:id, :phone, 'PROVIDER', true)"
+                    ),
+                    {"id": ids[sp], "phone": f"+9{ids[sp].int % 10**11:011d}"},
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO provider_profiles (id, user_id, service_area_radius_km, "
+                        "avg_rating, total_completed_jobs, kyc_status, is_online) "
+                        "VALUES (:id, :user_id, 10, 4.5, 7, 'VERIFIED', true)"
+                    ),
+                    {"id": uuid.uuid4(), "user_id": ids[sp]},
+                )
+            conn.execute(
+                text(
+                    "INSERT INTO categories (id, name, slug, is_active, sort_order) "
+                    "VALUES (:id, 'SVC-418 cat', 'svc-418-cat', true, 1)"
+                ),
+                {"id": ids["cat"]},
+            )
+            for key, (active, unit, variants) in _SVC_418_SERVICES.items():
+                ids[key] = uuid.uuid4()
+                conn.execute(
+                    text(
+                        "INSERT INTO services (id, category_id, name, base_price, "
+                        "duration_minutes, is_active, price_unit) "
+                        "VALUES (:id, :cat, :name, 100, 60, :active, :unit)"
+                    ),
+                    {
+                        "id": ids[key],
+                        "cat": ids["cat"],
+                        "name": key,
+                        "active": active,
+                        "unit": unit,
+                    },
+                )
+                for order, (v_key, price, v_active) in enumerate(variants):
+                    ids[v_key] = uuid.uuid4()
+                    conn.execute(
+                        text(
+                            "INSERT INTO service_variants (id, service_id, label, base_price, "
+                            "provider_payout, platform_commission, sort_order, is_active) "
+                            "VALUES (:id, :svc, :label, :price, :price * 0.8, :price * 0.2, "
+                            ":order, :active)"
+                        ),
+                        {
+                            "id": ids[v_key],
+                            "svc": ids[key],
+                            "label": v_key,
+                            "price": Decimal(price),
+                            "order": order,
+                            "active": v_active,
+                        },
+                    )
+            for sp, services in _SVC_418_SUBSCRIPTIONS.items():
+                for key in services:
+                    conn.execute(
+                        text(
+                            "INSERT INTO provider_services (id, provider_id, service_id) "
+                            "VALUES (:id, :sp, :svc)"
+                        ),
+                        {"id": uuid.uuid4(), "sp": ids[sp], "svc": ids[key]},
+                    )
+    finally:
+        engine.dispose()
+    return ids
+
+
+def _svc_418_id(sp, variant) -> uuid.UUID:
+    """The id the backfill derives for (sp, variant), computed independently."""
+    return uuid.UUID(hashlib.md5(f"svc-418:{sp}:{variant}".encode()).hexdigest())
+
+
+def _prices(url: URL) -> dict:
+    """``{(sp_id, variant_id): row}`` for every price row."""
+    return {
+        (row["sp_id"], row["service_variant_id"]): dict(row)
+        for row in _query(
+            url,
+            "SELECT id, sp_id, service_id, service_variant_id, price_amount, price_unit, "
+            "is_active, created_at, updated_at FROM sp_service_pricing",
+        )
+    }
+
+
+def _dry_run(url: URL) -> dict:
+    from scripts.dry_run_default_sp_prices import collect
+
+    return collect(url.render_as_string(hide_password=False))
+
+
+def _sp_price_row(url: URL, sp, service, variant, price: str) -> uuid.UUID:
+    """A price the SP set itself: a random id, like the app's."""
+    row_id = uuid.uuid4()
+    _engine_run(
+        url,
+        "INSERT INTO sp_service_pricing (id, sp_id, service_id, service_variant_id, "
+        "price_amount, price_unit) VALUES (:id, :sp, :svc, :v, :price, 'PER_VISIT')",
+        {"id": row_id, "sp": sp, "svc": service, "v": variant, "price": Decimal(price)},
+    )
+    return row_id
+
+
+def test_svc_418_backfills_one_price_per_active_variant_and_is_idempotent(scratch_db):
+    from app.seed_data.svc_418_default_prices import backfill_default_prices
+
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_418)
+    ids = _seed_svc_418(scratch_db)
+    # sp_b already priced m1 itself, below the platform price.
+    own_id = _sp_price_row(scratch_db, ids["sp_b"], ids["multi"], ids["m1"], "2299.00")
+    own_before = _prices(scratch_db)
+    shape_before = _shape(scratch_db, "sp_service_pricing")
+    views_before = _matviews(scratch_db)
+
+    counts = _dry_run(scratch_db)
+    assert counts == {
+        "subscriptions": 5,
+        "active_subscriptions": 4,  # not sp_a's off_service
+        "sps": 2,
+        "candidates": 5,  # sp_a × m1, m2, u1; sp_b × m1, m2
+        "already_present": 1,
+        "to_insert": 4,
+    }
+    # The dry run wrote nothing.
+    assert _prices(scratch_db) == own_before
+
+    _alembic(scratch_db, "upgrade", SVC_418)
+
+    prices = _prices(scratch_db)
+    expected = {
+        ("sp_a", "multi", "m1", "2499.00", "PER_VISIT"),
+        ("sp_a", "multi", "m2", "3999.00", "PER_VISIT"),
+        ("sp_a", "per_item", "u1", "149.50", "PER_ITEM"),
+        ("sp_b", "multi", "m2", "3999.00", "PER_VISIT"),
+    }
+    new = {key: row for key, row in prices.items() if key not in own_before}
+    assert len(new) == counts["to_insert"]
+    assert set(new) == {(ids[sp], ids[v]) for sp, _, v, _, _ in expected}
+    for sp, service, variant, price, unit in expected:
+        row = new[(ids[sp], ids[variant])]
+        assert row["id"] == _svc_418_id(ids[sp], ids[variant])
+        assert row["service_id"] == ids[service]
+        assert (row["price_amount"], row["price_unit"], row["is_active"]) == (
+            Decimal(price),
+            unit,
+            True,
+        )
+        assert row["created_at"] == row["updated_at"]
+    # sp_b's own price is untouched, at its own id and amount.
+    assert prices[(ids["sp_b"], ids["m1"])] == own_before[(ids["sp_b"], ids["m1"])]
+    assert prices[(ids["sp_b"], ids["m1"])]["id"] == own_id
+    # No row for the inactive variant, the inactive service, nor the unsubscribed one.
+    priced_variants = {variant for _, variant in prices}
+    assert not priced_variants & {ids["m_off"], ids["o1"], ids["n1"]}
+    assert not any(sp == ids["sp_c"] for sp, _ in prices)
+    # A data migration: the table and the analytics views are unchanged.
+    assert _shape(scratch_db, "sp_service_pricing") == shape_before
+    assert _matviews(scratch_db) == views_before
+
+    # Nothing left to do, and running the insert again adds nothing.
+    assert _dry_run(scratch_db)["to_insert"] == 0
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            assert backfill_default_prices(conn) == 0
+    finally:
+        engine.dispose()
+    assert _prices(scratch_db) == prices
+
+
+def test_svc_418_downgrade_removes_only_its_unedited_rows(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_418)
+    ids = _seed_svc_418(scratch_db)
+    own_id = _sp_price_row(scratch_db, ids["sp_b"], ids["multi"], ids["m1"], "2299.00")
+    _alembic(scratch_db, "upgrade", SVC_418)
+    backfilled = _prices(scratch_db)
+
+    # sp_a edits its m1 default the way SVC-412's PATCH will: a later updated_at.
+    _engine_run(
+        scratch_db,
+        "UPDATE sp_service_pricing SET price_amount = 2799, updated_at = now() "
+        "WHERE sp_id = :sp AND service_variant_id = :v",
+        {"sp": ids["sp_a"], "v": ids["m1"]},
+    )
+    # After the upgrade, a new variant appears and sp_a prices it itself.
+    ids["m3"] = uuid.uuid4()
+    _engine_run(
+        scratch_db,
+        "INSERT INTO service_variants (id, service_id, label, base_price, provider_payout, "
+        "platform_commission, sort_order, is_active) "
+        "VALUES (:id, :svc, 'm3', 4999, 3999.20, 999.80, 2, true)",
+        {"id": ids["m3"], "svc": ids["multi"]},
+    )
+    later_id = _sp_price_row(scratch_db, ids["sp_a"], ids["multi"], ids["m3"], "4499.00")
+    keep = {
+        (ids["sp_a"], ids["m1"]),  # backfilled, then edited
+        (ids["sp_a"], ids["m3"]),  # created after the upgrade
+        (ids["sp_b"], ids["m1"]),  # there before the upgrade
+    }
+    kept_before = {key: row for key, row in _prices(scratch_db).items() if key in keep}
+    assert len(kept_before) == 3
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_418)
+
+    assert _prices(scratch_db) == kept_before
+    edited = kept_before[(ids["sp_a"], ids["m1"])]
+    assert edited["id"] == _svc_418_id(ids["sp_a"], ids["m1"])  # still the derived id
+    assert edited["price_amount"] == Decimal("2799.00")
+    assert edited["updated_at"] > edited["created_at"]
+    assert kept_before[(ids["sp_a"], ids["m3"])]["id"] == later_id
+    assert kept_before[(ids["sp_b"], ids["m1"])]["id"] == own_id
+
+    # Up again: the unedited defaults come back. The edited row, which conflicts
+    # on both its id and (sp_id, service_variant_id), is skipped without error.
+    _alembic(scratch_db, "upgrade", SVC_418)
+    again = _prices(scratch_db)
+    assert again[(ids["sp_a"], ids["m1"])] == edited
+    # sp_b subscribes to "multi" too, so a re-run also defaults the m3 that was
+    # added in between; sp_a's own m3 price is kept.
+    assert set(again) == set(backfilled) | {(ids["sp_a"], ids["m3"]), (ids["sp_b"], ids["m3"])}
+    assert again[(ids["sp_a"], ids["m3"])] == kept_before[(ids["sp_a"], ids["m3"])]
+    sp_b_m3 = again[(ids["sp_b"], ids["m3"])]
+    assert (sp_b_m3["id"], sp_b_m3["price_amount"]) == (
+        _svc_418_id(ids["sp_b"], ids["m3"]),
+        Decimal("4999.00"),
+    )
+    stamps = ("created_at", "updated_at")
+    for key in set(backfilled) - keep:
+        restored = {k: v for k, v in again[key].items() if k not in stamps}
+        original = {k: v for k, v in backfilled[key].items() if k not in stamps}
+        assert restored == original
