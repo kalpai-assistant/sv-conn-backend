@@ -68,17 +68,24 @@ async def rank_service_providers(
     lat: float = Query(..., ge=-90, le=90),
     lng: float = Query(..., ge=-180, le=180),
     limit: int = Query(50, ge=1, le=50),
+    variant_id: UUID | None = Query(None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """The SPs a customer at (lat, lng) can book this service with, best first
     (SVC-409): the ones dispatch would offer it to that have an active price
-    for it, each with its price, signals, score and up to three "why" chips.
+    for the variant, each with its price, signals, score and up to three "why"
+    chips.
+
+    Prices are per variant (SVC-480): ``variant_id``, else the service's first
+    active variant, the one a booking without a variant is billed for. A service
+    with no active variant uses its variant-less prices.
 
     Needs a login, unlike the catalog: each row's distance is measured from the
-    SP's service-area centre. 404 for an unknown or inactive service.
+    SP's service-area centre. 404 for an unknown or inactive service, and for a
+    ``variant_id`` that isn't an active variant of this service.
     """
-    return await RankingService(db).rank_providers(service_id, lat, lng, limit)
+    return await RankingService(db).rank_providers(service_id, lat, lng, limit, variant_id)
 
 
 @router.post("/services", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED)

@@ -44,6 +44,9 @@ class ServiceVariant(Base):
 
     __table_args__ = (
         UniqueConstraint("service_id", "label", name="uix_variant_service_label"),
+        # The target of sp_service_pricing's (service_variant_id, service_id) FK
+        # (SVC-480), so a price can't name another service's variant.
+        UniqueConstraint("id", "service_id", name="uq_service_variants_id_service_id"),
         Index(
             "idx_variants_service_active",
             "service_id",

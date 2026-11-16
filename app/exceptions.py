@@ -51,6 +51,18 @@ class ServiceNotFound(AppException):
         )
 
 
+class ServiceVariantNotFound(AppException):
+    """A ``variant_id`` that isn't an active variant of the service asked about
+    (SVC-480): unknown, inactive, or another service's."""
+
+    def __init__(self, service_id: UUID, variant_id: UUID):
+        super().__init__(
+            f"Variant {variant_id} of service {service_id} not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="VARIANT_NOT_FOUND",
+        )
+
+
 class UserNotFound(AppException):
     def __init__(self, user_id: UUID):
         super().__init__(

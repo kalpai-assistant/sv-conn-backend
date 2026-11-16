@@ -29,6 +29,10 @@ class RankedProvider(BaseModel):
 
 class ServiceProvidersResponse(BaseModel):
     service_id: UUID
+    # The variant every listed price is for (SVC-480): the one asked for, else
+    # the service's first active variant, as create_booking picks it. NULL for a
+    # service with no active variant, priced from services.base_price.
+    service_variant_id: UUID | None
     quoted_at: datetime
     ttl_seconds: int
     providers: list[RankedProvider]
