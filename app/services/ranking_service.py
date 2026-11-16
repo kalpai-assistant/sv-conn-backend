@@ -11,7 +11,7 @@ Which variant (SVC-480: prices are per variant): the ``variant_id`` asked for,
 which must be an active variant of the service, else the service's first active
 variant by ``sort_order``, the one ``create_booking`` bills a line without a
 variant for. Its ``base_price`` is the reference price. A service whose
-variants are all switched off lists nobody.
+variants are all switched off has no variant to price, so it lists nobody.
 
 How they are ordered: the ticket's weighted score, with weights from
 ``pricing_config.ranking_weights`` cached in-process for 60 s.
@@ -383,7 +383,8 @@ class RankingService:
         weights = config.weights
         now = datetime.now(UTC)
         if resolved is None:
-            # Every variant switched off: nothing can be booked, so nobody is listed.
+            # Every variant switched off: no variant to price, so nobody is listed.
+            # (create_booking can still book it, from services.base_price.)
             return ServiceProvidersResponse(
                 service_id=service_id,
                 service_variant_id=None,

@@ -973,7 +973,7 @@ async def test_the_reference_price_is_the_variants(client, db_session, consumer_
 async def test_a_service_whose_variants_are_all_off_lists_nobody(
     client, db_session, consumer_headers
 ):
-    """Nothing can be booked, so nobody is listed: 200, no variant, no rows,
+    """No variant to price, so nobody is listed: 200, no variant, no rows,
     even for an SP whose price row is still active."""
     service = await _service(db_session, standard=False)
     retired = await _variant(db_session, service, "Old", 2000, active=False)

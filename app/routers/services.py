@@ -79,7 +79,8 @@ async def rank_service_providers(
 
     Prices are per variant (SVC-480): ``variant_id``, else the service's first
     active variant, the one a booking without a variant is billed for. A service
-    whose variants are all switched off lists nobody.
+    whose variants are all switched off has no variant to price, so it lists
+    nobody.
 
     Needs a login, unlike the catalog: each row's distance is measured from the
     SP's service-area centre. 404 for an unknown or inactive service, and for a
