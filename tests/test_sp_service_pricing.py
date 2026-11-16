@@ -1,7 +1,7 @@
 """SVC-408: the marketplace pricing schema (epic SVC-406).
 
-``sp_service_pricing`` constraints, the SP boost defaults, and
-``bookings.locked_price`` on booking creation. The migration round trip is in
+``sp_service_pricing`` constraints (per variant since SVC-480), the SP boost
+defaults, and ``bookings.locked_price`` on booking creation. The migration round trip is in
 ``tests/test_migrations.py``.
 """
 
@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from app.models.address import Address
@@ -19,9 +19,11 @@ from app.models.coupon import Coupon, DiscountType
 from app.models.price_unit import PriceUnit
 from app.models.provider_profile import ProviderProfile
 from app.models.service import Service
+from app.models.service_variant import ServiceVariant
 from app.models.sp_service_pricing import SpServicePricing
 from app.schemas.booking import CreateBookingItemRequest
 from app.services.booking_service import BookingService
+from app.services.standard_variant import standard_variant
 from tests.factories.user_factory import UserFactory
 
 
@@ -31,13 +33,15 @@ async def _service(db_session, base_price: str = "499.00") -> Service:
     db_session.add(category)
     await db_session.flush()
     service = Service(
+        id=uuid.uuid4(),
         category_id=category.id,
         name=f"SVC-408 svc {suffix}",
         base_price=Decimal(base_price),
         duration_minutes=60,
         is_active=True,
     )
-    db_session.add(service)
+    # SVC-480: every service has a variant, as the admin create paths make it.
+    db_session.add_all([service, standard_variant(service)])
     await db_session.flush()
     return service
 
@@ -50,10 +54,31 @@ async def _sp(db_session) -> ProviderProfile:
     return profile
 
 
+async def _variant(db_session, service: Service, label: str) -> ServiceVariant:
+    variant = ServiceVariant(
+        service_id=service.id,
+        label=label,
+        base_price=Decimal("2499.00"),
+        provider_payout=Decimal("1749.00"),
+        platform_commission=Decimal("750.00"),
+    )
+    db_session.add(variant)
+    await db_session.flush()
+    return variant
+
+
 async def _price(db_session, sp: ProviderProfile, service: Service, **extra) -> SpServicePricing:
+    """A price for ``service_variant_id``, else for the service's first variant."""
+    variant_id = extra.pop("service_variant_id", None) or await db_session.scalar(
+        select(ServiceVariant.id)
+        .where(ServiceVariant.service_id == service.id)
+        .order_by(ServiceVariant.sort_order, ServiceVariant.id)
+        .limit(1)
+    )
     row = SpServicePricing(
         sp_id=sp.user_id,
         service_id=service.id,
+        service_variant_id=variant_id,
         price_amount=extra.pop("price_amount", Decimal("450.00")),
         price_unit=extra.pop("price_unit", PriceUnit.PER_VISIT.value),
         **extra,
@@ -79,18 +104,68 @@ async def test_a_price_row_gets_its_defaults(db_session):
 
 
 @pytest.mark.asyncio
-async def test_one_price_per_sp_and_service(db_session):
+async def test_every_price_names_a_variant(db_session):
+    """SVC-480: no variant-less price; every service has a variant to price."""
     sp, service = await _sp(db_session), await _service(db_session)
-    await _price(db_session, sp, service)
 
-    with pytest.raises(IntegrityError, match="uq_sp_service_pricing_sp_service"):
+    with pytest.raises(IntegrityError, match="service_variant_id"):
         async with db_session.begin_nested():
-            await _price(db_session, sp, service, price_amount=Decimal("300.00"))
+            db_session.add(
+                SpServicePricing(
+                    sp_id=sp.user_id,
+                    service_id=service.id,
+                    service_variant_id=None,
+                    price_amount=Decimal("450.00"),
+                    price_unit=PriceUnit.PER_VISIT.value,
+                )
+            )
+            await db_session.flush()
 
-    # The same service priced by a second SP, and a second service by the
+
+@pytest.mark.asyncio
+async def test_one_price_per_sp_and_variant(db_session):
+    """SVC-480: an SP prices each variant of a service once."""
+    sp, service = await _sp(db_session), await _service(db_session)
+    one_bhk, two_bhk = (
+        await _variant(db_session, service, "1 BHK"),
+        await _variant(db_session, service, "2 BHK"),
+    )
+    await _price(db_session, sp, service, service_variant_id=one_bhk.id)
+    await _price(db_session, sp, service, service_variant_id=two_bhk.id)
+
+    with pytest.raises(IntegrityError, match="uq_sp_service_pricing_sp_variant"):
+        async with db_session.begin_nested():
+            await _price(db_session, sp, service, service_variant_id=one_bhk.id)
+
+    # The same variant priced by a second SP, and a second service by the
     # first SP, are both fine.
-    await _price(db_session, await _sp(db_session), service)
+    await _price(db_session, await _sp(db_session), service, service_variant_id=one_bhk.id)
     await _price(db_session, sp, await _service(db_session))
+
+
+@pytest.mark.asyncio
+async def test_a_price_cannot_name_another_services_variant(db_session):
+    sp, service, other = (
+        await _sp(db_session),
+        await _service(db_session),
+        await _service(db_session),
+    )
+    foreign = await _variant(db_session, other, "Other")
+
+    with pytest.raises(IntegrityError, match="fk_sp_service_pricing_variant"):
+        async with db_session.begin_nested():
+            await _price(db_session, sp, service, service_variant_id=foreign.id)
+
+
+@pytest.mark.asyncio
+async def test_a_priced_variant_cannot_be_hard_deleted(db_session):
+    sp, service = await _sp(db_session), await _service(db_session)
+    variant = await _variant(db_session, service, "1 BHK")
+    await _price(db_session, sp, service, service_variant_id=variant.id)
+
+    with pytest.raises(IntegrityError, match="fk_sp_service_pricing_variant"):
+        async with db_session.begin_nested():
+            await db_session.execute(delete(ServiceVariant).where(ServiceVariant.id == variant.id))
 
 
 @pytest.mark.asyncio
@@ -107,12 +182,27 @@ async def test_price_unit_must_be_a_known_unit(db_session):
 
 @pytest.mark.asyncio
 async def test_a_priced_service_cannot_be_hard_deleted(db_session):
+    """Since SVC-480 a priced service always has the priced variant, whose own FK
+    to the service fires first, so the delete is refused before
+    fk_sp_service_pricing_service_id is reached. That FK is still there and
+    RESTRICT (checked here on the model, and in the DB by test_migrations)."""
     sp, service = await _sp(db_session), await _service(db_session)
     await _price(db_session, sp, service)
 
-    with pytest.raises(IntegrityError, match="fk_sp_service_pricing_service_id"):
+    with pytest.raises(IntegrityError, match="still referenced"):
         async with db_session.begin_nested():
             await db_session.execute(delete(Service).where(Service.id == service.id))
+    # service_id is in the composite variant FK too; this is its own one.
+    [fk] = [
+        fk
+        for fk in SpServicePricing.__table__.c.service_id.foreign_keys
+        if fk.name == "fk_sp_service_pricing_service_id"
+    ]
+    assert (fk.name, fk.target_fullname, fk.ondelete) == (
+        "fk_sp_service_pricing_service_id",
+        "services.id",
+        "RESTRICT",
+    )
 
 
 @pytest.mark.asyncio

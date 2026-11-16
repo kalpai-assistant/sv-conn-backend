@@ -3,16 +3,22 @@ The customer's "pick your SP" sheet: ``GET /services/{id}/providers`` (SVC-409).
 
 Who is listed: an SP that dispatch would offer this service to at the
 customer's point (``eligible_providers_multi_stmt``, composed, not restated)
-and that has an active ``sp_service_pricing`` row for it. Booking with any
-listed ``sp_id`` therefore won't 409 ``SP_UNAVAILABLE`` (SVC-479), barring a
-race between the sheet and the booking.
+and that has an active ``sp_service_pricing`` row for the sheet's variant.
+Booking with any listed ``sp_id`` therefore won't 409 ``SP_UNAVAILABLE``
+(SVC-479), barring a race between the sheet and the booking.
+
+Which variant (SVC-480: prices are per variant): the ``variant_id`` asked for,
+which must be an active variant of the service, else the service's first active
+variant by ``sort_order``, the one ``create_booking`` bills a line without a
+variant for. Its ``base_price`` is the reference price. A service whose
+variants are all switched off has no variant to price, so it lists nobody.
 
 How they are ordered: the ticket's weighted score, with weights from
 ``pricing_config.ranking_weights`` cached in-process for 60 s.
 
-Two statements per request whatever the SP count (the service, then one
-statement for candidates plus every per-SP signal), and a third on a config
-cache miss.
+Two statements per request whatever the SP count (the service with its active
+variants, then one statement for candidates plus every per-SP signal), and a
+third on a config cache miss. With no active variant, the second is skipped.
 """
 
 import logging
@@ -26,7 +32,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.exceptions import AppException, ServiceNotFound
+from app.exceptions import AppException, ServiceNotFound, ServiceVariantNotFound
 from app.models.booking import Booking, BookingStatus
 from app.models.booking_assignment_event import BookingAssignmentEvent
 from app.models.booking_status_log import BookingStatusLog
@@ -35,6 +41,7 @@ from app.models.professional import Professional
 from app.models.provider_profile import ProviderProfile
 from app.models.review import Review
 from app.models.service import Service
+from app.models.service_variant import ServiceVariant
 from app.models.sp_service_pricing import SpServicePricing
 from app.models.user import User
 from app.schemas.ranking import RankedProvider, ServiceProvidersResponse
@@ -216,11 +223,16 @@ def why_chips(
 # --- the query ---------------------------------------------------------------
 
 
-def ranking_rows_stmt(service_id: uuid.UUID, point_wkt: str, now: datetime):
+def ranking_rows_stmt(
+    service_id: uuid.UUID,
+    service_variant_id: uuid.UUID,
+    point_wkt: str,
+    now: datetime,
+):
     """One statement: every listable SP with its price and every signal.
 
     ``candidates`` is dispatch's own eligibility (no booking yet, so no
-    ``booking_id``) joined to the SP's active price for this service. Each
+    ``booking_id``) joined to the SP's active price for this variant. Each
     signal is a grouped aggregate narrowed to the candidates, so the work is
     one pass per table whatever the SP count. Every SP key is
     ``provider_profiles.user_id``.
@@ -235,6 +247,7 @@ def ranking_rows_stmt(service_id: uuid.UUID, point_wkt: str, now: datetime):
         .join(eligible, eligible.c.id == SpServicePricing.sp_id)
         .where(
             SpServicePricing.service_id == service_id,
+            SpServicePricing.service_variant_id == service_variant_id,
             SpServicePricing.is_active.is_(True),
         )
         .cte("candidates")
@@ -321,20 +334,68 @@ class RankingService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def rank_providers(
-        self, service_id: uuid.UUID, lat: float, lng: float, limit: int
-    ) -> ServiceProvidersResponse:
-        reference_raw = await self.db.scalar(
-            select(Service.base_price).where(Service.id == service_id, Service.is_active.is_(True))
-        )
-        if reference_raw is None:
+    async def _resolve_variant(
+        self, service_id: uuid.UUID, variant_id: uuid.UUID | None
+    ) -> tuple[uuid.UUID, float] | None:
+        """The variant the sheet prices and its price (the reference), from one
+        statement: the active service with its active variants in
+        ``sort_order``. None when every variant is switched off. The ``id``
+        tiebreak only makes a tied ``sort_order`` deterministic; the seed never
+        ties."""
+        rows = (
+            await self.db.execute(
+                select(
+                    Service.id,
+                    ServiceVariant.id.label("variant_id"),
+                    ServiceVariant.base_price.label("variant_price"),
+                )
+                .outerjoin(
+                    ServiceVariant,
+                    (ServiceVariant.service_id == Service.id) & ServiceVariant.is_active.is_(True),
+                )
+                .where(Service.id == service_id, Service.is_active.is_(True))
+                .order_by(ServiceVariant.sort_order, ServiceVariant.id)
+            )
+        ).all()
+        if not rows:
             raise ServiceNotFound(service_id)
-        reference = float(reference_raw)
+        variants = [row for row in rows if row.variant_id is not None]
+        if variant_id is not None:
+            chosen = next((row for row in variants if row.variant_id == variant_id), None)
+            if chosen is None:
+                raise ServiceVariantNotFound(service_id, variant_id)
+            return chosen.variant_id, float(chosen.variant_price)
+        if variants:
+            return variants[0].variant_id, float(variants[0].variant_price)
+        return None
+
+    async def rank_providers(
+        self,
+        service_id: uuid.UUID,
+        lat: float,
+        lng: float,
+        limit: int,
+        variant_id: uuid.UUID | None = None,
+    ) -> ServiceProvidersResponse:
+        resolved = await self._resolve_variant(service_id, variant_id)
 
         config = await load_ranking_config(self.db)
         weights = config.weights
         now = datetime.now(UTC)
-        rows = await self.db.execute(ranking_rows_stmt(service_id, build_point_wkt(lat, lng), now))
+        if resolved is None:
+            # Every variant switched off: no variant to price, so nobody is listed.
+            # (create_booking can still book it, from services.base_price.)
+            return ServiceProvidersResponse(
+                service_id=service_id,
+                service_variant_id=None,
+                quoted_at=now,
+                ttl_seconds=config.ttl_seconds,
+                providers=[],
+            )
+        service_variant_id, reference = resolved
+        rows = await self.db.execute(
+            ranking_rows_stmt(service_id, service_variant_id, build_point_wkt(lat, lng), now)
+        )
 
         scored: list[tuple[float, uuid.UUID, RankedProvider]] = []
         for row in rows:
@@ -384,6 +445,7 @@ class RankingService:
         scored.sort(key=lambda item: (-item[0], str(item[1])))
         return ServiceProvidersResponse(
             service_id=service_id,
+            service_variant_id=service_variant_id,
             quoted_at=now,
             ttl_seconds=config.ttl_seconds,
             providers=[provider for _, _, provider in scored[:limit]],

@@ -1,8 +1,8 @@
 """Reseed the catalogue from ``backend/EazyServ_Pune_Pricing_List.xlsx``.
 
-Wipes every row in services/service_variants (and provider_services which
-FKs into services), then reloads services + variants under the categories
-that ``seed_categories.py`` already created. Categories themselves are
+Wipes every row in services/service_variants (and provider_services and
+sp_service_pricing, which FK into them), then reloads services + variants
+under the categories that ``seed_categories.py`` already created. Categories themselves are
 never touched — the SVC-286 L1/L2 hierarchy is a precondition of this
 script, not something it manages (SVC-312).
 
@@ -64,6 +64,7 @@ from app.models.category import Category  # noqa: E402
 from app.models.provider_service import ProviderService  # noqa: E402
 from app.models.service import Service  # noqa: E402
 from app.models.service_variant import ServiceVariant  # noqa: E402
+from app.models.sp_service_pricing import SpServicePricing  # noqa: E402
 from app.seed_data.l1_hierarchy import L2_SLUGS, MISCELLANEOUS_L1_SLUG  # noqa: E402
 from app.seed_data.service_details import apply_service_details  # noqa: E402
 
@@ -298,13 +299,15 @@ async def ensure_hierarchy_seeded(db) -> dict[str, Category]:
 
 
 async def wipe_services_and_variants(db, force: bool = False) -> None:
-    """DELETE all rows from services/variants (and provider_services which
-    FKs into services). Categories are deliberately preserved — the
-    SVC-286 hierarchy is a precondition of this script, not something it
-    manages (SVC-312).
+    """DELETE all rows from services/variants (and provider_services and
+    sp_service_pricing, which FK into them). Categories are deliberately
+    preserved — the SVC-286 hierarchy is a precondition of this script, not
+    something it manages (SVC-312).
 
     Order matters: variants → services (FKs point the other way).
-    provider_services also references services, so it goes first.
+    sp_service_pricing (RESTRICT on both, SVC-408 / SVC-480) and
+    provider_services also reference them, so they go first. A reseed gives
+    every variant a new id, so an SP's price can't outlive it anyway.
     """
     bi_count = (await db.execute(select(func.count()).select_from(BookingItem))).scalar_one()
     if bi_count and not force:
@@ -312,6 +315,7 @@ async def wipe_services_and_variants(db, force: bool = False) -> None:
             f"Refusing to wipe catalog: {bi_count} booking_items rows exist. "
             "Pass --force to proceed anyway (this will fail on FK)."
         )
+    await db.execute(delete(SpServicePricing))
     await db.execute(delete(ProviderService))
     await db.execute(delete(ServiceVariant))
     await db.execute(delete(Service))
