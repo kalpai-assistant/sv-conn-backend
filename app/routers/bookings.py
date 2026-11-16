@@ -45,11 +45,16 @@ router = APIRouter(prefix="/bookings", tags=["Bookings"])
             "description": "A request with this Idempotency-Key is already in "
             "progress. Retry after a short backoff. Or SP_UNAVAILABLE (SVC-479): "
             "the chosen sp_id can't take this cart right now; no booking was "
-            "created, so pick another SP."
+            "created, so pick another SP (also when that SP has no active price "
+            "for an item's variant, SVC-411). Or PRICE_CHANGED (SVC-411): the "
+            "chosen SP's price for an item differs from its quoted_price; "
+            "details.items lists each one with its current_price, and no "
+            "booking was created."
         },
         422: {
             "description": "Idempotency-Key was reused with a different request "
-            "body. Generate a new key for each distinct request."
+            "body. Generate a new key for each distinct request. Or, with "
+            "sp_id, an item without service_variant_id or quoted_price (SVC-411)."
         },
     },
 )

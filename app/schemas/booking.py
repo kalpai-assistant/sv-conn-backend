@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import UUID
 
@@ -24,6 +25,11 @@ class CreateBookingItemRequest(BaseModel):
     # here rather than silently deduping later and losing money on the second
     # copy.
     quantity: int = Field(default=1, ge=1, le=10)
+    # SVC-411: the unit price the customer saw on the sheet for this variant
+    # from the chosen SP. Required with ``sp_id`` (with ``service_variant_id``),
+    # ignored without it. A price the SP no longer charges is a 409
+    # ``PRICE_CHANGED``.
+    quoted_price: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
 
 
 class CreateBookingRequest(BaseModel):
@@ -55,7 +61,8 @@ class CreateBookingRequest(BaseModel):
     # SVC-479: the SP the customer picked in the marketplace
     # (``provider_profiles.user_id``, as in ``sp_service_pricing.sp_id``). Only
     # that SP is offered the booking; one who can't take it right now is a 409
-    # ``SP_UNAVAILABLE`` and no booking. Omitted = the open broadcast.
+    # ``SP_UNAVAILABLE`` and no booking. Omitted = the open broadcast. With it,
+    # every item is billed at that SP's price (SVC-411).
     sp_id: UUID | None = None
 
     @model_validator(mode="after")
@@ -71,6 +78,14 @@ class CreateBookingRequest(BaseModel):
             raise ValueError("Booking must have at least one service")
         if self.service_id and not self.items:
             self.items = [CreateBookingItemRequest(service_id=self.service_id, quantity=1)]
+        if self.sp_id is not None and any(
+            item.service_variant_id is None or item.quoted_price is None for item in self.items
+        ):
+            # SVC-411: a chosen SP's price is per variant, and it's locked
+            # against what the customer was quoted, so both are needed.
+            raise ValueError(
+                "With 'sp_id', every item needs 'service_variant_id' and 'quoted_price'"
+            )
         return self
 
 

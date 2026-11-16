@@ -45,6 +45,7 @@ from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.review import Review
 from app.models.service import Service
 from app.models.service_variant import ServiceVariant
+from app.models.sp_service_pricing import SpServicePricing
 from app.models.user import User, UserRole
 from app.schemas.booking import (
     AssignmentTimelineItem,
@@ -57,6 +58,7 @@ from app.schemas.booking import (
     TimelinePro,
 )
 from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
+from app.services.commission import split_at_price
 from app.services.provider_matching import (
     is_eligible_provider_multi_stmt,
 )
@@ -80,6 +82,8 @@ PROVIDER_EN_ROUTE = "PROVIDER_EN_ROUTE"
 SELF_NOT_TAKING_JOBS = "SELF_NOT_TAKING_JOBS"
 # SVC-479: the SP the customer picked can't be offered this booking right now.
 SP_UNAVAILABLE = "SP_UNAVAILABLE"
+# SVC-411: the chosen SP charges something other than what the customer was quoted.
+PRICE_CHANGED = "PRICE_CHANGED"
 
 # Admin timeline tie-break (SVC-333), see ``admin_timeline``. A Pro arriving
 # (claimed / repicked) sorts after a status row stamped the same instant; any
@@ -367,6 +371,10 @@ class BookingService:
         take it" is an answer the app can act on at once by re-picking (409
         ``SP_UNAVAILABLE``, nothing written). Without ``sp_id`` none of this
         runs and the booking is the open broadcast it always was.
+
+        With ``sp_id`` every item is also billed at that SP's price for its
+        variant, locked against the ``quoted_price`` the customer saw (SVC-411,
+        ``_lock_sp_prices``), and split by ``commission.split_at_price``.
         """
         if not items:
             raise ValueError("Booking must have at least one service")
@@ -410,8 +418,12 @@ class BookingService:
                         f"or does not belong to service {item.service_id}"
                     )
 
+        # SVC-411: variant id -> the chosen SP's unit price, locked for this
+        # transaction. Empty without sp_id.
+        sp_prices: dict[uuid.UUID, Decimal] = {}
         if sp_id is not None:
             await self._require_chosen_sp_eligible(sp_id, service_ids, address_id)
+            sp_prices = await self._lock_sp_prices(sp_id, items)
 
         # Legacy split (SVC-150) used for services that don't yet carry
         # variants — the pre-Pune-pricing rows. Once every seed row has a
@@ -447,7 +459,15 @@ class BookingService:
                 # in the schema comment on CreateBookingItemRequest.
                 variant = next((v for v in svc.variants if v.is_active), None)
 
-            if variant is not None:
+            if sp_id is not None:
+                # SVC-411: the chosen SP's price, with the variant's own
+                # commission share of it. The schema made every item name a
+                # variant, so ``variant`` is set.
+                assert variant is not None
+                unit_price = sp_prices[variant.id]
+                total_price = to_decimal(unit_price * item.quantity)
+                platform_commission, provider_payout = split_at_price(variant, total_price)
+            elif variant is not None:
                 unit_price = to_decimal(variant.base_price)
                 unit_provider_payout = to_decimal(variant.provider_payout)
                 unit_platform_commission = to_decimal(variant.platform_commission)
@@ -508,7 +528,9 @@ class BookingService:
             scheduled_at=scheduled_at,
             doorstep_otp=self._generate_doorstep_otp(),
             service_amount=total_service_amount,
-            # SVC-408: the cart total until SVC-411 locks in the SP's price.
+            # SVC-408 / SVC-411: the sum of the item totals, before any coupon
+            # (like service_amount). With sp_id those are the chosen SP's
+            # locked prices; without it, the catalogue's.
             locked_price=total_service_amount,
             platform_commission=total_platform_commission,
             provider_payout=total_provider_payout,
@@ -638,6 +660,66 @@ class BookingService:
                 status_code=status.HTTP_409_CONFLICT,
                 code=SP_UNAVAILABLE,
             )
+
+    async def _lock_sp_prices(
+        self, sp_id: uuid.UUID, items: list[CreateBookingItemRequest]
+    ) -> dict[uuid.UUID, Decimal]:
+        """The chosen SP's unit price for every item's variant, checked against
+        the customer's ``quoted_price`` (SVC-411). Returns variant id -> price.
+
+        The rows are read ``FOR SHARE``, so an SP editing a price waits for this
+        booking's transaction to end, and a booking that waited on an edit sees
+        the edited price: a change can't slip in between the check and the
+        insert.
+
+        An item with no row, or a switched-off one, is a 409 ``SP_UNAVAILABLE``:
+        there's no price to show, so the customer re-picks. That wins over a
+        price difference elsewhere in the cart. Otherwise every item whose price
+        differs (exactly, to the paisa) is listed in one 409 ``PRICE_CHANGED``.
+        Both are raised before anything is written.
+        """
+        variant_ids = [item.service_variant_id for item in items]
+        rows = await self.db.scalars(
+            select(SpServicePricing)
+            .where(
+                SpServicePricing.sp_id == sp_id,
+                SpServicePricing.service_variant_id.in_(variant_ids),
+            )
+            .with_for_update(read=True)
+        )
+        prices = {row.service_variant_id: row for row in rows}
+
+        if any(
+            (row := prices.get(item.service_variant_id)) is None or not row.is_active
+            for item in items
+        ):
+            raise AppException(
+                "This professional can't take your booking right now. Please pick another.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=SP_UNAVAILABLE,
+            )
+
+        changed = [
+            {
+                "service_id": str(item.service_id),
+                "service_variant_id": str(item.service_variant_id),
+                # JSON numbers, like the sheet's price_amount.
+                "quoted_price": float(to_decimal(item.quoted_price)),
+                "current_price": float(to_decimal(prices[item.service_variant_id].price_amount)),
+            }
+            for item in items
+            if to_decimal(item.quoted_price)
+            != to_decimal(prices[item.service_variant_id].price_amount)
+        ]
+        if changed:
+            raise AppException(
+                "This professional's price has changed. Please check the new price.",
+                status_code=status.HTTP_409_CONFLICT,
+                code=PRICE_CHANGED,
+                details={"items": changed},
+            )
+
+        return {variant_id: to_decimal(row.price_amount) for variant_id, row in prices.items()}
 
     # ------------------------------------------------------------------
     # Fetch single booking
