@@ -27,6 +27,8 @@ from app.schemas.service import (
     ServiceResponse,
     ServiceVariantResponse,
 )
+from app.services.standard_variant import standard_variant, sync_single_variant_price
+from app.utils.money import to_decimal
 
 # SVC-400 (Vipul, 2026-10-29): below this many qualifying reviews a service
 # shows no rating at all (None + 0) — the frontend renders "New" rather than
@@ -226,29 +228,33 @@ class CatalogService:
         base_price: float,
         duration_minutes: int,
     ) -> Service:
-        """Admin-only: create a global catalog service."""
+        """Admin-only: create a global catalog service, with its Standard
+        variant (SVC-480: every service has one, so SPs can price it)."""
         service = Service(
+            id=uuid.uuid4(),
             category_id=category_id,
             name=name,
             description=description,
             base_price=base_price,
             duration_minutes=duration_minutes,
         )
-        self.db.add(service)
+        variant = standard_variant(service)
+        self.db.add_all([service, variant])
         await self.db.flush()
         # ServiceResponse embeds .variants, and the relationship is
-        # `raise_on_sql`. A brand-new service has no variants — mark the
-        # collection as loaded-empty so pydantic can serialise it without
-        # tripping the sentinel. (Admin adds variants via a separate flow.)
-        set_committed_value(service, "variants", [])
+        # `raise_on_sql`. Mark the collection as loaded with the one variant
+        # so pydantic can serialise it without tripping the sentinel.
+        set_committed_value(service, "variants", [variant])
         return service
 
     async def update_service(
         self,
         service_id: uuid.UUID,
         **fields,
-    ) -> Service:
-        """Admin-only: update a global catalog service."""
+    ) -> tuple[Service, tuple[dict, dict] | None]:
+        """Admin-only: update a global catalog service. Also returns its single
+        variant's ``(before, after)`` when a price change moved it (SVC-480),
+        for the caller's audit row, else None."""
         # Load with variants eagerly so the response can render them
         # without a raise_on_sql fault at serialisation time.
         stmt = (
@@ -257,11 +263,15 @@ class CatalogService:
         service = (await self.db.execute(stmt)).scalar_one_or_none()
         if not service:
             raise ServiceNotFound(service_id)
+        old_price = to_decimal(service.base_price)
         for key, value in fields.items():
             if value is not None and hasattr(service, key):
                 setattr(service, key, value)
         await self.db.flush()
-        return service
+        synced = None
+        if to_decimal(service.base_price) != old_price:
+            synced = await sync_single_variant_price(self.db, service.id, service.base_price)
+        return service, synced
 
     async def delete_service(self, service_id: uuid.UUID) -> None:
         """Admin-only: soft-delete by marking inactive."""

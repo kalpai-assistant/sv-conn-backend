@@ -6,10 +6,9 @@ sheet.
   AND an active ``sp_service_pricing`` row for the sheet's variant. Each
   dispatch rule failing on its own keeps the SP off.
 - The variant (SVC-480): ``variant_id``, else the first active by sort_order, as
-  ``create_booking`` picks it; a service with no active variant uses the
-  variant-less rows. 404 for a variant that isn't an active one of the service.
-- The ticket's score: rating, price vs the variant's ``base_price`` (else
-  ``services.base_price``), distance from
+  ``create_booking`` picks it; a service with no active variant lists nobody.
+  404 for a variant that isn't an active one of the service.
+- The ticket's score: rating, price vs the variant's ``base_price``, distance from
   the SP's service-area centre, reliability (claims vs completions, 30 days),
   recency of the last completed job; cold-start floors; boost ×1.5.
 - Weights and the sheet TTL from ``pricing_config``, cached 60 s, with a
@@ -57,6 +56,7 @@ from app.services.ranking_service import (
     reset_ranking_config_cache,
     why_chips,
 )
+from app.services.standard_variant import standard_variant
 from tests.factories.booking_factory import BookingFactory
 from tests.factories.user_factory import UserFactory
 
@@ -76,12 +76,15 @@ def _fresh_config_cache():
     reset_ranking_config_cache()
 
 
-async def _service(db, *, base_price=BASE_PRICE, active=True):
+async def _service(db, *, base_price=BASE_PRICE, active=True, standard=True):
+    """A service with its Standard variant at ``base_price`` (SVC-480: every
+    service has one), unless ``standard`` is False."""
     slug = f"rank-{uuid.uuid4().hex[:8]}"
     category = Category(name=slug, slug=slug, is_active=True, sort_order=1)
     db.add(category)
     await db.flush()
     service = Service(
+        id=uuid.uuid4(),
         category_id=category.id,
         name="Tap repair",
         base_price=base_price,
@@ -89,8 +92,19 @@ async def _service(db, *, base_price=BASE_PRICE, active=True):
         is_active=active,
     )
     db.add(service)
+    if standard:
+        db.add(standard_variant(service))
     await db.flush()
     return service
+
+
+async def _first_variant(db, service) -> ServiceVariant:
+    return await db.scalar(
+        select(ServiceVariant)
+        .where(ServiceVariant.service_id == service.id)
+        .order_by(ServiceVariant.sort_order, ServiceVariant.id)
+        .limit(1)
+    )
 
 
 async def _sp(
@@ -113,7 +127,8 @@ async def _sp(
     variant=None,
 ):
     """An SP that passes every dispatch rule for ``service`` and prices it,
-    unless a knob says otherwise. Has its Pro-for-self, for claim events."""
+    unless a knob says otherwise. Has its Pro-for-self, for claim events. The
+    price is for ``variant``, else the service's first variant."""
     user = await UserFactory.create(
         db,
         role="provider",
@@ -145,11 +160,12 @@ async def _sp(
         )
     )
     if priced:
+        variant = variant or await _first_variant(db, service)
         db.add(
             SpServicePricing(
                 sp_id=user.id,
                 service_id=service.id,
-                service_variant_id=variant.id if variant is not None else None,
+                service_variant_id=variant.id,
                 price_amount=price,
                 price_unit="PER_VISIT",
                 is_active=price_active,
@@ -180,7 +196,7 @@ async def _price(db, sp, service, variant, price):
         SpServicePricing(
             sp_id=sp.id,
             service_id=service.id,
-            service_variant_id=variant.id if variant is not None else None,
+            service_variant_id=variant.id,
             price_amount=price,
             price_unit="PER_VISIT",
         )
@@ -328,7 +344,7 @@ async def test_single_sp_row_has_the_ticket_shape(client, db_session, consumer_h
         "ttl_seconds",
         "providers",
     }
-    assert sheet["service_variant_id"] is None  # a service with no variant
+    assert sheet["service_variant_id"] == str((await _first_variant(db_session, service)).id)
     quoted_at = datetime.fromisoformat(sheet["quoted_at"].replace("Z", "+00:00"))
     assert quoted_at.utcoffset() == timedelta(0)
     assert before - timedelta(seconds=1) <= quoted_at <= datetime.now(UTC) + timedelta(seconds=1)
@@ -461,7 +477,11 @@ async def test_reliability_counts_claims_and_completions_in_30_days(db_session):
     await _job(db_session, sp, service, completed=True, days_ago=40)  # outside
 
     now = datetime.now(UTC)
-    [row] = (await db_session.execute(ranking_rows_stmt(service.id, None, HERE, now))).all()
+    [row] = (
+        await db_session.execute(
+            ranking_rows_stmt(service.id, (await _first_variant(db_session, service)).id, HERE, now)
+        )
+    ).all()
     assert (row.assigned_30d, row.completed_30d) == (3, 2)
     # The newest completion, the 30-day bound doesn't apply to it.
     assert abs((now - row.last_completed_at) - timedelta(days=2)) < timedelta(minutes=1)
@@ -473,7 +493,11 @@ async def test_a_released_claim_still_counts_against_the_sp(client, db_session, 
     await _job(db_session, sp, service, released=True)
 
     now = datetime.now(UTC)
-    [row] = (await db_session.execute(ranking_rows_stmt(service.id, None, HERE, now))).all()
+    [row] = (
+        await db_session.execute(
+            ranking_rows_stmt(service.id, (await _first_variant(db_session, service)).id, HERE, now)
+        )
+    ).all()
     # One claim, no completion row at all (the outer join's NULL is 0).
     assert (row.assigned_30d, row.completed_30d) == (1, None)
 
@@ -493,7 +517,14 @@ async def test_another_sps_jobs_do_not_count(db_session):
     rows = {
         r.sp_id: r
         for r in (
-            await db_session.execute(ranking_rows_stmt(service.id, None, HERE, datetime.now(UTC)))
+            await db_session.execute(
+                ranking_rows_stmt(
+                    service.id,
+                    (await _first_variant(db_session, service)).id,
+                    HERE,
+                    datetime.now(UTC),
+                )
+            )
         ).all()
     }
     mine = rows[sp.id]
@@ -857,7 +888,7 @@ def test_formula_pieces():
 async def _bhk_service(db):
     """Deep cleaning: 1 BHK ₹2,499 (first by sort_order), 2 BHK ₹2,999, and an
     inactive "Studio" ordered before both. services.base_price is the cheapest."""
-    service = await _service(db, base_price=2499)
+    service = await _service(db, base_price=2499, standard=False)
     studio = await _variant(db, service, "Studio", 1999, sort_order=0, active=False)
     two = await _variant(db, service, "2 BHK", 2999, sort_order=2)
     one = await _variant(db, service, "1 BHK", 2499, sort_order=1)
@@ -902,7 +933,6 @@ async def test_no_variant_id_uses_the_first_active_variant_as_a_booking_would(
     on_one = await _sp(db_session, service, variant=one, price=2400)
     await _sp(db_session, service, variant=two)
     await _sp(db_session, service, variant=studio)  # active price, inactive variant
-    await _sp(db_session, service)  # a variant-less price
 
     sheet = await _sheet(client, consumer_headers, service)
 
@@ -940,33 +970,26 @@ async def test_the_reference_price_is_the_variants(client, db_session, consumer_
     assert "Below market" not in chips[str(at_ref.id)]
 
 
-async def test_a_service_with_no_variant_uses_the_variant_less_rows(
+async def test_a_service_whose_variants_are_all_off_lists_nobody(
     client, db_session, consumer_headers
 ):
-    service = await _service(db_session)  # base_price 1000, no variants
-    below = await _sp(db_session, service, price=900)
-
-    sheet = await _sheet(client, consumer_headers, service)
-
-    assert sheet["service_variant_id"] is None
-    [row] = sheet["providers"]
-    assert row["sp_id"] == str(below.id)
-    assert "Below market" in row["why"]  # against services.base_price
-
-
-async def test_a_service_whose_variants_are_all_inactive_uses_the_variant_less_rows(
-    client, db_session, consumer_headers
-):
-    service = await _service(db_session)  # base_price 1000
+    """Nothing can be booked, so nobody is listed: 200, no variant, no rows,
+    even for an SP whose price row is still active."""
+    service = await _service(db_session, standard=False)
     retired = await _variant(db_session, service, "Old", 2000, active=False)
-    variant_less = await _sp(db_session, service, price=900)
     await _sp(db_session, service, variant=retired, price=1700)
 
     sheet = await _sheet(client, consumer_headers, service)
 
-    assert sheet["service_variant_id"] is None
-    assert _ids(sheet) == [str(variant_less.id)]
-    assert "Below market" in sheet["providers"][0]["why"]  # against services.base_price
+    assert (sheet["service_variant_id"], sheet["providers"]) == (None, [])
+    assert sheet["ttl_seconds"] > 0  # the config is still read
+
+
+async def test_a_service_with_no_variant_row_lists_nobody(client, db_session, consumer_headers):
+    """Only a row written outside the admin paths can have none."""
+    service = await _service(db_session, standard=False)
+    sheet = await _sheet(client, consumer_headers, service)
+    assert (sheet["service_variant_id"], sheet["providers"]) == (None, [])
 
 
 async def _variant_404(client, headers, service, variant_id):
@@ -999,9 +1022,9 @@ async def test_a_variant_that_isnt_an_active_one_of_the_service_is_404(
 async def test_a_variant_id_for_a_service_with_no_active_variant_is_404(
     client, db_session, consumer_headers
 ):
-    service = await _service(db_session)
+    service = await _service(db_session, standard=False)
     retired = await _variant(db_session, service, "Old", 2000, active=False)
-    await _sp(db_session, service)
+    await _sp(db_session, service, variant=retired)
     await _variant_404(client, consumer_headers, service, retired.id)
     await _variant_404(client, consumer_headers, service, uuid.uuid4())
 

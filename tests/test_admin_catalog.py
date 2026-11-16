@@ -687,7 +687,10 @@ async def test_create_service_stores_everything_and_audits(client, db_session):
         "sofa",
         True,
     )
-    assert (body["variants"], body["active_variant_count"], body["active_bookings"]) == ([], 0, 0)
+    # SVC-480: created with its Standard variant (tests/test_standard_variant.py).
+    assert [v["label"] for v in body["variants"]] == ["Standard"]
+    assert (body["variants"][0]["base_price"], body["variants"][0]["is_active"]) == (12.5, True)
+    assert (body["active_variant_count"], body["active_bookings"]) == (1, 0)
 
     [row] = await _audit(db_session, admin)
     assert (row.action, row.target_type, row.target_id) == ("service.create", "service", body["id"])

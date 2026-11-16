@@ -58,6 +58,7 @@ from app.schemas.admin_catalog import (
 from app.seed_data.catalog_icons import CATALOG_ICON_KEYS
 from app.services.account_service import _LIVE_STATUSES
 from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
+from app.services.standard_variant import standard_variant, sync_single_variant_price
 from app.utils.money import to_decimal
 
 # What a category create records. SVC-428's pricing fields are on the same
@@ -521,6 +522,7 @@ class AdminCatalogService:
         await self._check_service_name_free(name, body.category_id, exclude=None)
 
         service = Service(
+            id=uuid.uuid4(),
             category_id=body.category_id,
             name=name,
             description=description,
@@ -531,7 +533,8 @@ class AdminCatalogService:
             icon_key=icon_key,
             is_active=body.is_active,
         )
-        self.db.add(service)
+        # SVC-480: every service has a variant, so SPs can price it.
+        self.db.add_all([service, standard_variant(service)])
         await self.db.flush()
         await audit_admin_action(
             self.db,
@@ -589,14 +592,22 @@ class AdminCatalogService:
             for field in changed:
                 setattr(service, field, new[field])
             await self.db.flush()
+            before = {f: old[f] for f in changed}
+            after = {f: new[f] for f in changed}
+            if "base_price" in changed:
+                # SVC-480: a single-variant service's one variant follows the
+                # price, recorded in this same row. 2+ variants: untouched.
+                synced = await sync_single_variant_price(self.db, service.id, new["base_price"])
+                if synced is not None:
+                    before["variant"], after["variant"] = synced
             await audit_admin_action(
                 self.db,
                 actor,
                 action="service.update",
                 target_type="service",
                 target_id=service.id,
-                before={f: old[f] for f in changed},
-                after={f: new[f] for f in changed},
+                before=before,
+                after=after,
             )
         return await self.service_detail(service.id)
 

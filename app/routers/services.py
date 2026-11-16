@@ -79,7 +79,7 @@ async def rank_service_providers(
 
     Prices are per variant (SVC-480): ``variant_id``, else the service's first
     active variant, the one a booking without a variant is billed for. A service
-    with no active variant uses its variant-less prices.
+    whose variants are all switched off lists nobody.
 
     Needs a login, unlike the catalog: each row's distance is measured from the
     SP's service-area centre. 404 for an unknown or inactive service, and for a
@@ -124,10 +124,14 @@ async def update_service(
 ):
     """Admin or ops: update a catalog service."""
     before = snapshot("service", await db.get(Service, service_id))
-    service = await CatalogService(db).update_service(
+    service, synced_variant = await CatalogService(db).update_service(
         service_id=service_id,
         **request.model_dump(exclude_none=True),
     )
+    after = snapshot("service", service)
+    if synced_variant is not None:
+        # SVC-480: the single variant followed the price, in this same row.
+        before["variant"], after["variant"] = synced_variant
     await audit_admin_action(
         db,
         audit_actor(http_request, current_user),
@@ -135,7 +139,7 @@ async def update_service(
         target_type="service",
         target_id=service_id,
         before=before,
-        after=snapshot("service", service),
+        after=after,
     )
     return service
 

@@ -10,16 +10,15 @@ Booking with any listed ``sp_id`` therefore won't 409 ``SP_UNAVAILABLE``
 Which variant (SVC-480: prices are per variant): the ``variant_id`` asked for,
 which must be an active variant of the service, else the service's first active
 variant by ``sort_order``, the one ``create_booking`` bills a line without a
-variant for. Its ``base_price`` is the reference price. A service with no
-active variant uses the rows with ``service_variant_id`` NULL and
-``services.base_price``, as ``create_booking`` does.
+variant for. Its ``base_price`` is the reference price. A service whose
+variants are all switched off lists nobody.
 
 How they are ordered: the ticket's weighted score, with weights from
 ``pricing_config.ranking_weights`` cached in-process for 60 s.
 
 Two statements per request whatever the SP count (the service with its active
 variants, then one statement for candidates plus every per-SP signal), and a
-third on a config cache miss.
+third on a config cache miss. With no active variant, the second is skipped.
 """
 
 import logging
@@ -226,15 +225,14 @@ def why_chips(
 
 def ranking_rows_stmt(
     service_id: uuid.UUID,
-    service_variant_id: uuid.UUID | None,
+    service_variant_id: uuid.UUID,
     point_wkt: str,
     now: datetime,
 ):
     """One statement: every listable SP with its price and every signal.
 
     ``candidates`` is dispatch's own eligibility (no booking yet, so no
-    ``booking_id``) joined to the SP's active price for this variant, or its
-    variant-less price when ``service_variant_id`` is None. Each
+    ``booking_id``) joined to the SP's active price for this variant. Each
     signal is a grouped aggregate narrowed to the candidates, so the work is
     one pass per table whatever the SP count. Every SP key is
     ``provider_profiles.user_id``.
@@ -249,11 +247,7 @@ def ranking_rows_stmt(
         .join(eligible, eligible.c.id == SpServicePricing.sp_id)
         .where(
             SpServicePricing.service_id == service_id,
-            (
-                SpServicePricing.service_variant_id == service_variant_id
-                if service_variant_id is not None
-                else SpServicePricing.service_variant_id.is_(None)
-            ),
+            SpServicePricing.service_variant_id == service_variant_id,
             SpServicePricing.is_active.is_(True),
         )
         .cte("candidates")
@@ -342,15 +336,16 @@ class RankingService:
 
     async def _resolve_variant(
         self, service_id: uuid.UUID, variant_id: uuid.UUID | None
-    ) -> tuple[uuid.UUID | None, float]:
-        """The variant the sheet prices and the reference price, from one
+    ) -> tuple[uuid.UUID, float] | None:
+        """The variant the sheet prices and its price (the reference), from one
         statement: the active service with its active variants in
-        ``sort_order``. The ``id`` tiebreak only makes a tied ``sort_order``
-        deterministic; the seed never ties."""
+        ``sort_order``. None when every variant is switched off. The ``id``
+        tiebreak only makes a tied ``sort_order`` deterministic; the seed never
+        ties."""
         rows = (
             await self.db.execute(
                 select(
-                    Service.base_price,
+                    Service.id,
                     ServiceVariant.id.label("variant_id"),
                     ServiceVariant.base_price.label("variant_price"),
                 )
@@ -372,7 +367,7 @@ class RankingService:
             return chosen.variant_id, float(chosen.variant_price)
         if variants:
             return variants[0].variant_id, float(variants[0].variant_price)
-        return None, float(rows[0].base_price)
+        return None
 
     async def rank_providers(
         self,
@@ -382,11 +377,21 @@ class RankingService:
         limit: int,
         variant_id: uuid.UUID | None = None,
     ) -> ServiceProvidersResponse:
-        service_variant_id, reference = await self._resolve_variant(service_id, variant_id)
+        resolved = await self._resolve_variant(service_id, variant_id)
 
         config = await load_ranking_config(self.db)
         weights = config.weights
         now = datetime.now(UTC)
+        if resolved is None:
+            # Every variant switched off: nothing can be booked, so nobody is listed.
+            return ServiceProvidersResponse(
+                service_id=service_id,
+                service_variant_id=None,
+                quoted_at=now,
+                ttl_seconds=config.ttl_seconds,
+                providers=[],
+            )
+        service_variant_id, reference = resolved
         rows = await self.db.execute(
             ranking_rows_stmt(service_id, service_variant_id, build_point_wkt(lat, lng), now)
         )

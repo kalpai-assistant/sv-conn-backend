@@ -1854,10 +1854,20 @@ def test_svc_479_adds_chosen_sp_id_and_round_trips(scratch_db):
 SVC_480 = "77ae2d00d567"
 BEFORE_SVC_480 = SVC_479
 
+_SVC_480_SERVICES = {
+    # key: (base_price, duration, [(variant key, sort_order, is_active)])
+    "svc": ("2499.00", 60, [("v1", 0, True), ("v2", 1, True)]),
+    "other_svc": ("499.00", 60, [("other_v", 0, True)]),
+    "inactive_only": ("799.00", 60, [("off_v", 0, False)]),
+    "bare_whole": ("499.00", 45, []),
+    "bare_odd": ("499.99", 30, []),
+}
+
 
 def _seed_svc_480_catalog(url: URL) -> dict:
-    """An SP, two services, and two variants of the first, at SVC-480's base."""
-    ids = {key: uuid.uuid4() for key in ("sp", "cat", "svc", "other_svc", "v1", "v2", "other_v")}
+    """An SP and five services: two with active variants, one whose only variant
+    is off, and two with no variant row at all (admin-created ones)."""
+    ids = {"sp": uuid.uuid4(), "cat": uuid.uuid4()}
     engine = create_engine(url)
     try:
         with engine.begin() as conn:
@@ -1883,44 +1893,48 @@ def _seed_svc_480_catalog(url: URL) -> dict:
                 ),
                 {"id": ids["cat"]},
             )
-            for key, name in (("svc", "Deep clean"), ("other_svc", "Tap repair")):
+            for key, (price, duration, variants) in _SVC_480_SERVICES.items():
+                ids[key] = uuid.uuid4()
                 conn.execute(
                     text(
                         "INSERT INTO services (id, category_id, name, base_price, "
-                        "duration_minutes, is_active) VALUES (:id, :cat, :name, 2499, 60, true)"
+                        "duration_minutes, is_active) "
+                        "VALUES (:id, :cat, :name, :price, :duration, true)"
                     ),
-                    {"id": ids[key], "cat": ids["cat"], "name": name},
+                    {
+                        "id": ids[key],
+                        "cat": ids["cat"],
+                        "name": key,
+                        "price": Decimal(price),
+                        "duration": duration,
+                    },
                 )
-            for key, svc, label, order in (
-                ("v1", "svc", "1 BHK", 0),
-                ("v2", "svc", "2 BHK", 1),
-                ("other_v", "other_svc", "Standard", 0),
-            ):
-                conn.execute(
-                    text(
-                        "INSERT INTO service_variants (id, service_id, label, base_price, "
-                        "provider_payout, platform_commission, sort_order) "
-                        "VALUES (:id, :svc, :label, 2499, 1749, 750, :order)"
-                    ),
-                    {"id": ids[key], "svc": ids[svc], "label": label, "order": order},
-                )
+                for v_key, order, active in variants:
+                    ids[v_key] = uuid.uuid4()
+                    conn.execute(
+                        text(
+                            "INSERT INTO service_variants (id, service_id, label, base_price, "
+                            "provider_payout, platform_commission, sort_order, is_active) "
+                            "VALUES (:id, :svc, :label, :price, :price * 0.7, :price * 0.3, "
+                            ":order, :active)"
+                        ),
+                        {
+                            "id": ids[v_key],
+                            "svc": ids[key],
+                            "label": v_key,
+                            "price": Decimal(price),
+                            "order": order,
+                            "active": active,
+                        },
+                    )
     finally:
         engine.dispose()
     return ids
 
 
-def _insert_price(url: URL, sp, service, variant=None) -> None:
+def _price_sql(sp, service, variant=None) -> str:
     """A price row. Without a variant it names no variant column, so it also
     works before SVC-480."""
-    engine = create_engine(url)
-    try:
-        with engine.begin() as conn:
-            conn.execute(text(_price_sql(sp, service, variant)))
-    finally:
-        engine.dispose()
-
-
-def _price_sql(sp, service, variant=None) -> str:
     if variant is None:
         return (
             "INSERT INTO sp_service_pricing (id, sp_id, service_id, price_amount, price_unit) "
@@ -1933,19 +1947,76 @@ def _price_sql(sp, service, variant=None) -> str:
     )
 
 
+def _insert_price(url: URL, sp, service, variant=None) -> None:
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(_price_sql(sp, service, variant)))
+    finally:
+        engine.dispose()
+
+
+def _variants_of(url: URL, service_id) -> list[dict]:
+    return [
+        dict(row)
+        for row in _query(
+            url,
+            "SELECT id, label, subcategory, base_price, platform_commission, provider_payout, "
+            "gst_percent, duration_minutes, sort_order, is_active FROM service_variants "
+            f"WHERE service_id = '{service_id}' ORDER BY sort_order, id",
+        )
+    ]
+
+
 def test_svc_480_prices_per_variant_and_round_trips(scratch_db):
+    from app.config import get_settings
+    from app.utils.money import to_decimal
+
     _alembic(scratch_db, "upgrade", BEFORE_SVC_480)
     ids = _seed_svc_480_catalog(scratch_db)
     tables = ("sp_service_pricing", "service_variants")
     before = {t: _shape(scratch_db, t) for t in tables}
-    # An SVC-408 row survives the round trip as the variant-less price.
-    _insert_price(scratch_db, ids["sp"], ids["other_svc"])
+    variants_before = {
+        key: _variants_of(scratch_db, ids[key]) for key in ("svc", "other_svc", "inactive_only")
+    }
+    # SVC-408 rows, one per (SP, service): each gets its service's first variant.
+    for key in ("svc", "other_svc", "inactive_only"):
+        _insert_price(scratch_db, ids["sp"], ids[key])
     views_before = _matviews(scratch_db)
 
     _alembic(scratch_db, "upgrade", SVC_480)
+
+    # A Standard variant for the two services with none, split like
+    # create_booking's legacy branch at this deployment's percent.
+    rate = to_decimal(get_settings().PLATFORM_COMMISSION_PERCENT) / 100
+    for key in ("bare_whole", "bare_odd"):
+        price, duration, _ = _SVC_480_SERVICES[key]
+        price = Decimal(price)
+        commission = to_decimal(price * rate)
+        [standard] = _variants_of(scratch_db, ids[key])
+        assert {k: v for k, v in standard.items() if k != "id"} == {
+            "label": "Standard",
+            "subcategory": None,
+            "base_price": price,
+            "platform_commission": commission,
+            "provider_payout": price - commission,
+            "gst_percent": Decimal("0.00"),
+            "duration_minutes": duration,
+            "sort_order": 0,
+            "is_active": True,
+        }, key
+    # 499.99 × 20% = 99.998: rounded half up to 100.00, as to_decimal does.
+    if rate == Decimal("0.2"):
+        assert _variants_of(scratch_db, ids["bare_odd"])[0]["platform_commission"] == Decimal(
+            "100.00"
+        )
+    # Services with a variant row, even an inactive one, are untouched.
+    for key, rows in variants_before.items():
+        assert _variants_of(scratch_db, ids[key]) == rows, key
+
     pricing = _shape(scratch_db, "sp_service_pricing")
     assert set(pricing["columns"]) - set(before["sp_service_pricing"]["columns"]) == {
-        ("service_variant_id", "UUID", True)
+        ("service_variant_id", "UUID", False)
     }
     assert (
         "fk_sp_service_pricing_variant",
@@ -1954,59 +2025,53 @@ def test_svc_480_prices_per_variant_and_round_trips(scratch_db):
         ("id", "service_id"),
         "RESTRICT",
     ) in pricing["foreign_keys"]
-    assert pricing["unique_constraints"] == []
+    assert pricing["unique_constraints"] == [
+        ("uq_sp_service_pricing_sp_variant", ("sp_id", "service_variant_id"))
+    ]
     assert set(pricing["indexes"]) - set(before["sp_service_pricing"]["indexes"]) == {
-        (
-            "uq_sp_service_pricing_sp_variant",
-            ("sp_id", "service_variant_id"),
-            True,
-            "(service_variant_id IS NOT NULL)",
-        ),
-        (
-            "uq_sp_service_pricing_sp_service_no_variant",
-            ("sp_id", "service_id"),
-            True,
-            "(service_variant_id IS NULL)",
-        ),
         (
             "ix_sp_service_pricing_variant_active",
             ("service_variant_id", "is_active"),
             False,
             "None",
         ),
+        # Postgres backs the new unique with an index of its own name.
+        (
+            "uq_sp_service_pricing_sp_variant",
+            ("sp_id", "service_variant_id"),
+            True,
+            "None",
+        ),
     }
-    assert (
-        "ix_sp_service_pricing_service_active",
-        ("service_id", "is_active"),
-        False,
-        "None",
-    ) in pricing["indexes"]
     assert ("uq_service_variants_id_service_id", ("id", "service_id")) in _shape(
         scratch_db, "service_variants"
     )["unique_constraints"]
-    [kept] = _query(scratch_db, "SELECT service_variant_id FROM sp_service_pricing")
-    assert kept["service_variant_id"] is None
+    mapped = {
+        row["service_id"]: row["service_variant_id"]
+        for row in _query(
+            scratch_db, "SELECT service_id, service_variant_id FROM sp_service_pricing"
+        )
+    }
+    # First variant by sort_order; the only (inactive) one when nothing is on.
+    assert mapped == {
+        ids["svc"]: ids["v1"],
+        ids["other_svc"]: ids["other_v"],
+        ids["inactive_only"]: ids["off_v"],
+    }
 
-    # One price per (SP, variant): two variants of a service is fine, the same
-    # variant twice is not.
-    _insert_price(scratch_db, ids["sp"], ids["svc"], ids["v1"])
-    _insert_price(scratch_db, ids["sp"], ids["svc"], ids["v2"])
+    # Every price names a variant, one per (SP, variant).
+    _refused_by(scratch_db, _price_sql(ids["sp"], ids["bare_whole"]), "service_variant_id")
     _refused_by(
         scratch_db,
         _price_sql(ids["sp"], ids["svc"], ids["v1"]),
         "uq_sp_service_pricing_sp_variant",
     )
-    # One variant-less price per (SP, service), alongside its variant rows.
-    _insert_price(scratch_db, ids["sp"], ids["svc"])
+    _insert_price(scratch_db, ids["sp"], ids["svc"], ids["v2"])  # another variant: fine
+    # Not another service's variant (one this SP hasn't priced), nor an unknown one.
+    foreign = _variants_of(scratch_db, ids["bare_whole"])[0]["id"]
     _refused_by(
         scratch_db,
-        _price_sql(ids["sp"], ids["svc"]),
-        "uq_sp_service_pricing_sp_service_no_variant",
-    )
-    # A variant of another service is refused, and so is an unknown one.
-    _refused_by(
-        scratch_db,
-        _price_sql(ids["sp"], ids["svc"], ids["other_v"]),
+        _price_sql(ids["sp"], ids["svc"], foreign),
         "fk_sp_service_pricing_variant",
     )
     _refused_by(
@@ -2028,36 +2093,38 @@ def test_svc_480_prices_per_variant_and_round_trips(scratch_db):
     assert result.returncode != 0
     assert "SVC-480 downgrade refused: 1 (sp_id, service_id) pair(s)" in result.stderr
     assert f"service_id={ids['svc']}" in result.stderr
-    assert (
-        _query(scratch_db, "SELECT version_num FROM alembic_version")[0]["version_num"] == SVC_480
-    )
+    [version] = _query(scratch_db, "SELECT version_num FROM alembic_version")
+    assert version["version_num"] == SVC_480
     assert _shape(scratch_db, "sp_service_pricing") == pricing
 
-    # With one row per (SP, service) left, down restores the SVC-408 shape.
+    # With one row per (SP, service) left, down restores the SVC-408 shape and
+    # keeps the Standard variants.
     engine = create_engine(scratch_db)
     try:
         with engine.begin() as conn:
             conn.execute(
-                text("DELETE FROM sp_service_pricing WHERE service_id = :svc"),
-                {"svc": ids["svc"]},
+                text("DELETE FROM sp_service_pricing WHERE service_variant_id = :v"),
+                {"v": ids["v2"]},
             )
     finally:
         engine.dispose()
-    _insert_price(scratch_db, ids["sp"], ids["svc"], ids["v2"])
+    standards = {key: _variants_of(scratch_db, ids[key]) for key in ("bare_whole", "bare_odd")}
     _alembic(scratch_db, "downgrade", BEFORE_SVC_480)
     assert {t: _shape(scratch_db, t) for t in tables} == before
-    assert _query(scratch_db, "SELECT count(*) AS n FROM sp_service_pricing")[0]["n"] == 2
+    assert {key: _variants_of(scratch_db, ids[key]) for key in standards} == standards
+    [count] = _query(scratch_db, "SELECT count(*) AS n FROM sp_service_pricing")
+    assert count["n"] == 3
     _refused_by(
         scratch_db,
-        "INSERT INTO sp_service_pricing (id, sp_id, service_id, price_amount, price_unit) "
-        f"VALUES ('{uuid.uuid4()}', '{ids['sp']}', '{ids['svc']}', 1, 'PER_VISIT')",
+        _price_sql(ids["sp"], ids["svc"]),
         "uq_sp_service_pricing_sp_service",
     )
     assert _matviews(scratch_db) == views_before
 
-    # And up again.
+    # Up again: the same shape, and no second Standard variant.
     _alembic(scratch_db, "upgrade", SVC_480)
     assert _shape(scratch_db, "sp_service_pricing") == pricing
+    assert {key: _variants_of(scratch_db, ids[key]) for key in standards} == standards
 
 
 def test_seed_wipe_clears_sp_prices_first(scratch_db):
@@ -2072,7 +2139,7 @@ def test_seed_wipe_clears_sp_prices_first(scratch_db):
     _alembic(scratch_db, "upgrade", SVC_480)
     ids = _seed_svc_480_catalog(scratch_db)
     _insert_price(scratch_db, ids["sp"], ids["svc"], ids["v1"])
-    _insert_price(scratch_db, ids["sp"], ids["other_svc"])
+    _insert_price(scratch_db, ids["sp"], ids["other_svc"], ids["other_v"])
     engine = create_engine(scratch_db)
     try:
         with engine.begin() as conn:
@@ -2100,9 +2167,9 @@ def test_seed_wipe_clears_sp_prices_first(scratch_db):
     asyncio.run(wipe())
 
     for table in ("sp_service_pricing", "provider_services", "service_variants", "services"):
-        assert _query(scratch_db, f"SELECT count(*) AS n FROM {table}")[0]["n"] == 0, table
+        [count] = _query(scratch_db, f"SELECT count(*) AS n FROM {table}")
+        assert count["n"] == 0, table
     # Categories and the SP stay.
-    assert _query(scratch_db, f"SELECT count(*) AS n FROM categories WHERE id = '{ids['cat']}'")[0][
-        "n"
-    ]
-    assert _query(scratch_db, "SELECT count(*) AS n FROM provider_profiles")[0]["n"] == 1
+    [cat] = _query(scratch_db, f"SELECT count(*) AS n FROM categories WHERE id = '{ids['cat']}'")
+    [sps] = _query(scratch_db, "SELECT count(*) AS n FROM provider_profiles")
+    assert (cat["n"], sps["n"]) == (1, 1)

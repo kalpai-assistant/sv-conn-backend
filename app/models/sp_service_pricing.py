@@ -11,6 +11,7 @@ from sqlalchemy import (
     Index,
     Numeric,
     String,
+    UniqueConstraint,
     func,
     text,
 )
@@ -26,11 +27,10 @@ class SpServicePricing(Base):
     per variant since SVC-480, epic SVC-406).
 
     A booking is billed per variant (``create_booking``), so a price is too: one
-    row per (SP, variant). ``service_variant_id`` NULL is the price for a service
-    with no active variant, which ``create_booking`` bills from
-    ``services.base_price``; there is at most one such row per (SP, service).
-    The composite FK to ``service_variants (id, service_id)`` keeps a row from
-    naming another service's variant.
+    row per (SP, variant), and every row names one. Every service has at least
+    one variant (``app/services/standard_variant.py``). The composite FK to
+    ``service_variants (id, service_id)`` keeps a row from naming another
+    service's variant.
 
     ``sp_id`` is ``provider_profiles.user_id``, the SP identifier used
     everywhere else (``bookings.provider_id``,
@@ -43,31 +43,14 @@ class SpServicePricing(Base):
     clean the price up first.
 
     The ranking sheet (SVC-409) reads it: an SP is listed for a variant only
-    with an active row for that variant (or, for a service with no active
-    variant, an active NULL-variant row). Nothing writes it yet; the SP pricing
+    with an active row for that variant. Nothing writes it yet; the SP pricing
     surface is SVC-412.
     """
 
     __tablename__ = "sp_service_pricing"
 
     __table_args__ = (
-        # One price per (SP, variant), and one variant-less price per (SP,
-        # service). Partial, because NULLs never collide in a plain UNIQUE.
-        Index(
-            "uq_sp_service_pricing_sp_variant",
-            "sp_id",
-            "service_variant_id",
-            unique=True,
-            postgresql_where=text("service_variant_id IS NOT NULL"),
-        ),
-        Index(
-            "uq_sp_service_pricing_sp_service_no_variant",
-            "sp_id",
-            "service_id",
-            unique=True,
-            postgresql_where=text("service_variant_id IS NULL"),
-        ),
-        # MATCH SIMPLE: a NULL variant skips the check.
+        UniqueConstraint("sp_id", "service_variant_id", name="uq_sp_service_pricing_sp_variant"),
         ForeignKeyConstraint(
             ["service_variant_id", "service_id"],
             ["service_variants.id", "service_variants.service_id"],
@@ -96,8 +79,8 @@ class SpServicePricing(Base):
         ForeignKey("services.id", name="fk_sp_service_pricing_service_id", ondelete="RESTRICT"),
         nullable=False,
     )
-    # Composite FK above, with service_id. NULL = the service has no active variant.
-    service_variant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # The composite FK above, with service_id.
+    service_variant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     # Numeric(12, 2) like every other money column (SVC-150).
     price_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     price_unit: Mapped[str] = mapped_column(String(16), nullable=False)
