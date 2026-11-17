@@ -203,6 +203,7 @@ def _bare_booking(status):
         status=status,
         service_amount=100.0,
         platform_commission=20.0,
+        commission_gst=0.0,
         provider_payout=80.0,
         discount_amount=0.0,
         tip_amount=0.0,

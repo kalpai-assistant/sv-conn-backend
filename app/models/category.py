@@ -66,9 +66,11 @@ class Category(Base):
     # GET /categories.
     # - is_sensitive / bounds_pct: the recommended price range
     #   (app/services/price_range.py, SVC-482).
-    # - commission_gst_pct: the GST on the platform's commission, read by
-    #   commission.take_home for the SP's "You receive" (SVC-412). Bookings
-    #   don't deduct it yet (SVC-410).
+    # - commission_gst_pct: the GST on the platform's commission
+    #   (commission.commission_gst). create_booking applies it to every item by
+    #   its service's category, stores it in commission_gst and takes it off the
+    #   SP's payout (SVC-410); commission.take_home shows the same amount as the
+    #   SP's "You receive" (SVC-412).
     # - platform_commission_pct / platform_commission_min: unused. The
     #   commission is each variant's own share (commission.split_at_price,
     #   service_variants.platform_commission / base_price), see SVC-481.

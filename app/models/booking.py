@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -173,6 +173,14 @@ class Booking(Base):
     service_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     platform_commission: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     provider_payout: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # SVC-410: the GST on platform_commission (the category's
+    # commission_gst_pct), the sum of the items'. Taken off the SP's share, so
+    # service_amount = platform_commission + commission_gst + provider_payout.
+    # Tax, not platform revenue. 0 on bookings made before SVC-410, which were
+    # charged none.
+    commission_gst: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, default=Decimal("0.00"), server_default=text("0")
+    )
     # SVC-408: the price frozen at booking creation. A copy, not an FK to
     # sp_service_pricing, so a later SP price change never moves a booking.
     # Pre-discount, like service_amount, which it equals until SVC-411 sets it

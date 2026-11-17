@@ -96,7 +96,9 @@ async def test_create_booking_success(client, auth_headers, db_session):
     assert data["status"] == "requested"
     assert data["service_amount"] == 100.0
     assert data["platform_commission"] == 20.0  # 20% of 100
-    assert data["provider_payout"] == 80.0  # 80% of 100
+    # SVC-410: 18% GST on the commission comes off the SP's 80.
+    assert data["commission_gst"] == 3.6
+    assert data["provider_payout"] == 76.4
 
 
 @pytest.mark.asyncio

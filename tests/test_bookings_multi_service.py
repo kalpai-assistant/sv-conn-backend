@@ -14,6 +14,7 @@ These pin invariants the design rests on:
 """
 
 import uuid
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import inspect, select
@@ -220,7 +221,9 @@ async def test_booking_aggregates_equal_sum_of_item_totals(db_session):
     assert booking.service_amount == 700.0
     # 20% commission
     assert booking.platform_commission == 140.0
-    assert booking.provider_payout == 560.0
+    # SVC-410: 18% GST on the commission comes off the SP's share.
+    assert booking.commission_gst == Decimal("25.20")
+    assert booking.provider_payout == Decimal("534.80")
 
 
 @pytest.mark.asyncio

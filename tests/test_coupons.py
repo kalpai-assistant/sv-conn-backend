@@ -278,9 +278,11 @@ async def test_creating_a_booking_with_a_valid_coupon_records_discount_and_redem
 
     assert booking.service_amount == 1000.0
     assert booking.discount_amount == 200.0
-    # Provider payout unchanged — anchored to service_amount, not the
-    # discounted total. Platform absorbs the coupon.
-    assert booking.provider_payout == 800.0
+    # Provider payout unchanged by the coupon — anchored to service_amount,
+    # not the discounted total. Platform absorbs the coupon. SVC-410: the 18%
+    # GST on the 200 commission (36.00) comes off it.
+    assert booking.commission_gst == 36.0
+    assert booking.provider_payout == 764.0
 
     # And a redemption row exists.
     redemption = (

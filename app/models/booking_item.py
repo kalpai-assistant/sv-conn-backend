@@ -13,10 +13,11 @@ review surfaces single-object.
 
 Everything about the *money* on this row is a snapshot at booking time.
 ``unit_price`` and the derived ``total_price`` / ``platform_commission`` /
-``provider_payout`` freeze what the customer agreed to pay for this item at
-the moment of booking; a later price update on ``services.base_price`` must
-not retroactively change the amount owed. The parent booking's aggregate
-``service_amount``/``platform_commission``/``provider_payout`` are the sums
+``commission_gst`` / ``provider_payout`` freeze what the customer agreed to pay
+for this item at the moment of booking; a later price update on
+``services.base_price`` must not retroactively change the amount owed. The
+parent booking's aggregate ``service_amount`` / ``platform_commission`` /
+``commission_gst`` / ``provider_payout`` are the sums
 of these — kept denormalized on Booking rather than computed on read because
 several long-lived rows (payments, payouts, earnings dashboard) reference
 the totals and can't afford a subquery per read.
@@ -26,7 +27,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -79,6 +80,13 @@ class BookingItem(Base):
     # would lump three services into one line, hiding which one earned what).
     platform_commission: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     provider_payout: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # SVC-410: the GST on this item's platform_commission, at its service's
+    # category commission_gst_pct (commission.commission_gst). total_price =
+    # platform_commission + commission_gst + provider_payout. 0 on items made
+    # before SVC-410.
+    commission_gst: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, default=Decimal("0.00"), server_default=text("0")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     booking: Mapped["Booking"] = relationship("Booking", back_populates="items")

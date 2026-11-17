@@ -2543,3 +2543,108 @@ def test_svc_414_backfills_verified_sps_only_and_is_idempotent(scratch_db):
     assert again.returncode == 0, again.stderr
     assert "0 VERIFIED SPs started at kyc_reviewed_at, 1 skipped" in again.stderr
     assert _boost_state(scratch_db, ids) == after
+
+
+# --- SVC-410: commission_gst on bookings and booking_items ------------------------
+
+
+SVC_410 = "417438a429b2"
+BEFORE_SVC_410 = SVC_414
+
+
+def _commission_gst_columns(url: URL) -> dict:
+    return {
+        row["table_name"]: dict(row)
+        for row in _query(
+            url,
+            "SELECT table_name, data_type, numeric_precision, numeric_scale, is_nullable, "
+            "column_default FROM information_schema.columns "
+            "WHERE column_name = 'commission_gst' AND table_schema = 'public'",
+        )
+    }
+
+
+def _seed_booking_item(url: URL, booking_id: uuid.UUID) -> uuid.UUID:
+    """One item on ``booking_id``, at the pre-SVC-410 schema."""
+    cat, svc, item = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO categories (id, name, slug, is_active, sort_order) "
+                    "VALUES (:id, 'SVC-410 cat', 'svc-410-cat', true, 1)"
+                ),
+                {"id": cat},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO services (id, category_id, name, base_price, "
+                    "duration_minutes, is_active) VALUES (:id, :cat, 'svc', 499, 60, true)"
+                ),
+                {"id": svc, "cat": cat},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO booking_items (id, booking_id, service_id, quantity, "
+                    "unit_price, total_price, platform_commission, provider_payout) "
+                    "VALUES (:id, :booking, :svc, 1, 499, 499, 99.80, 399.20)"
+                ),
+                {"id": item, "booking": booking_id, "svc": svc},
+            )
+    finally:
+        engine.dispose()
+    return item
+
+
+def test_svc_410_adds_commission_gst_default_0_and_round_trips(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_408)
+    ids = _seed_before_svc_408(scratch_db)
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_410)
+    _seed_booking_item(scratch_db, ids["plain"])
+    before = {t: _shape(scratch_db, t) for t in ("bookings", "booking_items")}
+    money_before = _query(
+        scratch_db, "SELECT id, service_amount, platform_commission, provider_payout FROM bookings"
+    )
+    views_before = _matviews(scratch_db)
+    assert _commission_gst_columns(scratch_db) == {}
+
+    _alembic(scratch_db, "upgrade", SVC_410)
+
+    columns = _commission_gst_columns(scratch_db)
+    assert set(columns) == {"bookings", "booking_items"}
+    for table, column in columns.items():
+        assert (
+            column["data_type"],
+            column["numeric_precision"],
+            column["numeric_scale"],
+            column["is_nullable"],
+        ) == ("numeric", 12, 2, "NO"), table
+        assert column["column_default"] == "0", table
+    # Existing rows read 0: no GST was charged on them. Nothing else moves.
+    for table in ("bookings", "booking_items"):
+        rows = _query(scratch_db, f"SELECT commission_gst FROM {table}")
+        assert rows and all(row["commission_gst"] == Decimal("0.00") for row in rows), table
+    assert (
+        _query(
+            scratch_db,
+            "SELECT id, service_amount, platform_commission, provider_payout FROM bookings",
+        )
+        == money_before
+    )
+    assert _matviews(scratch_db) == views_before
+
+    # Down with GST stored: both columns just go.
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE bookings SET commission_gst = 17.96 WHERE id = :b"),
+                {"b": ids["plain"]},
+            )
+    finally:
+        engine.dispose()
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_410)
+    assert {t: _shape(scratch_db, t) for t in ("bookings", "booking_items")} == before
+    assert _commission_gst_columns(scratch_db) == {}
+    assert _matviews(scratch_db) == views_before
