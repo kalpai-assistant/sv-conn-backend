@@ -32,6 +32,10 @@ import pytest
 
 from app.routers import payments as payments_router
 
+_API_PREFIX = payments_router.settings.API_V1_PREFIX
+_WEBHOOK_URL = f"{_API_PREFIX}/payments/webhook"
+_PAYOUT_WEBHOOK_URL = f"{_API_PREFIX}/payments/payout-webhook"
+
 
 def _sign(secret: str, body: bytes) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
@@ -89,13 +93,14 @@ async def test_razorpay_empty_secret_in_dev_still_accepts(client, monkeypatch):
     monkeypatch.setattr(payments_router.settings, "RAZORPAY_WEBHOOK_SECRET", "")
 
     response = await client.post(
-        "/payments/webhook",
+        _WEBHOOK_URL,
         content=_razorpay_body(),
         headers={"content-type": "application/json"},
     )
     # Dev + empty secret → signature check skipped. The body is handled; the
     # handler may 200 or may raise its own domain error (unknown payment id in
     # a fresh DB). Either way the signature guard did not trip.
+    assert response.status_code != 404, "webhook URL not registered"
     assert response.status_code != 400
     assert response.status_code != 500
 
@@ -115,7 +120,7 @@ async def test_razorpay_empty_secret_outside_dev_refuses_500(client, monkeypatch
     monkeypatch.setattr(payments_router.settings, "RAZORPAY_WEBHOOK_SECRET", "")
 
     response = await client.post(
-        "/payments/webhook",
+        _WEBHOOK_URL,
         content=_razorpay_body(),
         headers={"content-type": "application/json"},
     )
@@ -135,7 +140,7 @@ async def test_razorpayx_empty_secret_outside_dev_refuses_500(client, monkeypatc
     monkeypatch.setattr(payments_router.settings, "RAZORPAYX_WEBHOOK_SECRET", "")
 
     response = await client.post(
-        "/payments/payout-webhook",
+        _PAYOUT_WEBHOOK_URL,
         content=_razorpayx_body(),
         headers={"content-type": "application/json"},
     )
@@ -159,7 +164,7 @@ async def test_razorpay_bad_signature_returns_400(client, monkeypatch, env):
     )
 
     response = await client.post(
-        "/payments/webhook",
+        _WEBHOOK_URL,
         content=_razorpay_body(),
         headers={
             "content-type": "application/json",
@@ -177,7 +182,7 @@ async def test_razorpayx_bad_signature_returns_400(client, monkeypatch, env):
     )
 
     response = await client.post(
-        "/payments/payout-webhook",
+        _PAYOUT_WEBHOOK_URL,
         content=_razorpayx_body(),
         headers={
             "content-type": "application/json",
@@ -201,7 +206,7 @@ async def test_razorpay_correct_signature_accepts(client, monkeypatch):
 
     body = _razorpay_body()
     response = await client.post(
-        "/payments/webhook",
+        _WEBHOOK_URL,
         content=body,
         headers={
             "content-type": "application/json",
@@ -211,5 +216,6 @@ async def test_razorpay_correct_signature_accepts(client, monkeypatch):
     # Not 400 (sig OK) and not 500 (secret set). Handler may still return a
     # domain error if the payment id isn't in the DB, which is not what this
     # test is checking.
+    assert response.status_code != 404, "webhook URL not registered"
     assert response.status_code != 400
     assert response.status_code != 500
