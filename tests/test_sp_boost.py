@@ -218,14 +218,9 @@ async def _complete(client, auth_headers, booking, sp, member_user, by: str):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("pushes")
 @pytest.mark.parametrize("by", ["sp", "team_pro"])
-async def test_a_completed_job_counts_toward_a_started_boost(
-    client,
-    auth_headers,
-    db_session,
-    pushes,
-    by,  # noqa: F811
-):
+async def test_a_completed_job_counts_toward_a_started_boost(client, auth_headers, db_session, by):
     sp, member_user, profile, booking = await _job_in_progress(db_session, boost_started=True)
     started = profile.boost_eligible_at
 
@@ -239,13 +234,10 @@ async def test_a_completed_job_counts_toward_a_started_boost(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("pushes")
 @pytest.mark.parametrize("by", ["sp", "team_pro"])
 async def test_a_completed_job_without_a_boost_only_counts_the_total(
-    client,
-    auth_headers,
-    db_session,
-    pushes,
-    by,  # noqa: F811
+    client, auth_headers, db_session, by
 ):
     sp, member_user, profile, booking = await _job_in_progress(db_session, boost_started=False)
 
