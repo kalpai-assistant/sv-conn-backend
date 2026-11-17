@@ -73,6 +73,13 @@ def st_dwithin_column_radius(column, point, radius_km_column):
     return ST_DWithin(column, _as_geography(point), radius_km_column * 1000)  # km → m
 
 
+def st_dwithin_areas_overlap(column, radius_km_column, point, radius_km):
+    """Two service areas overlap (SVC-413): the distance between their centres,
+    ``column`` and ``point``, is within the two radii added together. Each row
+    carries its own ``radius_km_column``; ``radius_km`` is the other area's."""
+    return ST_DWithin(column, _as_geography(point), (radius_km_column + radius_km) * 1000)
+
+
 def distance_km_to_point(column, point):
     """Distance in km from a geography column to a geography value."""
     return func.ST_Distance(column, _as_geography(point)) / 1000  # metres → km

@@ -30,6 +30,7 @@ from app.models.provider_ledger_entry import ProviderLedgerEntry
 from app.models.provider_profile import ProviderProfile
 from app.models.provider_team_invite import InviteStatus, ProviderTeamInvite
 from app.models.user import User
+from app.services.sp_pricing_service import switch_off_all_prices
 from app.services.team_service import TeamService
 from app.utils import storage
 
@@ -189,6 +190,8 @@ class AccountService:
         user.is_active = False
         user.deleted_at = now
         await self.db.flush()
+        # SVC-413: a deleted SP's prices are no longer on offer.
+        await switch_off_all_prices(self.db, user_id)
 
         logger.warning("account.deleted user_id=%s role=%s", user_id, user.role.value)
         # Pro-for-self and SP rows can name the same object; delete it once.

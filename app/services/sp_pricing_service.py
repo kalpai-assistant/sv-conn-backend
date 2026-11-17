@@ -87,6 +87,17 @@ def variant_pricing(
     }
 
 
+async def switch_off_all_prices(db: AsyncSession, sp_id: uuid.UUID) -> None:
+    """Switch every price of an SP who leaves off (SVC-413): account deletion
+    and admin deactivation, in the caller's transaction. The amounts stay, as on
+    an unsubscribe, so ``is_active = true`` keeps meaning "on offer now"."""
+    await db.execute(
+        update(SpServicePricing)
+        .where(SpServicePricing.sp_id == sp_id, SpServicePricing.is_active.is_(True))
+        .values(is_active=False, updated_at=func.now())
+    )
+
+
 class SpPricingService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -158,28 +169,10 @@ class SpPricingService:
             )
         return SpPricingResponse(services=list(groups.values()))
 
-    async def set_price(
-        self,
-        sp_id: uuid.UUID,
-        variant_id: uuid.UUID,
-        *,
-        price_amount: Decimal | None,
-        is_active: bool | None,
-    ) -> SpVariantPricingUpdateResponse:
-        """Set the SP's price for ``variant_id``, switch it on or off, or both.
-
-        - 404 ``VARIANT_NOT_FOUND``: unknown, switched off, or its service is.
-        - 404 ``SUBSCRIPTION_NOT_FOUND``: the SP doesn't subscribe to its service.
-          The subscription is read ``FOR SHARE``, so an unsubscribe waits for this
-          save to commit and then switches the row off, or this save waits for
-          the unsubscribe and 404s. A row can't be left on for a service the SP
-          left.
-        - With a price: one insert-or-update on ``uq_sp_service_pricing_sp_variant``,
-          so two quick saves can't make two rows. A new row starts on unless
-          ``is_active`` says otherwise; an existing one keeps its on/off unless
-          ``is_active`` is sent. ``price_unit`` is refreshed from the service.
-        - ``is_active`` alone on a variant with no price: 422 ``PRICE_REQUIRED``.
-        """
+    async def active_variant(self, variant_id: uuid.UUID):
+        """``variant_id`` with its service's unit and category pricing knobs,
+        or 404 ``VARIANT_NOT_FOUND`` if it's unknown, switched off, or its
+        service is. Shared by ``set_price`` and the market insights (SVC-413)."""
         found = (
             await self.db.execute(
                 select(
@@ -205,19 +198,49 @@ class SpPricingService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 code=VARIANT_NOT_FOUND,
             )
+        return found
+
+    async def require_subscription(
+        self, sp_id: uuid.UUID, service_id: uuid.UUID, *, lock: bool
+    ) -> None:
+        """404 ``SUBSCRIPTION_NOT_FOUND`` unless the SP subscribes to
+        ``service_id``. With ``lock``, the subscription is read ``FOR SHARE``
+        (see ``set_price``); a read needs no lock."""
+        stmt = select(ProviderServiceModel.id).where(
+            ProviderServiceModel.provider_id == sp_id,
+            ProviderServiceModel.service_id == service_id,
+        )
+        if lock:
+            stmt = stmt.with_for_update(read=True)
+        if await self.db.scalar(stmt) is None:
+            raise SubscriptionNotFound(service_id)
+
+    async def set_price(
+        self,
+        sp_id: uuid.UUID,
+        variant_id: uuid.UUID,
+        *,
+        price_amount: Decimal | None,
+        is_active: bool | None,
+    ) -> SpVariantPricingUpdateResponse:
+        """Set the SP's price for ``variant_id``, switch it on or off, or both.
+
+        - 404 ``VARIANT_NOT_FOUND``: unknown, switched off, or its service is.
+        - 404 ``SUBSCRIPTION_NOT_FOUND``: the SP doesn't subscribe to its service.
+          The subscription is read ``FOR SHARE``, so an unsubscribe waits for this
+          save to commit and then switches the row off, or this save waits for
+          the unsubscribe and 404s. A row can't be left on for a service the SP
+          left.
+        - With a price: one insert-or-update on ``uq_sp_service_pricing_sp_variant``,
+          so two quick saves can't make two rows. A new row starts on unless
+          ``is_active`` says otherwise; an existing one keeps its on/off unless
+          ``is_active`` is sent. ``price_unit`` is refreshed from the service.
+        - ``is_active`` alone on a variant with no price: 422 ``PRICE_REQUIRED``.
+        """
+        found = await self.active_variant(variant_id)
         variant = found.ServiceVariant
         service_id = variant.service_id
-
-        subscribed = await self.db.scalar(
-            select(ProviderServiceModel.id)
-            .where(
-                ProviderServiceModel.provider_id == sp_id,
-                ProviderServiceModel.service_id == service_id,
-            )
-            .with_for_update(read=True)
-        )
-        if subscribed is None:
-            raise SubscriptionNotFound(service_id)
+        await self.require_subscription(sp_id, service_id, lock=True)
 
         returning = (SpServicePricing.price_amount, SpServicePricing.is_active)
         if price_amount is not None:
