@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import NamedTuple
 
 from fastapi import status
 from sqlalchemy import case, func, select, update
@@ -40,6 +41,7 @@ from app.models.booking_assignment_event import BookingAssignmentEvent
 from app.models.booking_item import BookingItem
 from app.models.booking_offer import BookingOffer, OfferResponse
 from app.models.booking_status_log import BookingStatusLog
+from app.models.category import Category
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.review import Review
@@ -58,7 +60,7 @@ from app.schemas.booking import (
     TimelinePro,
 )
 from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
-from app.services.commission import split_at_price
+from app.services.commission import commission_gst, split_at_price
 from app.services.provider_matching import (
     is_eligible_provider_multi_stmt,
 )
@@ -375,6 +377,11 @@ class BookingService:
         With ``sp_id`` every item is also billed at that SP's price for its
         variant, locked against the ``quoted_price`` the customer saw (SVC-411,
         ``_lock_sp_prices``), and split by ``commission.split_at_price``.
+
+        Every item, with or without ``sp_id``, also pays GST on its commission
+        at its service's category ``commission_gst_pct`` (SVC-410,
+        ``commission.commission_gst``), stored in ``commission_gst`` and taken
+        off ``provider_payout``.
         """
         if not items:
             raise ValueError("Booking must have at least one service")
@@ -430,6 +437,27 @@ class BookingService:
         # variant this branch dies.
         commission_rate = to_decimal(settings.PLATFORM_COMMISSION_PERCENT) / 100
 
+        # SVC-410: the GST on the commission, by each service's own category
+        # (the row SVC-412's pricing screen joins, so the screen and the
+        # booking agree). One query; never ``svc.category``, which would lazy
+        # load. Service.category_id is NOT NULL with an FK, so every service
+        # has a rate.
+        category_ids = {svc.category_id for svc in services_by_id.values()}
+        gst_rows = await self.db.execute(
+            select(Category.id, Category.commission_gst_pct).where(Category.id.in_(category_ids))
+        )
+        gst_pct_by_category: dict[uuid.UUID, Decimal] = dict(gst_rows.tuples().all())
+
+        class _ItemLine(NamedTuple):
+            req: CreateBookingItemRequest
+            svc: Service
+            variant: ServiceVariant | None
+            unit_price: Decimal
+            total_price: Decimal
+            platform_commission: Decimal
+            commission_gst: Decimal
+            provider_payout: Decimal
+
         # First pass: compute totals so we can seed the Booking row with the
         # aggregates. Second pass (after flush) creates the item rows keyed
         # to the booking id. Variant carries authoritative unit_price +
@@ -437,17 +465,7 @@ class BookingService:
         # any more (launch summary is 70/30, verticals 65/35), so we no
         # longer derive it from PLATFORM_COMMISSION_PERCENT when a variant
         # is in play.
-        item_lines: list[
-            tuple[
-                CreateBookingItemRequest,
-                Service,
-                ServiceVariant | None,
-                Decimal,
-                Decimal,
-                Decimal,
-                Decimal,
-            ]
-        ] = []
+        item_lines: list[_ItemLine] = []
         for item in items:
             svc = services_by_id[item.service_id]
             variant: ServiceVariant | None = None
@@ -466,14 +484,12 @@ class BookingService:
                 assert variant is not None
                 unit_price = sp_prices[variant.id]
                 total_price = to_decimal(unit_price * item.quantity)
-                platform_commission, provider_payout = split_at_price(variant, total_price)
+                platform_commission, _ = split_at_price(variant, total_price)
             elif variant is not None:
                 unit_price = to_decimal(variant.base_price)
-                unit_provider_payout = to_decimal(variant.provider_payout)
                 unit_platform_commission = to_decimal(variant.platform_commission)
                 total_price = to_decimal(unit_price * item.quantity)
                 platform_commission = to_decimal(unit_platform_commission * item.quantity)
-                provider_payout = to_decimal(unit_provider_payout * item.quantity)
             else:
                 # Pre-variant service: fall back to services.base_price + the
                 # config-driven split. Once the seed loads every service with
@@ -481,26 +497,31 @@ class BookingService:
                 unit_price = to_decimal(svc.base_price)
                 total_price = to_decimal(unit_price * item.quantity)
                 platform_commission = to_decimal(total_price * commission_rate)
-                provider_payout = total_price - platform_commission
+
+            # SVC-410, on every path: the GST on the commission comes out of
+            # the SP's share, so commission + GST + payout = the item total.
+            gst = commission_gst(platform_commission, gst_pct_by_category[svc.category_id])
+            provider_payout = total_price - platform_commission - gst
 
             item_lines.append(
-                (
-                    item,
-                    svc,
-                    variant,
-                    unit_price,
-                    total_price,
-                    platform_commission,
-                    provider_payout,
+                _ItemLine(
+                    req=item,
+                    svc=svc,
+                    variant=variant,
+                    unit_price=unit_price,
+                    total_price=total_price,
+                    platform_commission=platform_commission,
+                    commission_gst=gst,
+                    provider_payout=provider_payout,
                 )
             )
 
-        # Line tuple indices (item, svc, variant, unit_price, total_price,
-        # platform_commission, provider_payout) — the totals are the last
-        # three, one shift right of the pre-variant tuple.
-        total_service_amount = sum((line[4] for line in item_lines), start=Decimal(0))
-        total_platform_commission = sum((line[5] for line in item_lines), start=Decimal(0))
-        total_provider_payout = sum((line[6] for line in item_lines), start=Decimal(0))
+        total_service_amount = sum((line.total_price for line in item_lines), start=Decimal(0))
+        total_platform_commission = sum(
+            (line.platform_commission for line in item_lines), start=Decimal(0)
+        )
+        total_commission_gst = sum((line.commission_gst for line in item_lines), start=Decimal(0))
+        total_provider_payout = sum((line.provider_payout for line in item_lines), start=Decimal(0))
 
         # Coupon application. Validated with the cart total *before* the
         # booking row is added so an invalid code refuses the request cleanly
@@ -533,6 +554,7 @@ class BookingService:
             # locked prices; without it, the catalogue's.
             locked_price=total_service_amount,
             platform_commission=total_platform_commission,
+            commission_gst=total_commission_gst,
             provider_payout=total_provider_payout,
             # Decimal end to end since SVC-181 (was via float(); see the
             # coupon-application block above).
@@ -567,15 +589,8 @@ class BookingService:
         # it now would count as a mutation rather than a load, tripping the
         # ``raise_on_sql`` sentinel we depend on for read-path hygiene.
         item_rows: list[BookingItem] = []
-        for (
-            req,
-            svc,
-            variant,
-            unit_price,
-            total_price,
-            platform_commission,
-            provider_payout,
-        ) in item_lines:
+        for line in item_lines:
+            svc, variant = line.svc, line.variant
             item_row = BookingItem(
                 booking_id=booking.id,
                 service_id=svc.id,
@@ -584,15 +599,16 @@ class BookingService:
                 # Once the seed loads every service with variants this
                 # stays populated on every row.
                 service_variant_id=variant.id if variant is not None else None,
-                quantity=req.quantity,
+                quantity=line.req.quantity,
                 # unit_price comes from the variant when present, from
                 # services.base_price otherwise. Either way it's snapshotted
                 # here so a later price update on the catalogue does not
                 # retro-alter the bill.
-                unit_price=unit_price,
-                total_price=total_price,
-                platform_commission=platform_commission,
-                provider_payout=provider_payout,
+                unit_price=line.unit_price,
+                total_price=line.total_price,
+                platform_commission=line.platform_commission,
+                commission_gst=line.commission_gst,
+                provider_payout=line.provider_payout,
             )
             # Same reasoning as `items` below: populate the relationship
             # attributes manually so the response builder that runs after

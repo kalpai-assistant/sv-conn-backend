@@ -9,9 +9,13 @@ gives back its fixed amounts.
 Used by ``create_booking`` for a chosen SP's price and by
 ``standard_variant.repriced_split`` when an admin reprices a variant.
 
-``take_home`` (SVC-412) adds the GST on that commission, at the category's
-``commission_gst_pct``: what the SP's pricing screen shows as "You receive".
-Bookings don't store that GST yet; that is SVC-410, which reuses this helper.
+The platform charges 18% GST on its commission (SVC-410), at the category's
+``commission_gst_pct``, and it comes out of the SP's share: ``commission_gst``
+is that one rule. ``take_home`` (SVC-412) uses it for what the SP's pricing
+screen shows as "You receive", and ``create_booking`` uses it on every booking,
+with or without a chosen SP, storing the result in ``commission_gst`` on the
+booking and its items. Payouts, refunds and statements read the stored amounts
+and never recompute them.
 """
 
 from decimal import Decimal
@@ -47,6 +51,18 @@ def split_at_price(
     return commission, amount - commission
 
 
+def commission_gst(
+    commission: Decimal | float | int | str, gst_pct: Decimal | float | int | str
+) -> Decimal:
+    """The GST on ``commission`` at ``gst_pct`` percent, rounded half up to paise.
+
+    ``gst_pct`` is the category's ``commission_gst_pct``, never the variant's
+    ``gst_percent`` (that one is the customer's GST on the service). The only
+    place this rule lives: ``take_home`` and ``create_booking`` both call it.
+    """
+    return to_decimal(to_decimal(commission) * to_decimal(gst_pct) / HUNDRED)
+
+
 def commission_pct(variant: ServiceVariant) -> Decimal:
     """The commission percent ``split_at_price`` applies to ``variant``,
     unrounded: ``platform_commission / base_price × 100``, or
@@ -70,5 +86,5 @@ def take_home(
     commission, never the variant's ``gst_percent`` (the customer's GST)."""
     price = to_decimal(price)
     commission, _ = split_at_price(variant, price)
-    gst = to_decimal(commission * to_decimal(gst_pct) / HUNDRED)
+    gst = commission_gst(commission, gst_pct)
     return commission, gst, price - commission - gst

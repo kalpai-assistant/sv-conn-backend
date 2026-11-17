@@ -51,12 +51,16 @@ def process_cash_payment(self, booking_id: str):
             # the cash booking is fully paid-and-accounted, or none of it
             # is (a retry re-runs from scratch, idempotent on the PAID
             # early-return above).
+            #
+            # SVC-410: the SP also owes the GST on that commission, which the
+            # platform remits, so the debit is commission + GST: what the SP
+            # collected minus provider_payout.
             if booking.provider_id is not None and booking.platform_commission > 0:
                 sync_debit_cash_commission(
                     db,
                     provider_id=booking.provider_id,
                     booking_id=booking.id,
-                    amount_paise=to_paise(booking.platform_commission),
+                    amount_paise=to_paise(booking.platform_commission + booking.commission_gst),
                     note=f"cash commission: booking {booking.id}",
                 )
             db.commit()

@@ -74,6 +74,7 @@ async def _job(
     price=100.0,
     commission=20.0,
     payout=80.0,
+    gst="0",
     tip="0",
     discount="0",
     completed_at=BASE,
@@ -101,6 +102,7 @@ async def _job(
         platform_commission=commission,
         provider_payout=payout,
     )
+    b.commission_gst = Decimal(gst)
     b.tip_amount = Decimal(tip)
     b.discount_amount = Decimal(discount)
     b.settlement_status = settlement
@@ -363,7 +365,8 @@ async def test_payout_bookings_order_filter_and_split(client, db_session, auth_h
         completed_at=BASE + timedelta(days=2),
         price=1499.0,
         commission=299.8,
-        payout=1199.2,
+        gst="53.96",
+        payout=1145.24,
         tip="50",
         discount="100",
         settlement=SettlementStatus.FAILED,
@@ -388,7 +391,8 @@ async def test_payout_bookings_order_filter_and_split(client, db_session, auth_h
         "service_amount_paise": 149900,
         "discount_amount_paise": 10000,
         "platform_commission_paise": 29980,
-        "provider_payout_paise": 119920,
+        "commission_gst_paise": 5396,
+        "provider_payout_paise": 114524,
         "tip_amount_paise": 5000,
         "settlement_status": "failed",
         "settlement_payout_id": "pout_X1",
@@ -428,7 +432,8 @@ async def test_csv_header_values_and_ist_day_edges(client, db_session, auth_head
         completed_at=start,
         price=1499.0,
         commission=299.8,
-        payout=1199.2,
+        gst="53.96",
+        payout=1145.24,
         tip="50",
         settlement=SettlementStatus.FAILED,
     )
@@ -455,6 +460,7 @@ async def test_csv_header_values_and_ist_day_edges(client, db_session, auth_head
             "booking_id",
             "locked_price",
             "commission",
+            "commission_gst",
             "sp_payout",
             "booking_completed_at",
             "payout_status",
@@ -467,7 +473,8 @@ async def test_csv_header_values_and_ist_day_edges(client, db_session, auth_head
             str(first.id),
             "1499.00",
             "299.80",
-            "1249.20",
+            "53.96",
+            "1195.24",
             "2099-04-01T00:00:00+05:30",
             "failed",
         ],
@@ -477,6 +484,7 @@ async def test_csv_header_values_and_ist_day_edges(client, db_session, auth_head
             str(last.id),
             "100.00",
             "20.00",
+            "0.00",
             "80.00",
             "2099-04-01T23:59:59+05:30",
             "pending",

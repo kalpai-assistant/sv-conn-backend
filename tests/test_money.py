@@ -97,11 +97,16 @@ async def test_commission_split_is_exact_and_adds_back_up(db_session):
 
     assert booking.service_amount == Decimal("100.09")
     assert booking.platform_commission == Decimal("20.02")
-    assert booking.provider_payout == Decimal("80.07")
-    # The halves reconstruct the whole — no paisa created or destroyed.
-    assert booking.platform_commission + booking.provider_payout == booking.service_amount
+    # SVC-410: 18% GST on the commission, 3.6036 -> 3.60, off the SP's share.
+    assert booking.commission_gst == Decimal("3.60")
+    assert booking.provider_payout == Decimal("76.47")
+    # The parts reconstruct the whole — no paisa created or destroyed.
+    assert (
+        booking.platform_commission + booking.commission_gst + booking.provider_payout
+        == booking.service_amount
+    )
     # And the payout converts to the full amount owed.
-    assert to_paise(booking.provider_payout) == 8007
+    assert to_paise(booking.provider_payout) == 7647
 
 
 # --- the API contract must not change ----------------------------------------

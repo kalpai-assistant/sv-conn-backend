@@ -149,6 +149,9 @@ class PayoutBookingRow(BaseModel):
     service_amount_paise: int
     discount_amount_paise: int
     platform_commission_paise: int
+    # SVC-410: the GST on the commission, taken off the SP's share, so
+    # service_amount = commission + GST + provider_payout. 0 before SVC-410.
+    commission_gst_paise: int
     provider_payout_paise: int
     tip_amount_paise: int
     settlement_status: str

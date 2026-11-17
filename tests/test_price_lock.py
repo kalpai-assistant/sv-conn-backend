@@ -126,18 +126,19 @@ async def _booking_count(db, consumer) -> int:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("price", "quantity", "total", "commission", "payout"),
+    ("price", "quantity", "total", "commission", "gst", "payout"),
     [
         # Below the platform price: 4000 x 750/2499 = 1200.48 (SVC-410's 600.24 x 2).
-        ("2000.00", 2, "4000.00", "1200.48", "2799.52"),
-        # At the platform price the variant's fixed amounts come back.
-        ("2499.00", 1, "2499.00", "750.00", "1749.00"),
+        # SVC-410: plus 18% GST on it, off the payout.
+        ("2000.00", 2, "4000.00", "1200.48", "216.09", "2583.43"),
+        # At the platform price the variant's fixed commission comes back.
+        ("2499.00", 1, "2499.00", "750.00", "135.00", "1614.00"),
         # Above it, the same share of more.
-        ("2999.50", 1, "2999.50", "900.21", "2099.29"),
+        ("2999.50", 1, "2999.50", "900.21", "162.04", "1937.25"),
     ],
 )
 async def test_a_quoted_price_the_sp_still_charges_is_locked_per_item(
-    client, db_session, auth_headers, price, quantity, total, commission, payout
+    client, db_session, auth_headers, price, quantity, total, commission, gst, payout
 ):
     service, variant = await _service(db_session)
     sp = await _eligible_provider(db_session, service)
@@ -162,13 +163,15 @@ async def test_a_quoted_price_the_sp_still_charges_is_locked_per_item(
     item = await db_session.scalar(select(BookingItem).where(BookingItem.booking_id == booking.id))
     assert item.service_variant_id == variant.id
     assert (item.unit_price, item.total_price) == (Decimal(price), Decimal(total))
-    assert (item.platform_commission, item.provider_payout) == (
+    assert (item.platform_commission, item.commission_gst, item.provider_payout) == (
         Decimal(commission),
+        Decimal(gst),
         Decimal(payout),
     )
     assert booking.locked_price == booking.service_amount == Decimal(total)
-    assert (booking.platform_commission, booking.provider_payout) == (
+    assert (booking.platform_commission, booking.commission_gst, booking.provider_payout) == (
         Decimal(commission),
+        Decimal(gst),
         Decimal(payout),
     )
 
@@ -214,7 +217,9 @@ async def test_a_multi_item_cart_sums_the_locked_items(client, db_session, auth_
     # 2000 + 3 x 800; commission 600.24 + 2400 x 300/1000 = 720.00.
     assert booking.locked_price == Decimal("4400.00")
     assert booking.platform_commission == Decimal("1320.24")
-    assert booking.provider_payout == Decimal("3079.76")
+    # SVC-410: 18% GST per item, 108.04 + 129.60, off the payout.
+    assert booking.commission_gst == Decimal("237.64")
+    assert booking.provider_payout == Decimal("2842.12")
 
 
 # --- Refusals -----------------------------------------------------------------------
@@ -412,7 +417,9 @@ async def test_without_sp_id_the_variant_amounts_stand_and_a_quoted_price_is_ign
     assert booking.chosen_sp_id is None
     assert booking.locked_price == booking.service_amount == Decimal("4998.00")
     assert booking.platform_commission == Decimal("1500.00")
-    assert booking.provider_payout == Decimal("3498.00")
+    # SVC-410: 18% GST on the commission, off the payout.
+    assert booking.commission_gst == Decimal("270.00")
+    assert booking.provider_payout == Decimal("3228.00")
     item = await db_session.scalar(select(BookingItem).where(BookingItem.booking_id == booking.id))
     assert item.unit_price == BASE
 

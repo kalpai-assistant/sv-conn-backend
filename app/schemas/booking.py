@@ -251,10 +251,14 @@ class BookingResponse(BaseModel):
     # `BookingOfferResponse` fields have no defaults).
     items: list[BookingItemResponse]
     status: str
-    # Sum of items' total_price / platform_commission / provider_payout at
-    # booking time. Snapshotted on Booking; see the model's field comment.
+    # Sum of items' total_price / platform_commission / commission_gst /
+    # provider_payout at booking time. Snapshotted on Booking; see the model's
+    # field comment. service_amount = platform_commission + commission_gst +
+    # provider_payout (SVC-410: the GST on the commission is taken off the
+    # SP's share).
     service_amount: float
     platform_commission: float
+    commission_gst: float
     provider_payout: float
     # Coupon reduction (rupees, 0 when none applied). Client renders the
     # line item and computes total = service_amount - discount + tip.
@@ -413,6 +417,7 @@ class BookingResponse(BaseModel):
             status=booking.status.value if hasattr(booking.status, "value") else booking.status,
             service_amount=booking.service_amount,
             platform_commission=booking.platform_commission,
+            commission_gst=booking.commission_gst,
             provider_payout=booking.provider_payout,
             discount_amount=booking.discount_amount,
             tip_amount=booking.tip_amount,

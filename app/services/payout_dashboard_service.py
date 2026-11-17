@@ -42,6 +42,8 @@ CSV_COLUMNS = (
     "booking_id",
     "locked_price",
     "commission",
+    # SVC-410: so locked_price = commission + commission_gst + (sp_payout - tip).
+    "commission_gst",
     "sp_payout",
     "booking_completed_at",
     "payout_status",
@@ -239,6 +241,7 @@ class PayoutDashboardService:
                 "service_amount_paise": to_paise(b.service_amount),
                 "discount_amount_paise": to_paise(b.discount_amount),
                 "platform_commission_paise": to_paise(b.platform_commission),
+                "commission_gst_paise": to_paise(b.commission_gst),
                 "provider_payout_paise": to_paise(b.provider_payout),
                 "tip_amount_paise": to_paise(b.tip_amount),
                 "settlement_status": b.settlement_status.value,
@@ -270,6 +273,7 @@ class PayoutDashboardService:
                     Booking.id,
                     Booking.service_amount,
                     Booking.platform_commission,
+                    Booking.commission_gst,
                     Booking.provider_payout + Booking.tip_amount,
                     first.c.completed_at,
                     Booking.settlement_status,
@@ -290,13 +294,24 @@ class PayoutDashboardService:
         out = io.StringIO()
         writer = csv.writer(out, lineterminator="\r\n")
         writer.writerow(CSV_COLUMNS)
-        for sp_id, sp_name, booking_id, price, commission, sp_payout, completed_at, status in rows:
+        for (
+            sp_id,
+            sp_name,
+            booking_id,
+            price,
+            commission,
+            gst,
+            sp_payout,
+            completed_at,
+            status,
+        ) in rows:
             cells = (
                 str(sp_id),
                 sp_name or "",
                 str(booking_id),
                 _rupees(price),
                 _rupees(commission),
+                _rupees(gst),
                 _rupees(sp_payout),
                 completed_at.astimezone(_IST).isoformat(timespec="seconds"),
                 status.value,
