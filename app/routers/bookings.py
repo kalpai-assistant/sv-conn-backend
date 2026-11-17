@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import call_after_commit, get_db
 from app.dependencies import get_current_user, get_redis, require_role
 from app.exceptions import IdempotencyInProgress
 from app.models.booking import BookingStatus, PaymentMethod
@@ -75,7 +75,14 @@ async def create_booking(
             payment_method=request.payment_method,
             coupon_code=request.coupon_code,
         )
-        send_booking_notification.delay(booking_id=str(booking.id), event="new_request")
+        # SVC-461: the worker fetches by id; if we enqueue before FastAPI's
+        # ``get_db`` commits, the task can run on a worker that doesn't see
+        # the booking yet and the push is lost (404 in ``send_booking_notification``).
+        booking_id = str(booking.id)
+        call_after_commit(
+            db,
+            lambda: send_booking_notification.delay(booking_id=booking_id, event="new_request"),
+        )
         return BookingResponse.for_viewer(booking, current_user.id)
 
     if not idempotency_key:
@@ -194,7 +201,12 @@ async def accept_booking(
         booking_id=booking_id, provider_id=current_user.id
     )
     if newly_accepted:
-        send_booking_notification.delay(booking_id=str(booking.id), event="accepted")
+        # SVC-461: fire after commit so the worker can't 404 on an unflushed row.
+        booking_id_str = str(booking.id)
+        call_after_commit(
+            db,
+            lambda: send_booking_notification.delay(booking_id=booking_id_str, event="accepted"),
+        )
     return BookingResponse.for_viewer(booking, current_user.id)
 
 
@@ -233,10 +245,19 @@ async def assign_booking(
     booking, newly_claimed, pro = await BookingService(db).assign(
         booking_id=booking_id, sp_id=current_user.id, professional_id=request.professional_id
     )
+    # SVC-461: both pushes rely on the booking being readable to the worker,
+    # which only happens after get_db commits.
+    booking_id_str = str(booking.id)
     if newly_claimed:
-        send_booking_notification.delay(booking_id=str(booking.id), event="accepted")
+        call_after_commit(
+            db,
+            lambda: send_booking_notification.delay(booking_id=booking_id_str, event="accepted"),
+        )
     if pro is not None and not pro.is_self:
-        send_booking_notification.delay(booking_id=str(booking.id), event="assigned")
+        call_after_commit(
+            db,
+            lambda: send_booking_notification.delay(booking_id=booking_id_str, event="assigned"),
+        )
     return BookingResponse.for_viewer(booking, current_user.id)
 
 
@@ -296,7 +317,7 @@ async def decline_booking(
     await BookingService(db).decline_offer(booking_id=booking_id, provider_id=current_user.id)
 
 
-def notify_transition(booking) -> None:
+def notify_transition(db: AsyncSession, booking) -> None:
     """The side effects of a provider-side move, after it's done (SVC-320 PR 3).
 
     Shared by the provider routes here and the Pro routes in ``pros.py``, so the
@@ -304,15 +325,27 @@ def notify_transition(booking) -> None:
 
     * the consumer's push for en route / in progress / completed (SVC-334);
     * on completing a cash booking, recording the cash payment (Fix #4).
+
+    SVC-461: the enqueues are deferred to after ``db``'s commit so the worker
+    can never see a stale "booking not found" / wrong-status row.
     """
+    booking_id = str(booking.id)
+    event = booking.status.value
+    payment_method = booking.payment_method
     if booking.status in (
         BookingStatus.EN_ROUTE,
         BookingStatus.IN_PROGRESS,
         BookingStatus.COMPLETED,
     ):
-        send_booking_notification.delay(booking_id=str(booking.id), event=booking.status.value)
-    if booking.status is BookingStatus.COMPLETED and booking.payment_method == PaymentMethod.CASH:
-        process_cash_payment.delay(booking_id=str(booking.id))
+        call_after_commit(
+            db,
+            lambda: send_booking_notification.delay(booking_id=booking_id, event=event),
+        )
+    if booking.status is BookingStatus.COMPLETED and payment_method == PaymentMethod.CASH:
+        call_after_commit(
+            db,
+            lambda: process_cash_payment.delay(booking_id=booking_id),
+        )
 
 
 def viewer_for(booking, user_id):
@@ -334,7 +367,7 @@ async def mark_en_route(
         new_status=BookingStatus.EN_ROUTE,
         changed_by=current_user.id,
     )
-    notify_transition(booking)
+    notify_transition(db, booking)
     # The window SVC-169 is about: ACCEPTED and EN_ROUTE are the two states
     # where the PIN is still live, and both of these routes are provider-driven.
     return BookingResponse.for_viewer(booking, current_user.id)
@@ -354,7 +387,7 @@ async def start_booking(
         changed_by=current_user.id,
         otp=request.otp,
     )
-    notify_transition(booking)
+    notify_transition(db, booking)
     return BookingResponse.for_viewer(booking, current_user.id)
 
 
@@ -369,7 +402,7 @@ async def complete_booking(
         new_status=BookingStatus.COMPLETED,
         changed_by=current_user.id,
     )
-    notify_transition(booking)
+    notify_transition(db, booking)
     return BookingResponse.for_viewer(booking, current_user.id)
 
 
@@ -394,15 +427,24 @@ async def cancel_booking(
     booking, outcome = await BookingService(db).cancel(
         booking_id=booking_id, user_id=current_user.id, reason=request.reason
     )
+    booking_id_str = str(booking.id)
+    actor_id_str = str(current_user.id)
     if outcome == "reopened":
-        notify_reopened(booking.id)
+        # SVC-461: defer the two pushes notify_reopened enqueues until the
+        # cancel's commit is durable — otherwise the worker could fetch the
+        # booking before the status-flip is visible.
+        call_after_commit(db, lambda: notify_reopened(booking_id_str))
         return BookingResponse.for_viewer(booking, current_user.id)
     # SVC-278: cancel was the only lifecycle transition that told nobody, so
     # the other party found out by opening the app — a provider could travel to
     # a job the consumer had already called off. `actor_id` because either side
     # can cancel and the push goes to the one who didn't.
-    send_booking_notification.delay(
-        booking_id=str(booking.id), event="cancelled", actor_id=str(current_user.id)
+    # SVC-461: same race — defer to after_commit.
+    call_after_commit(
+        db,
+        lambda: send_booking_notification.delay(
+            booking_id=booking_id_str, event="cancelled", actor_id=actor_id_str
+        ),
     )
     return BookingResponse.for_viewer(booking, current_user.id)
 
