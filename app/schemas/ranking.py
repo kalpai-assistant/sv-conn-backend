@@ -25,6 +25,11 @@ class RankedProvider(BaseModel):
     score: float
     why: list[str]
     is_boosted: bool
+    # SVC-482: priced outside its sensitive category's recommended range
+    # (variant base_price ± bounds_pct). Such SPs list after every in-range one,
+    # and the app warns before booking one. Always false outside a sensitive
+    # category. Computed per request, never stored.
+    outside_recommended_range: bool
 
 
 class ServiceProvidersResponse(BaseModel):

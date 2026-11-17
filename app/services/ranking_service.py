@@ -13,12 +13,18 @@ variant by ``sort_order``, the one ``create_booking`` bills a line without a
 variant for. Its ``base_price`` is the reference price. A service whose
 variants are all switched off has no variant to price, so it lists nobody.
 
-How they are ordered: the ticket's weighted score, with weights from
-``pricing_config.ranking_weights`` cached in-process for 60 s.
+How they are ordered (SVC-482): in a sensitive category, every SP priced
+outside the recommended range (``app.services.price_range``) lists after every
+SP inside it, whatever its score, and gets no "Below market" chip. Within each
+group, and in a category that isn't sensitive (no range, so one group), the
+order is the ticket's weighted score, with weights from
+``pricing_config.ranking_weights`` cached in-process for 60 s. The flag is
+computed per request, never stored.
 
-Two statements per request whatever the SP count (the service with its active
-variants, then one statement for candidates plus every per-SP signal), and a
-third on a config cache miss. With no active variant, the second is skipped.
+Two statements per request whatever the SP count (the service with its category
+and active variants, then one statement for candidates plus every per-SP
+signal), and a third on a config cache miss. With no active variant, the second
+is skipped.
 """
 
 import logging
@@ -26,6 +32,7 @@ import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from time import monotonic
 from typing import Any
 
@@ -36,6 +43,7 @@ from app.exceptions import AppException, ServiceNotFound, ServiceVariantNotFound
 from app.models.booking import Booking, BookingStatus
 from app.models.booking_assignment_event import BookingAssignmentEvent
 from app.models.booking_status_log import BookingStatusLog
+from app.models.category import Category
 from app.models.pricing_config import PricingConfig
 from app.models.professional import Professional
 from app.models.provider_profile import ProviderProfile
@@ -46,6 +54,7 @@ from app.models.sp_service_pricing import SpServicePricing
 from app.models.user import User
 from app.schemas.ranking import RankedProvider, ServiceProvidersResponse
 from app.services.admin_pricing_service import _validate_config
+from app.services.price_range import is_outside_range, recommended_range
 from app.services.provider_matching import eligible_providers_multi_stmt
 from app.utils.geo import build_point_wkt, distance_km_to_point
 
@@ -202,8 +211,12 @@ def why_chips(
     price: float,
     reference: float,
     activity: float,
+    outside_recommended_range: bool,
 ) -> list[str]:
-    """The first three rules that fit, in the ticket's order."""
+    """The first three rules that fit, in the ticket's order. An SP outside
+    the recommended range never says "Below market" (SVC-482): it lists last
+    with a warning, so its low price isn't a selling point. The next rule that
+    fits takes the slot."""
     chips = []
     if rating_avg is not None and rating_avg >= 4.5 and rating_count >= 20:
         chips.append("Highly rated")
@@ -213,7 +226,7 @@ def why_chips(
         chips.append("New on platform")
     if reliability >= 0.95:
         chips.append("Reliable")
-    if reference > 0 and price <= reference * BELOW_MARKET_RATIO:
+    if not outside_recommended_range and reference > 0 and price <= reference * BELOW_MARKET_RATIO:
         chips.append("Below market")
     if activity > 0.9:
         chips.append("Active today")
@@ -330,25 +343,42 @@ def ranking_rows_stmt(
     )
 
 
+@dataclass(frozen=True)
+class ResolvedVariant:
+    """The variant a sheet prices, and what its recommended range needs."""
+
+    variant_id: uuid.UUID
+    # The variant's base_price: the price_vs_ref reference and the range's centre.
+    reference: Decimal
+    # From the service's own category (services.category_id).
+    category_id: uuid.UUID
+    is_sensitive: bool
+    bounds_pct: Decimal | None
+
+
 class RankingService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
     async def _resolve_variant(
         self, service_id: uuid.UUID, variant_id: uuid.UUID | None
-    ) -> tuple[uuid.UUID, float] | None:
-        """The variant the sheet prices and its price (the reference), from one
-        statement: the active service with its active variants in
-        ``sort_order``. None when every variant is switched off. The ``id``
-        tiebreak only makes a tied ``sort_order`` deterministic; the seed never
-        ties."""
+    ) -> ResolvedVariant | None:
+        """The variant the sheet prices, its price (the reference) and the
+        service's category's range settings, from one statement: the active
+        service with its category and its active variants in ``sort_order``.
+        None when every variant is switched off. The ``id`` tiebreak only makes
+        a tied ``sort_order`` deterministic; the seed never ties."""
         rows = (
             await self.db.execute(
                 select(
                     Service.id,
+                    Category.id.label("category_id"),
+                    Category.is_sensitive,
+                    Category.bounds_pct,
                     ServiceVariant.id.label("variant_id"),
                     ServiceVariant.base_price.label("variant_price"),
                 )
+                .join(Category, Category.id == Service.category_id)
                 .outerjoin(
                     ServiceVariant,
                     (ServiceVariant.service_id == Service.id) & ServiceVariant.is_active.is_(True),
@@ -364,10 +394,17 @@ class RankingService:
             chosen = next((row for row in variants if row.variant_id == variant_id), None)
             if chosen is None:
                 raise ServiceVariantNotFound(service_id, variant_id)
-            return chosen.variant_id, float(chosen.variant_price)
-        if variants:
-            return variants[0].variant_id, float(variants[0].variant_price)
-        return None
+        elif variants:
+            chosen = variants[0]
+        else:
+            return None
+        return ResolvedVariant(
+            variant_id=chosen.variant_id,
+            reference=chosen.variant_price,
+            category_id=chosen.category_id,
+            is_sensitive=chosen.is_sensitive,
+            bounds_pct=chosen.bounds_pct,
+        )
 
     async def rank_providers(
         self,
@@ -392,13 +429,23 @@ class RankingService:
                 ttl_seconds=config.ttl_seconds,
                 providers=[],
             )
-        service_variant_id, reference = resolved
+        service_variant_id = resolved.variant_id
+        # Once per sheet: the range is the variant's and the category's, not the SP's.
+        price_range = recommended_range(
+            resolved.reference,
+            resolved.is_sensitive,
+            resolved.bounds_pct,
+            category_id=resolved.category_id,
+        )
+        # The score is float from here; the range test stays Decimal.
+        reference = float(resolved.reference)
         rows = await self.db.execute(
             ranking_rows_stmt(service_id, service_variant_id, build_point_wkt(lat, lng), now)
         )
 
-        scored: list[tuple[float, uuid.UUID, RankedProvider]] = []
+        scored: list[tuple[bool, float, uuid.UUID, RankedProvider]] = []
         for row in rows:
+            outside = is_outside_range(row.price_amount, price_range)
             price = float(row.price_amount)
             distance = float(row.distance_km)
             # Rounded once, so the chip says what the row shows.
@@ -436,17 +483,21 @@ class RankingService:
                     price=price,
                     reference=reference,
                     activity=activity,
+                    outside_recommended_range=outside,
                 ),
                 is_boosted=boosted,
+                outside_recommended_range=outside,
             )
-            scored.append((score, row.sp_id, provider))
+            scored.append((outside, score, row.sp_id, provider))
 
-        # Unrounded score, then sp_id, so equal scores come back in a stable order.
-        scored.sort(key=lambda item: (-item[0], str(item[1])))
+        # Out-of-range SPs last (False sorts first), then the unrounded score,
+        # then sp_id, so equal scores come back in a stable order. The limit
+        # cuts after the sort, so out-of-range SPs are the first to go.
+        scored.sort(key=lambda item: (item[0], -item[1], str(item[2])))
         return ServiceProvidersResponse(
             service_id=service_id,
             service_variant_id=service_variant_id,
             quoted_at=now,
             ttl_seconds=config.ttl_seconds,
-            providers=[provider for _, _, provider in scored[:limit]],
+            providers=[provider for *_, provider in scored[:limit]],
         )

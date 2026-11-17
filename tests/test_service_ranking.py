@@ -76,11 +76,21 @@ def _fresh_config_cache():
     reset_ranking_config_cache()
 
 
-async def _service(db, *, base_price=BASE_PRICE, active=True, standard=True):
+async def _service(
+    db, *, base_price=BASE_PRICE, active=True, standard=True, sensitive=False, bounds_pct=None
+):
     """A service with its Standard variant at ``base_price`` (SVC-480: every
-    service has one), unless ``standard`` is False."""
+    service has one), unless ``standard`` is False. Its own category, sensitive
+    with ``bounds_pct`` if asked (SVC-482)."""
     slug = f"rank-{uuid.uuid4().hex[:8]}"
-    category = Category(name=slug, slug=slug, is_active=True, sort_order=1)
+    category = Category(
+        name=slug,
+        slug=slug,
+        is_active=True,
+        sort_order=1,
+        is_sensitive=sensitive,
+        bounds_pct=None if bounds_pct is None else Decimal(bounds_pct),
+    )
     db.add(category)
     await db.flush()
     service = Service(
@@ -362,6 +372,7 @@ async def test_single_sp_row_has_the_ticket_shape(client, db_session, consumer_h
         "score",
         "why",
         "is_boosted",
+        "outside_recommended_range",
     }
     assert row["sp_id"] == str(sp.id)
     assert row["name"] == "Rakesh Plumbing"
@@ -372,6 +383,7 @@ async def test_single_sp_row_has_the_ticket_shape(client, db_session, consumer_h
     assert row["distance_km"] == 0.0
     assert row["reliability_score"] == 0.8  # cold-start floor
     assert row["is_boosted"] is False
+    assert row["outside_recommended_range"] is False  # not a sensitive category
 
 
 async def test_name_falls_back_to_the_sp_users_name(client, db_session, consumer_headers):
@@ -798,6 +810,7 @@ def _chips(**overrides):
         "price": 1000.0,
         "reference": 1000.0,
         "activity": 0.0,
+        "outside_recommended_range": False,
     }
     values.update(overrides)
     return why_chips(**values)
@@ -850,6 +863,18 @@ def test_at_most_three_chips_in_rule_order():
     assert _chips(**every) == ["Highly rated", "0.4 km away", "New on platform"]
     del every["rating_avg"], every["boosted"]
     assert _chips(**every) == ["0.4 km away", "Reliable", "Below market"]
+
+
+def test_outside_the_range_never_says_below_market_and_the_next_rule_takes_the_slot():
+    """SVC-482 AC 7, the rule itself."""
+    cheap = {"distance_km": 0.4, "reliability": 1.0, "price": 500.0, "activity": 1.0}
+    assert _chips(**cheap) == ["0.4 km away", "Reliable", "Below market"]
+    assert _chips(**cheap, outside_recommended_range=True) == [
+        "0.4 km away",
+        "Reliable",
+        "Active today",
+    ]
+    assert _chips(price=900.0, outside_recommended_range=True) == []
 
 
 async def test_chips_on_the_wire(client, db_session, consumer_headers):
@@ -1103,6 +1128,160 @@ async def test_a_provider_can_read_it_too(client, db_session, auth_headers):
     sp = await _sp(db_session, service)
     sheet = await _sheet(client, auth_headers(str(sp.id), "provider"), service)
     assert _ids(sheet) == [str(sp.id)]
+
+
+# --- SVC-482: the recommended range -----------------------------------------------
+
+# AC gas charging, the ticket's example: ₹2,499 ± 25% = ₹1,874.25 – ₹3,123.75.
+AC_PRICE = 2499
+AC_BOUNDS = 25
+
+
+async def _sensitive(db, *, base_price=AC_PRICE, bounds_pct=AC_BOUNDS):
+    return await _service(db, base_price=base_price, sensitive=True, bounds_pct=bounds_pct)
+
+
+def _flags(sheet) -> dict[str, bool]:
+    return {p["sp_id"]: p["outside_recommended_range"] for p in sheet["providers"]}
+
+
+async def _grouping_cast(db, service):
+    """Three SPs inside the range and three outside, one of each group boosted.
+    With the seed weights (all at ``NEAR``, no history) the scores are:
+    in-range boosted 3000 ≈ 0.98, 1900 ≈ 0.76, 3000 ≈ 0.65; outside boosted
+    3500 ≈ 0.91, 1000 ≈ 0.83, 3500 ≈ 0.60. So two out-of-range SPs outscore two
+    in-range ones."""
+    await _config(db, "ranking_weights", DEFAULT_CONFIG["ranking_weights"])
+    boost = {"boost_eligible_at": datetime.now(UTC) - timedelta(days=1)}
+    return {
+        "in_boosted": await _sp(db, service, price=3000, **boost),
+        "in_cheap": await _sp(db, service, price=1900),
+        "in_dear": await _sp(db, service, price=3000),
+        "out_boosted": await _sp(db, service, price=3500, **boost),
+        "out_cheap": await _sp(db, service, price=1000),
+        "out_dear": await _sp(db, service, price=3500),
+    }
+
+
+async def test_out_of_range_sps_list_after_every_in_range_one(client, db_session, consumer_headers):
+    """AC 1 + 2 + 6: two groups, each in its own score order (boost included),
+    whatever the out-of-range SPs score."""
+    service = await _sensitive(db_session)
+    sps = await _grouping_cast(db_session, service)
+    sheet = await _sheet(client, consumer_headers, service)
+
+    order = ["in_boosted", "in_cheap", "in_dear", "out_boosted", "out_cheap", "out_dear"]
+    assert _ids(sheet) == [str(sps[key].id) for key in order]
+    assert list(_flags(sheet).values()) == [False] * 3 + [True] * 3
+    scores = {p["sp_id"]: p["score"] for p in sheet["providers"]}
+    # Out-of-range SPs that outscore in-range ones still list below them.
+    assert scores[str(sps["out_cheap"].id)] > scores[str(sps["in_cheap"].id)]
+    assert scores[str(sps["out_boosted"].id)] > scores[str(sps["in_dear"].id)]
+
+
+async def test_a_category_that_isnt_sensitive_keeps_the_score_order(
+    client, db_session, consumer_headers
+):
+    """AC 3: the same cast and prices, not sensitive: one group, SVC-409's
+    order, nobody flagged. A bounds_pct on a category that isn't sensitive is
+    ignored too."""
+    for bounds_pct in (None, AC_BOUNDS):
+        service = await _service(db_session, base_price=AC_PRICE, bounds_pct=bounds_pct)
+        sps = await _grouping_cast(db_session, service)
+        sheet = await _sheet(client, consumer_headers, service)
+
+        order = ["in_boosted", "out_boosted", "out_cheap", "in_cheap", "in_dear", "out_dear"]
+        assert _ids(sheet) == [str(sps[key].id) for key in order]
+        assert set(_flags(sheet).values()) == {False}
+
+
+@pytest.mark.parametrize(
+    ("price", "outside"),
+    [
+        ("1874.24", True),
+        ("1874.25", False),  # reference × (1 − 25/100), exactly
+        ("2499.00", False),
+        ("3123.75", False),  # reference × (1 + 25/100), exactly
+        ("3123.76", True),
+    ],
+)
+async def test_the_bounds_are_inclusive(client, db_session, consumer_headers, price, outside):
+    """AC 4, through the endpoint, on the ticket's own example."""
+    service = await _sensitive(db_session)
+    sp = await _sp(db_session, service, price=Decimal(price))
+    assert _flags(await _sheet(client, consumer_headers, service)) == {str(sp.id): outside}
+
+
+async def test_a_bounds_or_price_change_regroups_on_the_next_request(
+    client, db_session, consumer_headers
+):
+    """AC 5: nothing stored. The admin edits bounds_pct, then the variant's
+    price; the next sheet regroups, and the SP's price row is never written."""
+    service = await _sensitive(db_session)
+    sp = await _sp(db_session, service, price=3200)
+    price_row = select(
+        SpServicePricing.price_amount, SpServicePricing.is_active, SpServicePricing.updated_at
+    ).where(SpServicePricing.sp_id == sp.id)
+    before = (await db_session.execute(price_row)).one()
+
+    async def flag() -> bool:
+        return _flags(await _sheet(client, consumer_headers, service))[str(sp.id)]
+
+    assert await flag() is True  # 3200 > 3123.75
+    category = await db_session.get(Category, service.category_id)
+    category.bounds_pct = Decimal("30")  # high = 3248.70
+    await db_session.flush()
+    assert await flag() is False
+    variant = await _first_variant(db_session, service)
+    variant.base_price = Decimal("2000")  # high = 2600.00
+    await db_session.flush()
+    assert await flag() is True
+    variant.base_price = Decimal("3200")  # exactly the reference
+    await db_session.flush()
+    assert await flag() is False
+    category.is_sensitive = False
+    variant.base_price = Decimal("100")
+    await db_session.flush()
+    assert await flag() is False  # no range at all
+
+    assert (await db_session.execute(price_row)).one() == before
+
+
+async def test_out_of_range_never_says_below_market(client, db_session, consumer_headers):
+    """AC 7: under the range is out of range, so no "Below market"; an
+    in-range SP at ≤ 90% of the reference still gets it."""
+    service = await _sensitive(db_session)
+    under = await _sp(db_session, service, price=1500)  # out, and ≤ 90%
+    cheap = await _sp(db_session, service, price=2200)  # in, and ≤ 2249.10
+    sheet = await _sheet(client, consumer_headers, service)
+    chips = {p["sp_id"]: p["why"] for p in sheet["providers"]}
+
+    assert _flags(sheet) == {str(cheap.id): False, str(under.id): True}
+    assert "Below market" in chips[str(cheap.id)]
+    assert "Below market" not in chips[str(under.id)]
+
+
+async def test_the_limit_cuts_out_of_range_sps_first(client, db_session, consumer_headers):
+    service = await _sensitive(db_session)
+    await _sp(db_session, service, price=1000, point=HERE)  # the best score, out of range
+    first = await _sp(db_session, service, price=2000)
+    second = await _sp(db_session, service, price=2500)
+    sheet = await _sheet(client, consumer_headers, service, limit=2)
+    assert _ids(sheet) == [str(first.id), str(second.id)]
+
+
+async def test_the_range_is_the_sheets_variants(client, db_session, consumer_headers):
+    """SVC-480: each variant is its own reference, so the same SP can be in
+    range on one variant and out on another."""
+    service = await _sensitive(db_session, base_price=1000, bounds_pct=20)
+    standard = await _first_variant(db_session, service)
+    big = await _variant(db_session, service, "3 BHK", 2000, sort_order=1)
+    sp = await _sp(db_session, service, price=1150, variant=standard)
+    await _price(db_session, sp, service, big, 1150)
+
+    assert _flags(await _sheet(client, consumer_headers, service)) == {str(sp.id): False}
+    sheet = await _sheet(client, consumer_headers, service, variant_id=str(big.id))
+    assert _flags(sheet) == {str(sp.id): True}  # under 1600
 
 
 # --- performance ----------------------------------------------------------------
