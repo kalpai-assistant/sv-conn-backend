@@ -18,7 +18,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import call_after_commit, get_db
+from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.booking import BookingStatus
 from app.models.professional import Professional
@@ -114,7 +114,7 @@ async def _move(
     db: AsyncSession, pro: Professional, booking_id: UUID, status: BookingStatus, otp=None
 ) -> BookingResponse:
     booking = await ProService(db).job_transition(pro, booking_id, status, otp=otp)
-    notify_transition(db, booking)
+    notify_transition(booking)
     return BookingResponse.for_viewer(booking, viewer_for(booking, pro.user_id))
 
 
@@ -202,18 +202,11 @@ async def decline_job(
     finding someone else.
     """
     booking, outcome = await BookingService(db).decline_job(booking_id, current_user.id)
-    booking_id_str = str(booking.id)
-    actor_id_str = str(current_user.id)
-    # SVC-461: fire pushes only after the decline's commit is visible — the
-    # worker reads by booking_id and would 404 on an uncommitted status flip.
     if outcome == "reopened":
-        call_after_commit(db, lambda: notify_reopened(booking_id_str))
+        notify_reopened(booking.id)
     elif booking.provider_id != current_user.id:
         # An SP declining their own Pro-for-self's job doesn't need telling.
-        call_after_commit(
-            db,
-            lambda: send_booking_notification.delay(
-                booking_id=booking_id_str, event="pro_declined", actor_id=actor_id_str
-            ),
+        send_booking_notification.delay(
+            booking_id=str(booking.id), event="pro_declined", actor_id=str(current_user.id)
         )
     return DeclineJobResponse(booking_id=booking.id, outcome=outcome)
