@@ -133,7 +133,10 @@ class ProviderProfile(Base):
 
     # SVC-408: new-SP boost state (epic SVC-406). Lives on the SP row because it
     # is 1:1 and needs no history at v1. NULL = the boost window hasn't started.
-    # Nothing writes either column yet; the boost hook is SVC-414.
+    # SVC-414 writes them: ``start_boost`` on the SP's own KYC approval (admin or
+    # AI auto-approve, never a team Pro's), and every completed job adds 1 to the
+    # count once the boost has started (``BookingService._increment_completed_jobs``).
+    # The ranking sheet's ``is_boosted`` decides when the window is over.
     boost_eligible_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -265,3 +268,17 @@ class ProviderProfile(Base):
         the ``parent`` relationship, so it never triggers a lazy load.
         """
         return self.parent_provider_id or self.user_id
+
+    def start_boost(self) -> None:
+        """Start the new-SP boost window at the KYC approval time (SVC-414).
+
+        Call it right after the SP is set VERIFIED, in the same transaction; it
+        doesn't flush. Only the first approval starts it: once
+        ``boost_eligible_at`` is set nothing here moves it, so an approval after
+        a rejection can't buy a second window. Re-boosting an SP is a manual
+        SQL job (clear the column, then approve), out of scope for the console.
+        """
+        if self.boost_eligible_at is not None:
+            return
+        self.boost_eligible_at = self.kyc_reviewed_at
+        self.boost_completed_jobs_count = 0
