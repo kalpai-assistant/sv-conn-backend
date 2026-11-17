@@ -1,6 +1,6 @@
 """
 Migration round trips on a scratch database (SVC-319, SVC-339, SVC-340, SVC-320,
-SVC-344, SVC-333, SVC-329, SVC-366, SVC-408, SVC-480, SVC-418).
+SVC-344, SVC-333, SVC-329, SVC-366, SVC-408, SVC-480, SVC-418, SVC-414).
 
 The rest of the suite builds its schema with ``Base.metadata.create_all``, and CI
 only ever runs ``alembic upgrade head`` — so a migration's ``downgrade()`` is not
@@ -2449,3 +2449,97 @@ def test_svc_418_downgrade_removes_only_its_unedited_rows(scratch_db):
         restored = {k: v for k, v in again[key].items() if k not in stamps}
         original = {k: v for k, v in backfilled[key].items() if k not in stamps}
         assert restored == original
+
+
+# --- SVC-414: start the new-SP boost for already-approved SPs (data migration) ------
+
+
+SVC_414 = "ac2f13dad2a1"
+BEFORE_SVC_414 = SVC_418
+
+_T_REVIEWED = "2026-11-10 09:30:00+00"
+_T_BOOSTED = "2026-10-01 08:00:00+00"
+
+# key: (kyc_status, kyc_reviewed_at, total_completed_jobs, boost_eligible_at, boost count)
+_SVC_414_SPS = {
+    "approved": ("VERIFIED", _T_REVIEWED, 4, None, 0),
+    "no_review_time": ("VERIFIED", None, 2, None, 0),
+    "pending": ("PENDING", None, 0, None, 0),
+    "submitted": ("SUBMITTED", None, 0, None, 0),
+    "rejected": ("REJECTED", _T_REVIEWED, 0, None, 0),
+    "already_boosted": ("VERIFIED", _T_REVIEWED, 9, _T_BOOSTED, 2),
+}
+
+
+def _seed_svc_414(url: URL) -> dict:
+    ids = {}
+    for key, (kyc, reviewed, total, boosted, count) in _SVC_414_SPS.items():
+        ids[key] = uuid.uuid4()
+        _engine_run(
+            url,
+            "INSERT INTO users (id, phone, role, is_active) VALUES (:id, :phone, 'PROVIDER', true)",
+            {"id": ids[key], "phone": f"+9{ids[key].int % 10**11:011d}"},
+        )
+        _engine_run(
+            url,
+            "INSERT INTO provider_profiles (id, user_id, service_area_radius_km, avg_rating, "
+            "total_completed_jobs, kyc_status, kyc_reviewed_at, is_online, boost_eligible_at, "
+            "boost_completed_jobs_count) "
+            "VALUES (:id, :user_id, 10, 4.5, :total, :kyc, :reviewed, true, :boosted, :count)",
+            {
+                "id": uuid.uuid4(),
+                "user_id": ids[key],
+                "total": total,
+                "kyc": kyc,
+                "reviewed": reviewed,
+                "boosted": boosted,
+                "count": count,
+            },
+        )
+    return ids
+
+
+def _boost_state(url: URL, ids: dict) -> dict:
+    by_user = {
+        row["user_id"]: dict(row)
+        for row in _query(
+            url,
+            "SELECT user_id, kyc_status, kyc_reviewed_at, total_completed_jobs, "
+            "boost_eligible_at, boost_completed_jobs_count FROM provider_profiles",
+        )
+    }
+    return {key: by_user[user_id] for key, user_id in ids.items()}
+
+
+def test_svc_414_backfills_verified_sps_only_and_is_idempotent(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_414)
+    ids = _seed_svc_414(scratch_db)
+    before = _boost_state(scratch_db, ids)
+    shape_before = _shape(scratch_db, "provider_profiles")
+
+    result = _alembic_result(scratch_db, "upgrade", SVC_414)
+
+    assert result.returncode == 0, result.stderr
+    assert "1 VERIFIED SPs started at kyc_reviewed_at, 1 skipped" in result.stderr
+    after = _boost_state(scratch_db, ids)
+    approved = after["approved"]
+    # Started at its approval time, counting the jobs it has already done.
+    assert approved["boost_eligible_at"] == approved["kyc_reviewed_at"]
+    assert approved["boost_completed_jobs_count"] == 4
+    assert {k: v for k, v in approved.items() if not k.startswith("boost_")} == {
+        k: v for k, v in before["approved"].items() if not k.startswith("boost_")
+    }
+    # No approval time to start from, not VERIFIED, or already started: untouched.
+    for key in ("no_review_time", "pending", "submitted", "rejected", "already_boosted"):
+        assert after[key] == before[key], key
+    assert after["already_boosted"]["boost_completed_jobs_count"] == 2
+    # A data migration: the table is unchanged.
+    assert _shape(scratch_db, "provider_profiles") == shape_before
+
+    # The downgrade leaves the rows as they are, and a second upgrade starts nothing.
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_414)
+    assert _boost_state(scratch_db, ids) == after
+    again = _alembic_result(scratch_db, "upgrade", SVC_414)
+    assert again.returncode == 0, again.stderr
+    assert "0 VERIFIED SPs started at kyc_reviewed_at, 1 skipped" in again.stderr
+    assert _boost_state(scratch_db, ids) == after

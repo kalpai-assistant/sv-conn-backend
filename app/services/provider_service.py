@@ -765,6 +765,7 @@ class ProviderService:
             profile.kyc_status = KYCStatus.VERIFIED
             profile.kyc_reviewed_at = datetime.now(UTC)
             profile.kyc_reviewed_by = uuid.UUID(settings.KYC_VERIFIER_BOT_USER_ID)
+            profile.start_boost()  # SVC-414; submit_kyc flushes it with the rest
             # Structured event so we can grep the audit trail for AI-driven
             # transitions later — "who reviewed this" is answerable via the
             # kyc_reviewed_by FK, but "why did the AI say auto_approve" needs
@@ -779,11 +780,16 @@ class ProviderService:
             )
 
     async def verify_kyc(self, user_id: uuid.UUID) -> ProviderProfile:
-        """Admin-only: approve a provider's submitted KYC."""
+        """Admin-only: approve a provider's submitted KYC, and start its new-SP
+        boost if this is its first approval (SVC-414). The boost isn't in
+        ``_verify_row``, which a team Pro's approval shares: a Pro's KYC must
+        not boost its SP."""
         profile = await self.get_profile(user_id)
         if profile is None:
             raise UserNotFound(user_id)
         await self._verify_row(profile)
+        profile.start_boost()
+        await self.db.flush()
         return profile
 
     async def reject_kyc(self, user_id: uuid.UUID, reason: str) -> ProviderProfile:

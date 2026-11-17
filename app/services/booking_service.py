@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import status
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -2352,13 +2352,29 @@ class BookingService:
         call_after_commit(self.db, _push)
 
     async def _increment_completed_jobs(self, provider_user_id: uuid.UUID) -> None:
-        """Atomically increment total_completed_jobs on the provider's profile."""
-        from sqlalchemy import update
+        """Atomically add 1 to the SP's total_completed_jobs and, once its new-SP
+        boost has started, to boost_completed_jobs_count too (SVC-414).
 
+        One UPDATE for both, so concurrent completions can't lose a count. The
+        boost count keeps going after the window is over: stopping it would mean
+        reading pricing_config on every completion, and the extra count changes
+        nothing, because ``is_boosted`` already ends the boost at
+        ``boost_window_days`` or ``boost_window_jobs``. It never goes down on a
+        refund, dispute or cancellation.
+        """
         await self.db.execute(
             update(ProviderProfile)
             .where(ProviderProfile.user_id == provider_user_id)
-            .values(total_completed_jobs=ProviderProfile.total_completed_jobs + 1)
+            .values(
+                total_completed_jobs=ProviderProfile.total_completed_jobs + 1,
+                boost_completed_jobs_count=case(
+                    (
+                        ProviderProfile.boost_eligible_at.is_not(None),
+                        ProviderProfile.boost_completed_jobs_count + 1,
+                    ),
+                    else_=ProviderProfile.boost_completed_jobs_count,
+                ),
+            )
         )
 
     @staticmethod
