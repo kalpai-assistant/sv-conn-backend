@@ -34,6 +34,7 @@ from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, PayoutMethod, ProviderProfile
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.service import Service
+from app.models.sp_service_pricing import SpServicePricing
 from app.models.user import User
 from app.utils import storage
 from app.utils.encryption import decrypt, encrypt
@@ -532,6 +533,19 @@ class ProviderService:
 
         await self.db.delete(sub)
         await self.db.flush()
+        # SVC-412: switch the SP's prices for this service off, in the same
+        # transaction, and keep the amounts. An active price then always means
+        # "on offer now", and a re-subscribe doesn't relist the SP at a price it
+        # hasn't looked at: it switches each variant back on itself.
+        await self.db.execute(
+            update(SpServicePricing)
+            .where(
+                SpServicePricing.sp_id == provider_user_id,
+                SpServicePricing.service_id == service_id,
+                SpServicePricing.is_active.is_(True),
+            )
+            .values(is_active=False, updated_at=func.now())
+        )
 
     async def list_subscriptions(self, provider_user_id: uuid.UUID) -> list[ProviderServiceModel]:
         """Return the provider's current service subscriptions."""
