@@ -67,6 +67,13 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Custom markers for the SVC-456 stability wave. ``stability`` tags the
+# longer-running regression tests (full alembic chain round-trip, etc.) so
+# the default ``pytest tests/`` runs fast but ``make stability-check`` can
+# opt them in.
+markers = [
+    "stability: opt-in longer-running stability tests (SVC-456). Default suite skips them; `make stability-check` includes them.",
+]
 
 [tool.ruff]
 line-length = 100
