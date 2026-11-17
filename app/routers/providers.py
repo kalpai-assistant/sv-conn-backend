@@ -24,6 +24,7 @@ from app.schemas.provider import (
     ProviderServiceSubscriptionResponse,
     ProviderStatusUpdate,
 )
+from app.schemas.sp_pricing import SpPriceUpdate, SpPricingResponse, SpVariantPricingUpdateResponse
 from app.schemas.team import (
     AcceptInviteRequest,
     ProfessionalResponse,
@@ -36,6 +37,7 @@ from app.schemas.team import (
 from app.services.booking_service import BookingService
 from app.services.payout_service import PayoutService
 from app.services.provider_service import ProviderService
+from app.services.sp_pricing_service import SpPricingService
 from app.services.team_service import TeamService
 from app.utils.rate_limiter import rate_limit
 
@@ -365,6 +367,38 @@ async def unsubscribe_from_service(
     db: AsyncSession = Depends(get_db),
 ):
     await ProviderService(db).unsubscribe_from_service(current_user.id, service_id)
+
+
+# ---------------------------------------------------------------------------
+# The SP's own prices per variant (SVC-412)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/me/pricing", response_model=SpPricingResponse)
+async def get_my_pricing(
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """The SP's price, on/off, recommended range and take-home for every active
+    variant of every active service it subscribes to."""
+    return await SpPricingService(db).list_pricing(current_user.id)
+
+
+@router.patch("/me/pricing/{variant_id}", response_model=SpVariantPricingUpdateResponse)
+async def set_my_price(
+    variant_id: UUID,
+    request: SpPriceUpdate,
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set the SP's price for one variant, switch it on or off, or both. A price
+    outside the recommended range is saved and flagged, never refused."""
+    return await SpPricingService(db).set_price(
+        current_user.id,
+        variant_id,
+        price_amount=request.price_amount,
+        is_active=request.is_active,
+    )
 
 
 # ---------------------------------------------------------------------------

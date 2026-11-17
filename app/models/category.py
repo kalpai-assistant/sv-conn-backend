@@ -62,11 +62,17 @@ class Category(Base):
     )
 
     # SVC-428: pricing config, edited at /admin/pricing/categories. Set on every
-    # row, L1 and L2 alike; the console groups L2 under L1. Inert until the
-    # marketplace stories read it: commission (SVC-410) and the sensitive-category
-    # price bounds (SVC-406). Booking commission still comes from
-    # service_variants.platform_commission / settings.PLATFORM_COMMISSION_PERCENT.
-    # Never on the public GET /categories.
+    # row, L1 and L2 alike; the console groups L2 under L1. Never on the public
+    # GET /categories.
+    # - is_sensitive / bounds_pct: the recommended price range
+    #   (app/services/price_range.py, SVC-482).
+    # - commission_gst_pct: the GST on the platform's commission, read by
+    #   commission.take_home for the SP's "You receive" (SVC-412). Bookings
+    #   don't deduct it yet (SVC-410).
+    # - platform_commission_pct / platform_commission_min: unused. The
+    #   commission is each variant's own share (commission.split_at_price,
+    #   service_variants.platform_commission / base_price), see SVC-481.
+    # - reference_price: unused; the reference is the variant's base_price.
     is_sensitive: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
