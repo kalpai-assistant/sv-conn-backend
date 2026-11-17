@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MSG91 /api/v5/otp response — fields MSG91Client.send_otp consumes",
+  "description": "MSG91's /api/v5/otp returns HTTP 200 for both success AND some silent failure modes. The 'type' field is the only reliable success/fail indicator. See reference_msg91_otp_gotchas.md + SVC-460.",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "'success' on actual delivery; 'error' when MSG91 ate the request silently.",
+      "enum": ["success", "error"]
+    },
+    "message": { "type": "string" },
+    "request_id": { "type": "string" }
+  }
+}
