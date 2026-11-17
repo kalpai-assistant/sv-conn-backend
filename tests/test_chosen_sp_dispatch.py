@@ -3,6 +3,8 @@ SVC-479: a marketplace booking goes to the SP the customer chose, and only them.
 
 - ``POST /bookings`` with ``sp_id`` stores it as ``chosen_sp_id``; an SP who
   can't take the cart right now is a 409 ``SP_UNAVAILABLE`` and no booking.
+  Since SVC-411 each item also names its variant and quoted price (the price
+  lock itself is pinned in ``test_price_lock.py``).
 - The one rule in ``provider_matching`` (``_chosen_sp_only``) limits who is
   pushed, who can see or poll the offer, who can accept, the paid second offer
   and support's retry to that SP. Every other SP gets the existing 403.
@@ -34,9 +36,11 @@ from app.models.booking_status_log import BookingStatusLog
 from app.models.payment import Payment, PaymentRecordMethod, PaymentRecordStatus
 from app.models.provider_ledger_entry import ProviderLedgerEntry
 from app.models.provider_profile import KYCStatus, ProviderProfile
+from app.models.sp_service_pricing import SpServicePricing
 from app.models.user import AdminRole, User, UserRole
 from app.services.booking_service import BookingService
 from app.services.provider_matching import broadcast_funnel, broadcast_recipients_stmt
+from app.services.standard_variant import standard_variant
 from app.tasks import notification_tasks
 from tests.conftest import TEST_DATABASE_URL
 from tests.factories.user_factory import UserFactory
@@ -134,9 +138,40 @@ async def _consumer_with_address(db):
     return consumer, address
 
 
-def _create_body(service, address, sp_id):
+async def _variant(db, service):
+    """The service's Standard variant (SVC-480): with ``sp_id`` every item names
+    one (SVC-411)."""
+    variant = standard_variant(service)
+    db.add(variant)
+    await db.flush()
+    return variant
+
+
+async def _priced(db, sp_id, service, variant):
+    """``sp_id`` charges the variant's own price for it (SVC-411)."""
+    db.add(
+        SpServicePricing(
+            sp_id=sp_id,
+            service_id=service.id,
+            service_variant_id=variant.id,
+            price_amount=variant.base_price,
+            price_unit="PER_VISIT",
+        )
+    )
+    await db.flush()
+
+
+def _item(service, variant):
     return {
         "service_id": str(service.id),
+        "service_variant_id": str(variant.id),
+        "quoted_price": float(variant.base_price),
+    }
+
+
+def _create_body(service, variant, address, sp_id):
+    return {
+        "items": [_item(service, variant)],
         "address_id": str(address.id),
         "payment_method": "cash",
         "sp_id": str(sp_id),
@@ -146,12 +181,14 @@ def _create_body(service, address, sp_id):
 @pytest.mark.asyncio
 async def test_create_with_an_eligible_sp_stores_it(client, db_session, auth_headers, pushes):
     service = await _service(db_session)
+    variant = await _variant(db_session, service)
     sp = await _eligible_provider(db_session, service)
+    await _priced(db_session, sp.id, service, variant)
     consumer, address = await _consumer_with_address(db_session)
 
     resp = await client.post(
         CREATE,
-        json=_create_body(service, address, sp.id),
+        json=_create_body(service, variant, address, sp.id),
         headers=_as(auth_headers, consumer, "consumer"),
     )
 
@@ -168,6 +205,7 @@ async def test_create_with_an_ineligible_sp_is_409_and_writes_nothing(
     client, db_session, auth_headers, pushes, why
 ):
     service = await _service(db_session)
+    variant = await _variant(db_session, service)
     if why == "not_an_sp":
         sp_id = (await UserFactory.create(db_session, role="consumer")).id
     else:
@@ -178,13 +216,15 @@ async def test_create_with_an_ineligible_sp_is_409_and_writes_nothing(
             "out_of_area": {"point": "SRID=4326;POINT(72.8777 19.0760)"},  # Mumbai
         }[why]
         sp_id = (await _eligible_provider(db_session, service, **knobs)).id
+        # Priced, so only the eligibility rule refuses it (SVC-411).
+        await _priced(db_session, sp_id, service, variant)
     # Someone else could take it: the chosen SP is still the only one checked.
     await _eligible_provider(db_session, service)
     consumer, address = await _consumer_with_address(db_session)
 
     resp = await client.post(
         CREATE,
-        json=_create_body(service, address, sp_id),
+        json=_create_body(service, variant, address, sp_id),
         headers=_as(auth_headers, consumer, "consumer"),
     )
 
@@ -204,13 +244,16 @@ async def test_a_multi_service_cart_needs_the_sp_to_cover_every_item(
 ):
     service_a = await _service(db_session)
     service_b = await _service(db_session)
+    variant_a = await _variant(db_session, service_a)
+    variant_b = await _variant(db_session, service_b)
     sp = await _eligible_provider(db_session, service_a)  # covers A only
+    await _priced(db_session, sp.id, service_a, variant_a)
     consumer, address = await _consumer_with_address(db_session)
 
     resp = await client.post(
         CREATE,
         json={
-            "items": [{"service_id": str(service_a.id)}, {"service_id": str(service_b.id)}],
+            "items": [_item(service_a, variant_a), _item(service_b, variant_b)],
             "address_id": str(address.id),
             "payment_method": "cash",
             "sp_id": str(sp.id),

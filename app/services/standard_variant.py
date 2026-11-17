@@ -5,10 +5,11 @@ NOT NULL), so a service with none couldn't be priced at all. Both admin create
 paths add a "Standard" variant with the service's price, and the SVC-480
 migration added one to every service that had none.
 
-The split is ``create_booking``'s legacy one, for a service with no active
-variant: commission = ``PLATFORM_COMMISSION_PERCENT`` of the price, rounded to
-paise, and the SP gets the rest. A booking on the new variant therefore costs
-and pays exactly what the legacy branch would have charged for one unit.
+The split is ``create_booking``'s legacy one (``commission.legacy_split``), for
+a service with no active variant: commission = ``PLATFORM_COMMISSION_PERCENT``
+of the price, rounded to paise, and the SP gets the rest. A booking on the new
+variant therefore costs and pays exactly what the legacy branch would have
+charged for one unit.
 
 ``create_booking`` itself is unchanged: its legacy branch stays as a safety net
 for a service whose variants are all switched off.
@@ -20,21 +21,12 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.models.service import Service
 from app.models.service_variant import ServiceVariant
+from app.services.commission import legacy_split, split_at_price
 from app.utils.money import to_decimal
 
 STANDARD_VARIANT_LABEL = "Standard"
-
-
-def legacy_split(price: Decimal | float | int | str) -> tuple[Decimal, Decimal]:
-    """``(platform_commission, provider_payout)`` for one unit at ``price``, as
-    ``create_booking``'s legacy branch computes them."""
-    rate = to_decimal(get_settings().PLATFORM_COMMISSION_PERCENT) / 100
-    price = to_decimal(price)
-    commission = to_decimal(price * rate)
-    return commission, price - commission
 
 
 def standard_variant(service: Service) -> ServiceVariant:
@@ -58,14 +50,10 @@ def standard_variant(service: Service) -> ServiceVariant:
 
 def repriced_split(variant: ServiceVariant, new_price: Decimal) -> tuple[Decimal, Decimal]:
     """``(platform_commission, provider_payout)`` for ``variant`` at
-    ``new_price``, keeping its commission-to-price ratio. A variant priced 0 has
-    no ratio, so it gets the legacy split."""
-    new_price = to_decimal(new_price)
-    old_price = to_decimal(variant.base_price)
-    if old_price == 0:
-        return legacy_split(new_price)
-    commission = to_decimal(new_price * to_decimal(variant.platform_commission) / old_price)
-    return commission, new_price - commission
+    ``new_price``, keeping its commission-to-price ratio: the one rule in
+    ``app/services/commission.py``, which a chosen SP's booking uses too
+    (SVC-411)."""
+    return split_at_price(variant, new_price)
 
 
 async def sync_single_variant_price(
