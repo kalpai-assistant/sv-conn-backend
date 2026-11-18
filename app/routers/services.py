@@ -1,12 +1,14 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, require_roles
+from app.dependencies import get_current_user, get_redis, require_roles
 from app.models.service import Service
 from app.models.user import User
+from app.schemas.from_prices import ServiceFromPrice
 from app.schemas.ranking import ServiceProvidersResponse
 from app.schemas.service import (
     CategoryResponse,
@@ -17,6 +19,7 @@ from app.schemas.service import (
 )
 from app.services.admin_audit import audit_actor, audit_admin_action, snapshot
 from app.services.catalog_service import CatalogService
+from app.services.from_price_service import FromPriceService
 from app.services.ranking_service import RankingService
 
 router = APIRouter(tags=["Catalog"])
@@ -44,6 +47,34 @@ async def list_services(
 ):
     """List global catalog services, optionally filtered by category."""
     return await CatalogService(db).list_services(category_id=category_id)
+
+
+# Declared before /services/{service_id}: routes match in order, and that one
+# would take "from-prices" as a service_id and 422 on the UUID.
+@router.get("/services/from-prices", response_model=list[ServiceFromPrice])
+async def service_from_prices(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+):
+    """The service tiles' "from ₹X" for a customer at (lat, lng) (SVC-415), one
+    entry per ACTIVE service, in one request.
+
+    - ``from_price``: the lowest price among the SPs the "pick your SP" sheet
+      could list right now (in-range prices first; the lowest out-of-range one
+      only when the service has no in-range price), or null when nobody is
+      listable now.
+    - ``served``: some SP covers this point with an active price, online or
+      not. Null ``from_price`` + ``served`` = "No pros online right now";
+      not ``served`` = "Coming soon".
+
+    A service_id missing from the list is an inactive service: show its
+    catalogue price. Cached per point (lat/lng to 4 decimals) for 10 minutes.
+    Needs a login, like the sheet.
+    """
+    return await FromPriceService(db, redis).from_prices(lat, lng)
 
 
 @router.get("/services/{service_id}", response_model=ServiceDetailResponse)
