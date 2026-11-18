@@ -104,6 +104,47 @@ def _eligibility_stages(address_location) -> list[tuple[str, object]]:
     ]
 
 
+# The stages that say an SP *covers* a point, online or not (SVC-415's
+# ``served``): it could be offered the job once it switches on. A subset of
+# ``_eligibility_stages``' names; the rest are ``listable_only_stages``.
+SERVED_STAGES: tuple[str, ...] = ("kyc_verified", "account_active", "in_service_area")
+
+
+def eligibility_stage_names() -> tuple[str, ...]:
+    """Every stage's name, in ``_eligibility_stages`` order. Read from the list
+    itself (the point is never consulted for a name), so a new stage shows up
+    here with no edit."""
+    return tuple(name for name, _ in _eligibility_stages(None))
+
+
+def listable_only_stages() -> tuple[str, ...]:
+    """The stages an SP needs to be listable right now on top of
+    ``SERVED_STAGES`` (push token, online, someone to do it, and any stage
+    added later): every stage minus the served ones, derived, never listed."""
+    return tuple(name for name in eligibility_stage_names() if name not in SERVED_STAGES)
+
+
+def stage_conditions(address_location, names) -> list:
+    """The conditions of the named stages, picked from ``_eligibility_stages``
+    rather than written again. An unknown name raises ``KeyError``, so a typo
+    can't silently drop a rule."""
+    stages = dict(_eligibility_stages(address_location))
+    return [stages[name] for name in names]
+
+
+def subscribed_to(service_id):
+    """The SP is subscribed to ``service_id`` (``provider_services``). Correlated
+    on whatever ``ProviderServiceModel`` row the caller joins; ``service_id``
+    may be a column, to test each row against its own service."""
+    return ProviderServiceModel.service_id == service_id
+
+
+def serves_area_conditions(service_id, address_location) -> list:
+    """An SP that covers ``service_id`` at this point, online or not
+    (SVC-415's ``served``): the subscription and ``SERVED_STAGES`` only."""
+    return [subscribed_to(service_id), *stage_conditions(address_location, SERVED_STAGES)]
+
+
 def _chosen_sp_only(booking_id):
     """The booking names no chosen SP, or names this one (SVC-479).
 
@@ -173,7 +214,7 @@ def eligible_provider_conditions(service_id, address_location, booking_id=None) 
     chosen-SP rule (SVC-479, ``_chosen_sp_only``).
     """
     return [
-        ProviderServiceModel.service_id == service_id,
+        subscribed_to(service_id),
         *_base_conditions(address_location, booking_id),
     ]
 
