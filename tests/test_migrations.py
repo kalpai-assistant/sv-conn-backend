@@ -2130,7 +2130,8 @@ def test_svc_480_prices_per_variant_and_round_trips(scratch_db):
 
 def test_seed_wipe_clears_sp_prices_first(scratch_db):
     """``seed_pricing_from_xlsx.py`` wipes the catalog; a price row (RESTRICT on
-    both its service and its variant) must not make that fail."""
+    both its service and its variant) must not make that fail, nor (SVC-419) a
+    marketplace event pointing at the service, the variant and the SP."""
     import asyncio
 
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -2153,6 +2154,22 @@ def test_seed_wipe_clears_sp_prices_first(scratch_db):
             )
     finally:
         engine.dispose()
+    # Up to SVC-419 (the wipe deletes its events), then a price-set event.
+    _alembic(scratch_db, "upgrade", SVC_419)
+    _engine_run(
+        scratch_db,
+        "INSERT INTO marketplace_events "
+        "(id, event_id, name, user_id, sp_id, service_id, service_variant_id, payload) "
+        "VALUES (:id, :eid, 'sp.price_set', :sp, :sp, :svc, :v, "
+        """'{"old_price": null, "new_price": "2299.00", "out_of_bounds": false}')""",
+        {
+            "id": uuid.uuid4(),
+            "eid": uuid.uuid4(),
+            "sp": ids["sp"],
+            "svc": ids["svc"],
+            "v": ids["v1"],
+        },
+    )
 
     async def wipe() -> None:
         async_engine = create_async_engine(
@@ -2167,7 +2184,13 @@ def test_seed_wipe_clears_sp_prices_first(scratch_db):
 
     asyncio.run(wipe())
 
-    for table in ("sp_service_pricing", "provider_services", "service_variants", "services"):
+    for table in (
+        "marketplace_events",
+        "sp_service_pricing",
+        "provider_services",
+        "service_variants",
+        "services",
+    ):
         [count] = _query(scratch_db, f"SELECT count(*) AS n FROM {table}")
         assert count["n"] == 0, table
     # Categories and the SP stay.
