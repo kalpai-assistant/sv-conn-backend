@@ -731,6 +731,8 @@ def test_a_save_waiting_on_an_unsubscribe_is_404():
                 async with factory() as db:
                     params = {"u": str(sp.id)}
                     for sql in (
+                        # SVC-419: the price save's event points at the SP.
+                        "DELETE FROM marketplace_events WHERE sp_id::text = :u",
                         "DELETE FROM sp_service_pricing WHERE sp_id::text = :u",
                         "DELETE FROM provider_services WHERE provider_id::text = :u",
                         "DELETE FROM professionals WHERE service_provider_id::text = :u",

@@ -26,6 +26,7 @@ from app.models.booking_status_log import BookingStatusLog  # noqa: F401
 from app.models.booking_support_note import BookingSupportNote  # noqa: F401
 from app.models.category import Category  # noqa: F401
 from app.models.coupon import Coupon, CouponRedemption, DiscountType  # noqa: F401
+from app.models.marketplace_event import MarketplaceEvent  # noqa: F401
 from app.models.payment import Payment  # noqa: F401
 from app.models.payout_audit import PayoutAudit  # noqa: F401
 from app.models.pricing_config import PricingConfig  # noqa: F401

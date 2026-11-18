@@ -37,6 +37,7 @@ from app.schemas.sp_pricing import (
     TakeHome,
 )
 from app.services.commission import commission_pct, take_home
+from app.services.marketplace_events import money, record_server_event
 from app.services.price_range import is_outside_range, recommended_range
 
 logger = logging.getLogger(__name__)
@@ -243,7 +244,20 @@ class SpPricingService:
         await self.require_subscription(sp_id, service_id, lock=True)
 
         returning = (SpServicePricing.price_amount, SpServicePricing.is_active)
+        old_price: Decimal | None = None
         if price_amount is not None:
+            # SVC-419: the price before this save, for the ``sp.price_set``
+            # event (Postgres 16 has no RETURNING OLD). FOR UPDATE takes the
+            # lock the upsert would take anyway, so a racing save can't change
+            # it in between. With no row yet there is nothing to lock.
+            old_price = await self.db.scalar(
+                select(SpServicePricing.price_amount)
+                .where(
+                    SpServicePricing.sp_id == sp_id,
+                    SpServicePricing.service_variant_id == variant_id,
+                )
+                .with_for_update()
+            )
             insert = pg_insert(SpServicePricing).values(
                 id=uuid.uuid4(),
                 sp_id=sp_id,
@@ -302,4 +316,20 @@ class SpPricingService:
             saved.is_active,
             fields["outside_recommended_range"],
         )
+        # SVC-419: a price change only, never an on/off toggle. The SP is the
+        # actor (the route is provider-only), so by_user_id is user_id.
+        if price_amount is not None and (old_price is None or old_price != saved.price_amount):
+            await record_server_event(
+                self.db,
+                "sp.price_set",
+                user_id=sp_id,
+                sp_id=sp_id,
+                service_id=service_id,
+                service_variant_id=variant_id,
+                payload={
+                    "old_price": None if old_price is None else money(old_price),
+                    "new_price": money(saved.price_amount),
+                    "out_of_bounds": fields["outside_recommended_range"],
+                },
+            )
         return SpVariantPricingUpdateResponse(service_id=service_id, **fields)
