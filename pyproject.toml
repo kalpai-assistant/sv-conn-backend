@@ -75,6 +75,38 @@ markers = [
     "stability: opt-in longer-running stability tests (SVC-456). Default suite skips them; `make stability-check` includes them.",
 ]
 
+# SVC-466: coverage floor / one-way ratchet. Running ``coverage run -m pytest``
+# produces a ``.coverage`` SQLite file; ``coverage report`` emits a summary and
+# the CI's ``check-coverage-floor`` step compares the total % against
+# ``.coverage-floor``. The floor is bumped by a human in a PR, never auto-
+# written, so coverage only moves one way.
+[tool.coverage.run]
+branch = true
+source = ["app"]
+# Exclude code paths we never test from either direction — alembic migrations
+# (tested by the full-chain round-trip at the DB level, not line-by-line),
+# the Celery entrypoint, and pure-glue __init__ files.
+omit = [
+    "app/__init__.py",
+    "app/main.py",
+    "app/tasks/celery_app.py",
+    "app/logging_config.py",
+    "alembic/*",
+    "tests/*",
+]
+
+[tool.coverage.report]
+# Never auto-pass; the CI step cross-checks this against ``.coverage-floor``
+# so a regression below the floor fails even when ``coverage report`` exits 0.
+show_missing = false
+precision = 2
+exclude_also = [
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "pragma: no cover",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
