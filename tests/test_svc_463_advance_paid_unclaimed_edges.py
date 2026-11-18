@@ -191,7 +191,7 @@ def test_sweep_enqueues_push_only_after_commit():
         ),
         patch.object(AsyncSession, "commit", _tracked_commit),
         patch(
-            "app.tasks.cleanup_tasks.send_booking_notification.delay",
+            "app.tasks.notification_tasks.send_booking_notification.delay",
             side_effect=_tracked_delay,
         ),
     ):
@@ -224,7 +224,7 @@ def test_sweep_does_not_push_on_rollback():
             side_effect=RuntimeError("razorpay down"),
         ),
         patch(
-            "app.tasks.cleanup_tasks.send_booking_notification.delay",
+            "app.tasks.notification_tasks.send_booking_notification.delay",
             side_effect=_tracked_delay,
         ),
     ):
