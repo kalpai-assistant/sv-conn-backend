@@ -36,6 +36,7 @@ from app.services.provider_service import (
     effective_kyc_status,
     professional_display_name,
 )
+from app.services.sp_pricing_service import switch_off_all_prices
 from app.utils import sms_client
 
 logger = logging.getLogger(__name__)
@@ -449,6 +450,9 @@ class TeamService:
         for row in rows:
             row.is_online = False
         await self.db.flush()
+        # SVC-413: a deactivated SP's prices are no longer on offer. There's no
+        # reactivate path; an SP brought back switches each one on itself.
+        await switch_off_all_prices(self.db, user_id)
         removed = []
         for row in rows:
             if row.is_active and not row.is_self:

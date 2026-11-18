@@ -2648,3 +2648,73 @@ def test_svc_410_adds_commission_gst_default_0_and_round_trips(scratch_db):
     assert {t: _shape(scratch_db, t) for t in ("bookings", "booking_items")} == before
     assert _commission_gst_columns(scratch_db) == {}
     assert _matviews(scratch_db) == views_before
+
+
+# --- SVC-413: switch off the prices of every inactive user (data migration) -------
+
+
+SVC_413 = "3bf2aa2a9884"
+BEFORE_SVC_413 = SVC_410
+
+
+def test_svc_413_switches_off_inactive_users_prices_in_one_upgrade_with_svc_418(scratch_db):
+    """SVC-418 and SVC-413 in one ``upgrade``, as on a deploy that carries both:
+    one transaction, so this also proves ``clock_timestamp()`` leaves the rows it
+    touches with ``updated_at > created_at`` and SVC-418's downgrade keeps them."""
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_418)
+    ids = _seed_svc_418(scratch_db)
+    # sp_a has left. Its own m1 price is on; sp_c (left too) has one already off.
+    _engine_run(
+        scratch_db,
+        "UPDATE users SET is_active = false WHERE id IN (:a, :c)",
+        {
+            "a": ids["sp_a"],
+            "c": ids["sp_c"],
+        },
+    )
+    own_id = _sp_price_row(scratch_db, ids["sp_a"], ids["multi"], ids["m1"], "2299.00")
+    off_id = _sp_price_row(scratch_db, ids["sp_c"], ids["multi"], ids["m2"], "3500.00")
+    _engine_run(
+        scratch_db,
+        "UPDATE sp_service_pricing SET is_active = false WHERE id = :id",
+        {"id": off_id},
+    )
+    shape_before = _shape(scratch_db, "sp_service_pricing")
+
+    result = _alembic_result(scratch_db, "upgrade", SVC_413)
+
+    assert result.returncode == 0, result.stderr
+    # sp_a: its own m1, and SVC-418's m2 and u1.
+    assert "SVC-413: switched off 3 prices of inactive users" in result.stderr
+    after = _prices(scratch_db)
+    sp_a = {key: row for key, row in after.items() if key[0] == ids["sp_a"]}
+    assert set(sp_a) == {(ids["sp_a"], ids[v]) for v in ("m1", "m2", "u1")}
+    for row in sp_a.values():
+        assert row["is_active"] is False
+        assert row["updated_at"] > row["created_at"]
+    assert after[(ids["sp_a"], ids["m1"])]["price_amount"] == Decimal("2299.00")
+    # An active user's prices (SVC-418's) are untouched.
+    sp_b = {key: row for key, row in after.items() if key[0] == ids["sp_b"]}
+    assert set(sp_b) == {(ids["sp_b"], ids["m1"]), (ids["sp_b"], ids["m2"])}
+    for row in sp_b.values():
+        assert row["is_active"] is True
+        assert row["updated_at"] == row["created_at"]
+    # A row already off stays exactly as it was.
+    off_row = after[(ids["sp_c"], ids["m2"])]
+    assert (off_row["id"], off_row["is_active"]) == (off_id, False)
+    assert off_row["updated_at"] == off_row["created_at"]
+    assert _shape(scratch_db, "sp_service_pricing") == shape_before
+
+    # The downgrade changes nothing, and a second upgrade switches nothing off.
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_413)
+    assert _prices(scratch_db) == after
+    again = _alembic_result(scratch_db, "upgrade", SVC_413)
+    assert again.returncode == 0, again.stderr
+    assert "SVC-413: switched off 0 prices of inactive users" in again.stderr
+    assert _prices(scratch_db) == after
+
+    # SVC-418's downgrade keeps the rows SVC-413 touched and removes sp_b's.
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_418)
+    kept = _prices(scratch_db)
+    assert set(kept) == set(sp_a) | {(ids["sp_c"], ids["m2"])}
+    assert kept[(ids["sp_a"], ids["m1"])]["id"] == own_id

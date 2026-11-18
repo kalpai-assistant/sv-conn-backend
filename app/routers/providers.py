@@ -2,13 +2,15 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from redis.asyncio import Redis as AsyncRedis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_user, require_role
+from app.dependencies import get_current_user, get_redis, require_role
 from app.exceptions import AppException
 from app.models.user import User
 from app.schemas.booking import BookingOfferResponse
+from app.schemas.market_insights import MarketInsightsResponse
 from app.schemas.provider import (
     EarningsByProResponse,
     EarningsResponse,
@@ -35,6 +37,7 @@ from app.schemas.team import (
     TeamInviteResponse,
 )
 from app.services.booking_service import BookingService
+from app.services.market_insights_service import MarketInsightsService
 from app.services.payout_service import PayoutService
 from app.services.provider_service import ProviderService
 from app.services.sp_pricing_service import SpPricingService
@@ -399,6 +402,19 @@ async def set_my_price(
         price_amount=request.price_amount,
         is_active=request.is_active,
     )
+
+
+@router.get("/me/market-insights", response_model=MarketInsightsResponse)
+async def get_my_market_insights(
+    service_variant_id: UUID,
+    current_user: User = Depends(require_role("provider")),
+    db: AsyncSession = Depends(get_db),
+    redis: AsyncRedis = Depends(get_redis),
+):
+    """Where the SP's price for one variant sits among the SPs whose areas
+    overlap its own (SVC-413): aggregates only, none below 3 SPs. The SP's own
+    price is always fresh; the others' can be up to an hour old."""
+    return await MarketInsightsService(db, redis).get_insights(current_user.id, service_variant_id)
 
 
 # ---------------------------------------------------------------------------
