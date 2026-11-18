@@ -450,13 +450,13 @@ async def test_a_changed_price_has_old_and_new(client, db_session, auth_headers,
     resp = await _patch(client, auth_headers, sp, variant, price_amount=2299.5, is_active=False)
     assert resp.status_code == 200, resp.text
 
-    first, second = await _price_events(db_session, sp)
-    assert first.payload["old_price"] is None
-    assert second.payload == {
-        "old_price": "2400.00",
-        "new_price": "2299.50",
-        "out_of_bounds": False,
-    }
+    # Both saves share the test session's transaction, so their created_at
+    # (now()) is equal and the order is the random id: match on the payload.
+    payloads = [row.payload for row in await _price_events(db_session, sp)]
+    assert sorted(payloads, key=lambda p: p["old_price"] is not None) == [
+        {"old_price": None, "new_price": "2400.00", "out_of_bounds": False},
+        {"old_price": "2400.00", "new_price": "2299.50", "out_of_bounds": False},
+    ]
 
 
 @pytest.mark.asyncio
