@@ -1,0 +1,27 @@
+{
+  "entity": "event",
+  "account_id": "acc_BfVUrG6tDiL7H0",
+  "event": "payout.initiated",
+  "contains": ["payout"],
+  "payload": {
+    "payout": {
+      "entity": {
+        "id": "pout_1Aa00000000001",
+        "entity": "payout",
+        "fund_account_id": "fa_1Aa00000000001",
+        "amount": 100,
+        "currency": "INR",
+        "fees": 590,
+        "tax": 90,
+        "status": "processing",
+        "purpose": "refund",
+        "utr": null,
+        "mode": "NEFT",
+        "reference_id": null,
+        "batch_id": null,
+        "created_at": 1579865132
+      }
+    }
+  },
+  "created_at": 1579865132
+}

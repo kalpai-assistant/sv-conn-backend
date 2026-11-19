@@ -1,0 +1,22 @@
+{
+  "entity": "event",
+  "account_id": "acc_BFQ7uQEaa7j2z7",
+  "event": "payment.captured",
+  "contains": ["payment"],
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_DESlfW9H8K9uqM",
+        "entity": "payment",
+        "amount": 100,
+        "currency": "INR",
+        "status": "captured",
+        "order_id": "order_DESlLckIVRkHWj",
+        "captured": true,
+        "fee": 2,
+        "tax": 0
+      }
+    }
+  },
+  "created_at": 1567674606
+}

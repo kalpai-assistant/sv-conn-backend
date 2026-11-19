@@ -27,10 +27,10 @@
               "required": ["id", "status"],
               "properties": {
                 "id": { "type": "string" },
-                "reference_id": { "type": "string" },
+                "reference_id": { "type": ["string", "null"] },
                 "status": { "type": "string" },
                 "amount": { "type": "integer", "minimum": 0 },
-                "utr": { "type": "string" },
+                "utr": { "type": ["string", "null"] },
                 "failure_reason": { "type": ["string", "null"] }
               }
             }
