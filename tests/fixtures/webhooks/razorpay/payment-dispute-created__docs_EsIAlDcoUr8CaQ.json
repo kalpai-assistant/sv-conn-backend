@@ -1,0 +1,56 @@
+{
+  "entity": "event",
+  "account_id": "acc_CFvOKjkTwf3GQy",
+  "event": "payment.dispute.created",
+  "contains": ["payment", "dispute"],
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_EFtmUsbwpXwBHI",
+        "entity": "payment",
+        "amount": 5297600,
+        "currency": "INR",
+        "base_amount": 5297600,
+        "status": "captured",
+        "order_id": "order_EFtkA6f5jdkfud",
+        "invoice_id": null,
+        "international": false,
+        "method": "card",
+        "amount_refunded": 700000,
+        "amount_transferred": 0,
+        "refund_status": "partial",
+        "captured": true,
+        "description": null,
+        "card_id": "card_EADblPSDnnk5ZG",
+        "bank": "HDFC",
+        "wallet": null,
+        "vpa": null,
+        "fee": 0,
+        "tax": 0,
+        "error_code": null,
+        "error_description": null,
+        "error_source": null,
+        "error_step": null,
+        "error_reason": null,
+        "acquirer_data": {},
+        "created_at": 1581525157
+      }
+    },
+    "dispute": {
+      "entity": {
+        "id": "disp_EsIAlDcoUr8CaQ",
+        "entity": "dispute",
+        "payment_id": "pay_EFtmUsbwpXwBHI",
+        "amount": 39000,
+        "currency": "INR",
+        "amount_deducted": 0,
+        "reason_code": "processed_invalid_expired_card",
+        "respond_by": 1590431400,
+        "status": "open",
+        "phase": "chargeback",
+        "created_at": 1589907957
+      }
+    }
+  },
+  "created_at": 1589907977
+}

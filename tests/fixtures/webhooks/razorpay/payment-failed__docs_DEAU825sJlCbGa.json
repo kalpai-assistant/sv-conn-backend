@@ -1,0 +1,22 @@
+{
+  "entity": "event",
+  "account_id": "acc_BFQ7uQEaa7j2z7",
+  "event": "payment.failed",
+  "contains": ["payment"],
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_DEAU825sJlCbGa",
+        "entity": "payment",
+        "amount": 50000,
+        "currency": "INR",
+        "status": "failed",
+        "order_id": "order_DEATVTRRctwEGb",
+        "captured": false,
+        "error_code": "BAD_REQUEST_ERROR",
+        "error_description": "Payment failed"
+      }
+    }
+  },
+  "created_at": 1567610215
+}

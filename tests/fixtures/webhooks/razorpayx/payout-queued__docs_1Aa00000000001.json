@@ -1,0 +1,27 @@
+{
+  "entity": "event",
+  "account_id": "acc_BfVUrG6tDiL7H0",
+  "event": "payout.queued",
+  "contains": ["payout"],
+  "payload": {
+    "payout": {
+      "entity": {
+        "id": "pout_1Aa00000000001",
+        "entity": "payout",
+        "fund_account_id": "fa_1Aa00000000001",
+        "amount": 286540,
+        "currency": "INR",
+        "fees": 0,
+        "tax": 0,
+        "status": "queued",
+        "purpose": "payout",
+        "utr": null,
+        "mode": "IMPS",
+        "reference_id": null,
+        "batch_id": null,
+        "created_at": 1580119445
+      }
+    }
+  },
+  "created_at": 1580119445
+}

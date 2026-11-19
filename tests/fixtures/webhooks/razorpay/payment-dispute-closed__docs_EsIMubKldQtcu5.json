@@ -1,0 +1,52 @@
+{
+  "entity": "event",
+  "account_id": "acc_CFvOKjkTwf3GQy",
+  "event": "payment.dispute.closed",
+  "contains": ["payment", "dispute"],
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_EsIKS2bpFiWghA",
+        "entity": "payment",
+        "amount": 10000,
+        "currency": "INR",
+        "base_amount": 10000,
+        "status": "captured",
+        "order_id": null,
+        "invoice_id": null,
+        "international": false,
+        "method": "card",
+        "amount_refunded": 0,
+        "amount_transferred": 0,
+        "refund_status": null,
+        "captured": true,
+        "description": null,
+        "card_id": "card_ECijxX3uDiBYJ4",
+        "bank": null,
+        "wallet": null,
+        "vpa": null,
+        "fee": 100,
+        "tax": 0,
+        "error_code": null,
+        "error_description": null,
+        "created_at": 1589908559
+      }
+    },
+    "dispute": {
+      "entity": {
+        "id": "disp_EsIMubKldQtcu5",
+        "entity": "dispute",
+        "payment_id": "pay_EsIKS2bpFiWghA",
+        "amount": 10000,
+        "currency": "INR",
+        "amount_deducted": 0,
+        "reason_code": "goods_or_services_not_received_or_partially_received",
+        "respond_by": 1590431400,
+        "status": "closed",
+        "phase": "fraud",
+        "created_at": 1589908667
+      }
+    }
+  },
+  "created_at": 1589908856
+}

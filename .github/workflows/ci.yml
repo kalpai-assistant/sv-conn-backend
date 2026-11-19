@@ -143,8 +143,47 @@ jobs:
         # now that the initial setup churn has settled.
         run: uv run alembic check
 
-      - name: Run pytest
-        run: uv run pytest tests/ -v --tb=short
+      - name: Run pytest (with coverage)
+        # SVC-466: ``coverage run`` wraps pytest so we get a ``.coverage``
+        # SQLite file to feed the ratchet check below. No behaviour change
+        # for pytest itself — ``-v --tb=short`` mirrors the pre-coverage
+        # invocation. Keep the output on stdout so a test failure is still
+        # visible at the right place in the log.
+        run: uv run coverage run -m pytest tests/ -v --tb=short
+
+      - name: Enforce coverage floor (SVC-466 one-way ratchet)
+        # The repo-tracked ``.coverage-floor`` holds the current minimum
+        # coverage percentage (integer). A PR that drops coverage below it
+        # fails; a PR that raises it leaves the floor untouched — the next
+        # human to update ``.coverage-floor`` ratchets it up in a commit.
+        #
+        # Deliberately NOT auto-bumping: a drive-by refactor that also
+        # happens to add tests shouldn't lock a new, stricter floor into
+        # main without the author noticing. Tightening is a human decision.
+        run: |
+          set -euo pipefail
+          FLOOR=$(tr -d '[:space:]' < .coverage-floor)
+          echo "coverage floor: $FLOOR%"
+          # ``coverage report`` prints a table with the TOTAL percentage on
+          # the final line; parse it rather than use ``--fail-under`` so we
+          # can emit both the measured value and the floor in the error.
+          uv run coverage report > coverage-report.txt
+          cat coverage-report.txt
+          # The "TOTAL ... NN%" line is always last.
+          MEASURED=$(awk '/^TOTAL/ {gsub("%","",$NF); print $NF}' coverage-report.txt)
+          echo "measured coverage: $MEASURED%"
+          # Integer compare is enough for a ratchet; a sub-percent drift
+          # below the floor usually means tests were deleted.
+          MEASURED_INT=$(printf '%.0f' "$MEASURED")
+          if [ "$MEASURED_INT" -lt "$FLOOR" ]; then
+            echo "::error::Coverage $MEASURED% is below the floor $FLOOR% (.coverage-floor)."
+            echo "::error::Either add tests to bring coverage back up, or if the drop is intentional"
+            echo "::error::(e.g. you removed dead code + its tests), lower .coverage-floor in the same PR."
+            exit 1
+          fi
+          if [ "$MEASURED_INT" -gt "$FLOOR" ]; then
+            echo "::notice::Coverage $MEASURED% is above the floor $FLOOR%. Consider bumping .coverage-floor in a follow-up."
+          fi
 
   # Fails a PR if it adds a new alembic migration but doesn't carry the
   # `db-migrate` label. Without this guard, the deploy pipeline silently

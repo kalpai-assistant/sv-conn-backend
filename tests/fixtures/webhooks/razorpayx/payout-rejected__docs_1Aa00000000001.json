@@ -1,0 +1,27 @@
+{
+  "entity": "event",
+  "account_id": "acc_BfVUrG6tDiL7H0",
+  "event": "payout.rejected",
+  "contains": ["payout"],
+  "payload": {
+    "payout": {
+      "entity": {
+        "id": "pout_1Aa00000000001",
+        "entity": "payout",
+        "fund_account_id": "fa_1Aa00000000001",
+        "amount": 10000,
+        "currency": "INR",
+        "fees": 0,
+        "tax": 0,
+        "status": "rejected",
+        "purpose": "refund",
+        "utr": null,
+        "mode": "NEFT",
+        "reference_id": null,
+        "batch_id": null,
+        "created_at": 1581512005
+      }
+    }
+  },
+  "created_at": 1581512006
+}

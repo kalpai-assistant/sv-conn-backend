@@ -1,0 +1,55 @@
+{
+  "entity": "event",
+  "account_id": "acc_CFvOKjkTwf3GQy",
+  "event": "payment.dispute.won",
+  "contains": ["payment", "dispute"],
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_EsIStomuIwFQ6U",
+        "entity": "payment",
+        "amount": 1000000,
+        "currency": "INR",
+        "base_amount": 1000000,
+        "status": "authorized",
+        "order_id": null,
+        "invoice_id": null,
+        "international": false,
+        "method": "card",
+        "amount_refunded": 0,
+        "amount_transferred": 0,
+        "refund_status": null,
+        "captured": false,
+        "description": null,
+        "card_id": "card_EFEmBYkUF2ZzYw",
+        "bank": null,
+        "wallet": null,
+        "vpa": null,
+        "fee": null,
+        "tax": null,
+        "error_code": null,
+        "error_description": null,
+        "error_source": null,
+        "error_step": null,
+        "error_reason": null,
+        "created_at": 1589909038
+      }
+    },
+    "dispute": {
+      "entity": {
+        "id": "disp_EsIUyp8XlaZOUt",
+        "entity": "dispute",
+        "payment_id": "pay_EsIStomuIwFQ6U",
+        "amount": 130000,
+        "currency": "INR",
+        "amount_deducted": 0,
+        "reason_code": "non_matching_account_number",
+        "respond_by": 1590431400,
+        "status": "won",
+        "phase": "chargeback",
+        "created_at": 1589909126
+      }
+    }
+  },
+  "created_at": 1589909172
+}
