@@ -1,0 +1,28 @@
+{
+  "entity": "event",
+  "account_id": "acc_Pup4LDLiA1DssX",
+  "event": "payout.processed",
+  "contains": ["payout"],
+  "payload": {
+    "payout": {
+      "entity": {
+        "id": "pout_R7ambiUdUvg6AD",
+        "entity": "payout",
+        "fund_account_id": "fa_R7amb4zOx1gJoF",
+        "amount": 100,
+        "currency": "INR",
+        "fees": 0,
+        "tax": 0,
+        "status": "processed",
+        "purpose": "payout",
+        "utr": "523223155921",
+        "mode": "UPI",
+        "reference_id": null,
+        "batch_id": null,
+        "failure_reason": null,
+        "created_at": 1755693656
+      }
+    }
+  },
+  "created_at": 1755693679
+}

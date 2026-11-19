@@ -1,0 +1,27 @@
+{
+  "entity": "event",
+  "account_id": "acc_BfVUrG6tDiL7H0",
+  "event": "payout.reversed",
+  "contains": ["payout"],
+  "payload": {
+    "payout": {
+      "entity": {
+        "id": "pout_1Aa00000000001",
+        "entity": "payout",
+        "fund_account_id": "fa_1Aa00000000001",
+        "amount": 212,
+        "currency": "INR",
+        "fees": 9,
+        "tax": 2,
+        "status": "reversed",
+        "purpose": "payout",
+        "utr": "qwer12uijaaasssd",
+        "mode": "IMPS",
+        "reference_id": null,
+        "batch_id": null,
+        "created_at": 1580118057
+      }
+    }
+  },
+  "created_at": 1580118468
+}
