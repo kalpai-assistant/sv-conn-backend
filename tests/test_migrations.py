@@ -2130,7 +2130,8 @@ def test_svc_480_prices_per_variant_and_round_trips(scratch_db):
 
 def test_seed_wipe_clears_sp_prices_first(scratch_db):
     """``seed_pricing_from_xlsx.py`` wipes the catalog; a price row (RESTRICT on
-    both its service and its variant) must not make that fail."""
+    both its service and its variant) must not make that fail, nor (SVC-419) a
+    marketplace event pointing at the service, the variant and the SP."""
     import asyncio
 
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -2153,6 +2154,22 @@ def test_seed_wipe_clears_sp_prices_first(scratch_db):
             )
     finally:
         engine.dispose()
+    # Up to SVC-419 (the wipe deletes its events), then a price-set event.
+    _alembic(scratch_db, "upgrade", SVC_419)
+    _engine_run(
+        scratch_db,
+        "INSERT INTO marketplace_events "
+        "(id, event_id, name, user_id, sp_id, service_id, service_variant_id, payload) "
+        "VALUES (:id, :eid, 'sp.price_set', :sp, :sp, :svc, :v, "
+        """'{"old_price": null, "new_price": "2299.00", "out_of_bounds": false}')""",
+        {
+            "id": uuid.uuid4(),
+            "eid": uuid.uuid4(),
+            "sp": ids["sp"],
+            "svc": ids["svc"],
+            "v": ids["v1"],
+        },
+    )
 
     async def wipe() -> None:
         async_engine = create_async_engine(
@@ -2167,7 +2184,13 @@ def test_seed_wipe_clears_sp_prices_first(scratch_db):
 
     asyncio.run(wipe())
 
-    for table in ("sp_service_pricing", "provider_services", "service_variants", "services"):
+    for table in (
+        "marketplace_events",
+        "sp_service_pricing",
+        "provider_services",
+        "service_variants",
+        "services",
+    ):
         [count] = _query(scratch_db, f"SELECT count(*) AS n FROM {table}")
         assert count["n"] == 0, table
     # Categories and the SP stay.
@@ -2718,3 +2741,67 @@ def test_svc_413_switches_off_inactive_users_prices_in_one_upgrade_with_svc_418(
     kept = _prices(scratch_db)
     assert set(kept) == set(sp_a) | {(ids["sp_c"], ids["m2"])}
     assert kept[(ids["sp_a"], ids["m1"])]["id"] == own_id
+
+
+# --- SVC-419: marketplace_events -------------------------------------------------
+
+
+SVC_419 = "c4e19a7d2b60"
+BEFORE_SVC_419 = SVC_413
+
+
+def test_svc_419_creates_marketplace_events_and_downgrade_drops_it(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_419)
+    referenced = ("users", "bookings", "services", "service_variants")
+    before = {t: _shape(scratch_db, t) for t in referenced}
+
+    _alembic(scratch_db, "upgrade", SVC_419)
+    shape = _shape(scratch_db, "marketplace_events")
+    assert {n: (t, nl) for n, t, nl in shape["columns"]} == {
+        "id": ("UUID", False),
+        "event_id": ("UUID", False),
+        "name": ("VARCHAR(64)", False),
+        "occurred_at": ("TIMESTAMP", True),
+        "created_at": ("TIMESTAMP", False),
+        "user_id": ("UUID", True),
+        "sp_id": ("UUID", True),
+        "booking_id": ("UUID", True),
+        "service_id": ("UUID", True),
+        "service_variant_id": ("UUID", True),
+        "payload": ("JSONB", False),
+    }
+    assert shape["primary_key"] == ["id"]
+    # Plain FKs, no cascade, as on the other log tables.
+    assert {(cols, table, ondelete) for _, cols, table, _, ondelete in shape["foreign_keys"]} == {
+        (("user_id",), "users", None),
+        (("sp_id",), "users", None),
+        (("booking_id",), "bookings", None),
+        (("service_id",), "services", None),
+        (("service_variant_id",), "service_variants", None),
+    }
+    assert shape["unique_constraints"] == [("uq_marketplace_events_event_id", ("event_id",))]
+    indexes = {name: (cols, unique) for name, cols, unique, _ in shape["indexes"]}
+    assert indexes["ix_marketplace_events_name_created_at"] == (("name", "created_at"), False)
+    assert indexes["ix_marketplace_events_service_id"] == (("service_id",), False)
+    [defaults] = _query(
+        scratch_db,
+        "SELECT "
+        "(SELECT column_default FROM information_schema.columns WHERE table_name = "
+        "'marketplace_events' AND column_name = 'payload') AS payload, "
+        "(SELECT column_default FROM information_schema.columns WHERE table_name = "
+        "'marketplace_events' AND column_name = 'created_at') AS created_at",
+    )
+    assert defaults["payload"] == "'{}'::jsonb"
+    assert defaults["created_at"] == "now()"
+    # Nothing it points at changed.
+    assert {t: _shape(scratch_db, t) for t in referenced} == before
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_419)
+    assert (
+        _query(
+            scratch_db,
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'marketplace_events'",
+        )
+        == []
+    )
+    assert {t: _shape(scratch_db, t) for t in referenced} == before

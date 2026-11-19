@@ -336,6 +336,84 @@ enough history" (never 0).
 - Marketplace health (sheet / pick rank / boost) needs SVC-419's events and isn't
   here.
 
+## Analytics events (SVC-419)
+
+Marketplace analytics events land in one table, `marketplace_events`, so they can be
+joined with bookings and charted later. There are no views or dashboards over it yet,
+and no retention job (to be decided before May 2027, under DPDP). Writes go only
+through `app/services/marketplace_events.py`.
+
+**Columns.** A typed id goes in its own column (a plain nullable FK, no cascade), never
+in the payload: `user_id` (who did it), `sp_id`, `booking_id`, `service_id`,
+`service_variant_id`. Everything else is in `payload` (JSONB). `name` is the event name.
+
+**Money** in a payload is an exact 2-decimal string such as `"2400.00"`. Cast it with
+`::numeric`, never to float. The app sends a JSON number, which is rounded half up to
+2 decimals (`2199.9999999998` → `"2200.00"`). Server events are built from `Decimal`.
+
+**Time.** `created_at` is the server's clock; reports use it. `occurred_at` is the
+phone's clock as the app sent it (NULL for server events), kept only for reference.
+
+**Dedupe.** `event_id` is unique. The app makes a UUID per event and resends it on a
+retry. A repeat is ignored (`ON CONFLICT DO NOTHING`) and the first row stands, even
+when a different user sends the same id.
+
+**Privacy.** No phone, email, lat/lng or free text: every client field is declared and
+anything else is refused. `user_pincode` is the selected address's 6-digit pincode, or
+null (phone location). Account deletion (SVC-367) sets `user_id` to NULL on the
+user's rows and keeps them. `sp_id` stays, like `bookings.provider_id`, since the
+tombstoned user row it names holds no personal data.
+
+### Client events: `POST /api/v1/analytics/events`
+
+Login required (any role). One event per request:
+`{"event_id": uuid, "name": ..., "occurred_at": ISO-8601 with offset (optional), "properties": {...}}`.
+204 on success, also for a repeat. 422 for a name not listed here (the server names
+included), an undeclared field at either level, a missing property, a value out of
+bounds, or NaN/Infinity. 422 `ANALYTICS_UNKNOWN_REFERENCE` with nothing stored when a
+service, variant or SP id names no row. `user_id` is the caller, from the token, and
+can't be sent. Rate limit: 600 per user per hour (`rl:analytics_events:<user_id>`).
+Each event also writes one log line, `analytics.event name=… event_id=… user_id=…
+stored=…`, with no payload.
+
+| Event | Columns | Payload |
+| --- | --- | --- |
+| `marketplace.sheet_opened` | service, variant | `sp_count_in_area` int ≥ 0, `has_boosted` bool, `user_pincode` |
+| `marketplace.sheet_abandoned` (the pro sheet closed without a pick) | service, variant | `time_spent_ms` 0..86,400,000, `scroll_depth_pct` int 0..100 |
+| `marketplace.sp_selected` | service, variant, sp | `sp_rank_in_sheet` int ≥ 0 (0 = top), `sp_score` ≥ 0, `price_amount` money, `is_boosted_sp`, `is_outside_range` bool |
+| `marketplace.price_change_at_checkout` (SVC-417's 409 dialog) | service, variant, sp | `old_price`, `new_price` money, `user_action` `confirmed` / `abandoned` |
+| `marketplace.tile_coming_soon_tapped` | service (the tile has no variant) | `state` `coming_soon` / `no_pros_online`, `user_pincode` |
+
+Every property is required; `user_pincode` may be null.
+
+### Server events
+
+Written by the backend in the same transaction as the change, so a rolled-back change
+leaves no event. Server-generated `event_id`, `occurred_at` NULL.
+
+| Event | Written by | Columns | Payload |
+| --- | --- | --- | --- |
+| `sp.price_set` | `SpPricingService.set_price` (`PATCH /providers/me/pricing/{variant_id}`), only when a price is sent and differs from the stored one. An on/off toggle writes nothing. | user = the SP (this is `by_user_id`), sp, service, variant | `old_price` money or null (first price), `new_price` money, `out_of_bounds` = outside the recommended range (the price is saved anyway) |
+| `booking.marketplace_created` | `BookingService.create_booking`, only for a chosen-SP booking (`sp_id`), one row per item. An idempotent retry (SVC-158) doesn't run it again. | user = the customer, sp, booking, service, variant | `locked_price` = the item's unit price, `quantity`, `reference_price` = the variant's platform price (`base_price`) |
+
+There is no rank on `booking.marketplace_created`, because the server never knows it.
+The rank is `sp_selected.sp_rank_in_sheet`. To tie a pick to its booking, match the
+customer, variant and SP, and take the nearest booking after the pick.
+
+**Example: picks by rank, last 30 days.**
+
+```sql
+SELECT (payload->>'sp_rank_in_sheet')::int                AS rank,
+       count(*)                                           AS picks,
+       round(avg((payload->>'price_amount')::numeric), 2) AS avg_price,
+       count(*) FILTER (WHERE (payload->>'is_boosted_sp')::boolean) AS boosted_picks
+FROM marketplace_events
+WHERE name = 'marketplace.sp_selected'
+  AND created_at >= now() - interval '30 days'
+GROUP BY 1
+ORDER BY 1;
+```
+
 ## Audit log (SVC-423)
 
 Every admin write writes one `admin_actions` row: who, what, why, before and after,

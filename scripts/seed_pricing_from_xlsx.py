@@ -61,6 +61,7 @@ from sqlalchemy import delete, func, select  # noqa: E402
 from app.database import AsyncSessionLocal  # noqa: E402
 from app.models.booking_item import BookingItem  # noqa: E402
 from app.models.category import Category  # noqa: E402
+from app.models.marketplace_event import MarketplaceEvent  # noqa: E402
 from app.models.provider_service import ProviderService  # noqa: E402
 from app.models.service import Service  # noqa: E402
 from app.models.service_variant import ServiceVariant  # noqa: E402
@@ -308,6 +309,10 @@ async def wipe_services_and_variants(db, force: bool = False) -> None:
     sp_service_pricing (RESTRICT on both, SVC-408 / SVC-480) and
     provider_services also reference them, so they go first. A reseed gives
     every variant a new id, so an SP's price can't outlive it anyway.
+
+    ``marketplace_events`` (SVC-419) goes first of all: its service and variant
+    FKs would block the wipe. Events about the old catalogue can't be joined to
+    anything once every id is new, and the wipe only runs with no bookings.
     """
     bi_count = (await db.execute(select(func.count()).select_from(BookingItem))).scalar_one()
     if bi_count and not force:
@@ -315,6 +320,7 @@ async def wipe_services_and_variants(db, force: bool = False) -> None:
             f"Refusing to wipe catalog: {bi_count} booking_items rows exist. "
             "Pass --force to proceed anyway (this will fail on FK)."
         )
+    await db.execute(delete(MarketplaceEvent))
     await db.execute(delete(SpServicePricing))
     await db.execute(delete(ProviderService))
     await db.execute(delete(ServiceVariant))

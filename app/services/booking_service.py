@@ -61,6 +61,7 @@ from app.schemas.booking import (
 )
 from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
 from app.services.commission import commission_gst, split_at_price
+from app.services.marketplace_events import money, record_server_event
 from app.services.provider_matching import (
     is_eligible_provider_multi_stmt,
 )
@@ -634,6 +635,28 @@ class BookingService:
         # unit-of-work — plain assignment would enrol them for a second
         # INSERT on the next flush.
         set_committed_value(booking, "items", item_rows)
+
+        if sp_id is not None:
+            # SVC-419: one event per item of a chosen-SP booking, in this
+            # transaction, so a booking that fails later leaves none. Every
+            # item names its variant here (SVC-411). No rank: the server never
+            # knows it; the app's ``marketplace.sp_selected`` carries it.
+            for line in item_lines:
+                assert line.variant is not None
+                await record_server_event(
+                    self.db,
+                    "booking.marketplace_created",
+                    user_id=consumer_id,
+                    sp_id=sp_id,
+                    booking_id=booking.id,
+                    service_id=line.svc.id,
+                    service_variant_id=line.variant.id,
+                    payload={
+                        "locked_price": money(line.unit_price),
+                        "quantity": line.req.quantity,
+                        "reference_price": money(line.variant.base_price),
+                    },
+                )
 
         # The 201 carries the address like every other booking response (SVC-170).
         await self.attach_addresses([booking])

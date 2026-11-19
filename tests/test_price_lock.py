@@ -479,6 +479,11 @@ class _World:
             return
         users = [str(self.sp.id), str(self.consumer.id)]
         async with self.factory() as db:
+            # SVC-419: the booking's marketplace events point at it.
+            await db.execute(
+                text("DELETE FROM marketplace_events WHERE service_id = :s"),
+                {"s": self.service.id},
+            )
             bookings = "SELECT id FROM bookings WHERE consumer_id::text = :c"
             params = {"c": str(self.consumer.id)}
             for table in ("booking_items", "booking_status_logs"):
