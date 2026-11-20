@@ -45,6 +45,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database import call_after_commit
 from app.exceptions import AppException, ServiceNotFound, ServiceVariantNotFound
 from app.models.category import Category
 from app.models.provider_profile import KYCStatus, ProviderProfile
@@ -215,6 +216,17 @@ class AdminVariantService:
             before=before,
             after=after,
         )
+        # SVC-487: ask the service's SPs to price it, once the save commits. A
+        # switched-off service isn't on their pricing screen, so nothing then.
+        if service.is_active:
+            new_variant_id = str(variant.id)
+
+            def _push() -> None:
+                from app.tasks.notification_tasks import send_variant_added_notification
+
+                send_variant_added_notification.delay(variant_id=new_variant_id)
+
+            call_after_commit(self.db, _push)
         return await self.catalog.service_detail(service.id)
 
     async def update(
