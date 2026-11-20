@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from fastapi import status
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import AppException
@@ -29,6 +29,7 @@ from app.models.professional import Professional
 from app.models.provider_ledger_entry import ProviderLedgerEntry
 from app.models.provider_profile import ProviderProfile
 from app.models.provider_team_invite import InviteStatus, ProviderTeamInvite
+from app.models.service_alert import ServiceAlert
 from app.models.user import User
 from app.services.marketplace_events import forget_user
 from app.services.sp_pricing_service import switch_off_all_prices
@@ -195,6 +196,8 @@ class AccountService:
         await switch_off_all_prices(self.db, user_id)
         # SVC-419: their analytics events stay, pointing at nobody.
         await forget_user(self.db, user_id)
+        # SVC-484: their "Notify me" alerts hold a location; delete them.
+        await self.db.execute(delete(ServiceAlert).where(ServiceAlert.user_id == user_id))
 
         logger.warning("account.deleted user_id=%s role=%s", user_id, user.role.value)
         # Pro-for-self and SP rows can name the same object; delete it once.

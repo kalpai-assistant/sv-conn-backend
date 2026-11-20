@@ -435,6 +435,10 @@ class ProviderService:
         # Going OFFLINE is always allowed regardless of geo state.
         if is_online and profile.service_area_center is None:
             raise ServiceAreaMissing()
+        # SVC-484: only an off → on switch starts the clock. Staying on, or
+        # switching off, leaves it alone ("online 10 min" also tests is_online).
+        if is_online and not profile.is_online:
+            profile.online_since = datetime.now(UTC)
         profile.is_online = is_online
         # SVC-320 PR 3: the SP's Pro-for-self is the same person, so it follows
         # this toggle. One switch for one person; /pros/me/online on a

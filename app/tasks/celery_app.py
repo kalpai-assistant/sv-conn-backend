@@ -172,6 +172,12 @@ celery_app.conf.update(
             "task": "app.tasks.analytics_tasks.refresh_analytics_views",
             "schedule": 900.0,
         },
+        # SVC-484: "Notify me" alerts. 2 statements per run outside quiet
+        # hours, none inside them; a due alert waits at most ~2 min.
+        "notify-service-alerts": {
+            "task": "app.tasks.service_alert_tasks.notify_service_alerts",
+            "schedule": 120.0,
+        },
         "reconcile-payouts": {
             "task": "app.tasks.payment_tasks.reconcile_payouts",
             "schedule": crontab(hour=2, minute=0),  # Nightly at 02:00 (hits RazorpayX API)

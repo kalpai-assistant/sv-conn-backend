@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from redis.asyncio import Redis
-from sqlalchemy import and_, distinct, func, select
+from sqlalchemy import Select, and_, distinct, func, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -73,32 +73,18 @@ def cache_key(lat: float, lng: float) -> str:
     return f"{CACHE_PREFIX}:{_coordinate(lat)}:{_coordinate(lng)}"
 
 
-def from_prices_stmt(point_wkt: str):
-    """Every active service, with one row per variant that a serving SP prices.
+def serving_prices(stmt: Select, point) -> Select:
+    """``stmt`` read from the active prices, on active variants of active
+    services, of the SPs that serve ``point`` (subscribed + ``SERVED_STAGES``).
 
-    A service no serving SP prices comes back once with NULL ``variant_id``.
-    ``listable_prices`` is NULL when nobody passing every stage prices that
-    variant. ``ProviderProfile`` and ``User`` stay un-aliased inside the grouped
-    side: the ``has_someone_to_do_it`` EXISTS clauses correlate on them by name.
+    The joins and filters behind both the tile (``from_prices_stmt``) and the
+    "Notify me" checks (SVC-484, ``service_alert_service``), so "served" can't
+    mean two things. ``point`` is EWKT or a geography column. ``ProviderProfile``
+    and ``User`` stay un-aliased: the ``has_someone_to_do_it`` EXISTS clauses
+    correlate on them by name.
     """
-    listable_now = and_(*stage_conditions(point_wkt, listable_only_stages()))
-    priced = (
-        select(
-            SpServicePricing.service_id.label("service_id"),
-            SpServicePricing.service_variant_id.label("variant_id"),
-            ServiceVariant.base_price.label("base_price"),
-            Category.id.label("category_id"),
-            Category.is_sensitive.label("is_sensitive"),
-            Category.bounds_pct.label("bounds_pct"),
-            func.array_agg(
-                aggregate_order_by(
-                    distinct(SpServicePricing.price_amount), SpServicePricing.price_amount
-                )
-            )
-            .filter(listable_now)
-            .label("listable_prices"),
-        )
-        .select_from(SpServicePricing)
+    return (
+        stmt.select_from(SpServicePricing)
         .join(ServiceVariant, ServiceVariant.id == SpServicePricing.service_variant_id)
         .join(Service, Service.id == SpServicePricing.service_id)
         .join(Category, Category.id == Service.category_id)
@@ -109,7 +95,38 @@ def from_prices_stmt(point_wkt: str):
             SpServicePricing.is_active.is_(True),
             ServiceVariant.is_active.is_(True),
             Service.is_active.is_(True),
-            *serves_area_conditions(SpServicePricing.service_id, point_wkt),
+            *serves_area_conditions(SpServicePricing.service_id, point),
+        )
+    )
+
+
+def from_prices_stmt(point_wkt: str):
+    """Every active service, with one row per variant that a serving SP prices.
+
+    A service no serving SP prices comes back once with NULL ``variant_id``.
+    ``listable_prices`` is NULL when nobody passing every stage prices that
+    variant. ``ProviderProfile`` and ``User`` stay un-aliased inside the grouped
+    side: the ``has_someone_to_do_it`` EXISTS clauses correlate on them by name.
+    """
+    listable_now = and_(*stage_conditions(point_wkt, listable_only_stages()))
+    priced = (
+        serving_prices(
+            select(
+                SpServicePricing.service_id.label("service_id"),
+                SpServicePricing.service_variant_id.label("variant_id"),
+                ServiceVariant.base_price.label("base_price"),
+                Category.id.label("category_id"),
+                Category.is_sensitive.label("is_sensitive"),
+                Category.bounds_pct.label("bounds_pct"),
+                func.array_agg(
+                    aggregate_order_by(
+                        distinct(SpServicePricing.price_amount), SpServicePricing.price_amount
+                    )
+                )
+                .filter(listable_now)
+                .label("listable_prices"),
+            ),
+            point_wkt,
         )
         .group_by(
             SpServicePricing.service_id,
