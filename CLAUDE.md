@@ -6,6 +6,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 FastAPI + SQLAlchemy 2.0 async backend for an on-demand home services marketplace (Urban Company-style). Phone/OTP auth, geo-based provider matching, booking state machine, Razorpay payments, FCM push, and WebSocket tracking.
 
+## Claude skills (reach for these first)
+
+KALP AI's custom skill library — [`kalpai-skills`](https://github.com/kalpai-assistant/kalpai-skills) — is installed globally at `~/.claude/skills/`. Fresh agents should route to these before rolling their own approach.
+
+| Situation in this repo | Skill |
+|---|---|
+| Picking up a Jira ticket (make-or-plan, branch name, hands-off check) | `jira-triage` |
+| Non-trivial work spanning >1 file or >1 reversible step | `planning` |
+| New integration, cross-service change, breaking schema change | `architecture-design` |
+| Proposing or writing tests (every test must name the failure it catches) | `meaningful-testing` |
+| Opening or self-reviewing a PR (correctness-first, block/comment/nit/approve) | `kalpai-review` (NOT built-in `/review`) |
+| Writing a run doc or spawn prompt for a sub-agent | `handoff-writer` |
+| Launching an epic with 3+ subtasks / parallel sub-agents | `epic-orchestrator` |
+| Cutting a release or publishing an artifact | `release-engineer` |
+
+**Backend-specific:** `meaningful-testing` bakes in the universal rule — integration tests hit **real local Postgres** (via `docker-compose up -d postgres redis`), never a mock. See the webhook harness under `tests/fixtures/webhooks/` for the captured-payload pattern this skill enforces.
+
+**Install if missing:** `git clone https://github.com/kalpai-assistant/kalpai-skills.git && cd kalpai-skills && ./install.sh`. See [LIBRARY.md](https://github.com/kalpai-assistant/kalpai-skills/blob/main/LIBRARY.md) for the user manual, update workflow, and add-a-skill workflow.
+
 ## Commands
 
 **Dependency management** uses `uv` (not pip):
