@@ -11,6 +11,7 @@ row, so the active-bookings warning can't be skipped.
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, StrictBool
 
@@ -83,7 +84,12 @@ class AdminCategoryDetail(BaseModel):
 
 
 class AdminServiceVariantRow(BaseModel):
-    """Read-only here: variants are edited elsewhere."""
+    """One variant, active or not, edited through ``/variants`` (SVC-481).
+
+    ``platform_commission + provider_payout == base_price`` always.
+    ``commission_pct`` is the commission's share of the price rounded half up to
+    2 dp, the value the editor shows and a PATCH may send back unchanged.
+    ``gst_percent`` is the customer's GST and is read-only."""
 
     id: uuid.UUID
     label: str
@@ -92,6 +98,10 @@ class AdminServiceVariantRow(BaseModel):
     duration_minutes: int | None
     sort_order: int
     is_active: bool
+    platform_commission: float
+    provider_payout: float
+    commission_pct: float
+    gst_percent: float
 
 
 class AdminServiceDetail(AdminCatalogServiceRow):
@@ -101,6 +111,9 @@ class AdminServiceDetail(AdminCatalogServiceRow):
     created_at: datetime
     updated_at: datetime
     variants: list[AdminServiceVariantRow]
+    # SVC-481: 2+ variant rows (any state). base_price then follows the cheapest
+    # active variant and can't be set directly.
+    priced_per_variant: bool
 
 
 # -- writes -------------------------------------------------------------------
@@ -173,3 +186,54 @@ class AdminServiceDeactivate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     confirm: StrictBool = False
+
+
+# -- variants (SVC-481) ---------------------------------------------------------
+
+
+class AdminVariantCreate(BaseModel):
+    """A new variant. ``commission_pct`` is the platform's percent of the price;
+    the amounts are stored. ``duration_minutes`` left out means the service's
+    duration applies; ``sort_order`` left out puts it last. ``gst_percent`` is
+    copied from the service's first variant: sending it is refused."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    base_price: Decimal
+    commission_pct: Decimal
+    duration_minutes: int | None = None
+    sort_order: int | None = None
+    # Declared only so that sending it is a CATALOG_INVALID naming the field.
+    gst_percent: Any = None
+
+
+class AdminVariantUpdate(BaseModel):
+    """Any subset of the editable fields; ``null`` is refused. Raising
+    ``commission_pct`` above the current (rounded) percent needs
+    ``confirm: true``, after the 14 days' notice to pros."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str | None = None
+    base_price: Decimal | None = None
+    commission_pct: Decimal | None = None
+    duration_minutes: int | None = None
+    sort_order: int | None = None
+    confirm: StrictBool = False
+    gst_percent: Any = None
+
+
+class AdminVariantPriceImpact(BaseModel):
+    """What a price change would do to the recommended range, for the confirm
+    dialog. Counts SPs with an active price on the variant (KYC verified, active
+    account), in every area. ``outside_now`` / ``outside_after``: outside the
+    range at the current / proposed price. ``moving_out`` / ``moving_in``: in
+    range now and outside after, and the reverse. A category with no range
+    (not sensitive) has all four at 0."""
+
+    sp_prices: int
+    outside_now: int
+    outside_after: int
+    moving_out: int
+    moving_in: int

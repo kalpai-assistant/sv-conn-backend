@@ -6,7 +6,8 @@
   branch would have charged: the same total, commission and payout.
 - A price change on a service with exactly one variant row moves that variant
   too, keeping its commission ratio (legacy split from a 0 price), recorded in
-  the same audit row. 2+ variants: untouched.
+  the same audit row. 2+ variants: the price change is refused (SVC-481), and
+  the variants are untouched.
 """
 
 import uuid
@@ -235,13 +236,16 @@ async def test_a_service_with_two_variants_keeps_them(client, db_session):
     two = await _variant(db_session, service, "2999.00", "899.70", sort_order=1)
     before = [_money(one), _money(two)]
 
+    # SVC-481: a 2+-variant service is priced per variant, so the change is refused.
     r = await client.patch(
         f"{A}/services/{service.id}", headers=_session(admin), json={"base_price": "1999"}
     )
-    assert r.status_code == 200, r.text
+    assert r.status_code == 422, r.text
+    assert (r.json()["code"], r.json()["details"]["field"]) == ("CATALOG_INVALID", "base_price")
     assert [_money(v) for v in await _variants(db_session, service.id)] == before
-    [row] = await _audit(db_session, admin)
-    assert (row.before_json, row.after_json) == ({"base_price": 2499.0}, {"base_price": 1999.0})
+    await db_session.refresh(service)
+    assert service.base_price == Decimal("2499.00")
+    assert await _audit(db_session, admin) == []
 
 
 async def test_no_price_change_leaves_the_variant(client, db_session):

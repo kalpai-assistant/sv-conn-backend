@@ -1103,3 +1103,71 @@ async def test_a_pricing_save_still_records_only_pricing_fields(client, db_sessi
     assert row.action == "pricing.category_update"
     assert row.before_json == {"platform_commission_pct": 20.0}
     assert row.after_json == {"platform_commission_pct": 25.0}
+
+
+# ---------------------------------------------------------------------------
+# SVC-481: a 2+-variant service is priced per variant
+# ---------------------------------------------------------------------------
+
+
+async def test_a_two_variant_service_refuses_a_new_base_price(client, db_session):
+    admin = await _admin(db_session)
+    service = await _svc(db_session, await _cat(db_session), base_price=Decimal("599.00"))
+    await _variant(db_session, service)
+    await _variant(db_session, service, is_active=False, sort_order=1)  # any state counts
+    url = f"{A}/services/{service.id}"
+    r = await client.patch(url, headers=_session(admin), json={"base_price": "699"})
+    _refused(r, "base_price")
+    assert "Priced per variant" in r.text
+    assert await _audit(db_session, admin) == []
+
+    # The same value, or any other field, still saves.
+    r = await client.patch(
+        url, headers=_session(admin), json={"base_price": "599.00", "duration_minutes": 90}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["priced_per_variant"] is True
+
+
+async def test_a_one_variant_service_still_takes_a_new_base_price(client, db_session):
+    admin = await _admin(db_session)
+    service = await _svc(db_session, await _cat(db_session), base_price=Decimal("599.00"))
+    await _variant(db_session, service)
+    r = await client.patch(
+        f"{A}/services/{service.id}", headers=_session(admin), json={"base_price": "699"}
+    )
+    assert r.status_code == 200, r.text
+    assert (r.json()["priced_per_variant"], r.json()["variants"][0]["base_price"]) == (
+        False,
+        699.0,
+    )
+
+
+async def test_the_legacy_patch_route_refuses_it_once_a_second_variant_exists(client, db_session):
+    admin = await _admin(db_session)
+    service = await _svc(db_session, await _cat(db_session), base_price=Decimal("599.00"))
+    await _variant(db_session, service)
+    url = f"{V1}/services/{service.id}"
+    r = await client.patch(url, headers=_session(admin), json={"base_price": 649.0})
+    assert r.status_code == 200, r.text  # one variant: it follows (SVC-480)
+
+    r = await client.post(
+        f"{A}/services/{service.id}/variants",
+        headers=_session(admin),
+        json={"label": "Second", "base_price": "999", "commission_pct": "20"},
+    )
+    assert r.status_code == 201, r.text
+
+    r = await client.patch(url, headers=_session(admin), json={"base_price": 700.0})
+    _refused(r, "base_price")
+    fresh = await db_session.scalar(
+        select(Service.base_price)
+        .where(Service.id == service.id)
+        .execution_options(populate_existing=True)
+    )
+    assert fresh == Decimal("649.00")
+    # The same price and other fields still save on the legacy route.
+    r = await client.patch(
+        url, headers=_session(admin), json={"base_price": 649.0, "name": "Renamed"}
+    )
+    assert r.status_code == 200, r.text

@@ -45,6 +45,10 @@ ADMIN_ACTIONS = (
     "booking.contacted",
     "booking.retry_dispatch",
     "booking.reassign_pro",
+    "variant.create",
+    "variant.update",
+    "variant.deactivate",
+    "variant.activate",
 )
 ADMIN_ACTION_TARGET_TYPES = (
     "user",
@@ -57,6 +61,7 @@ ADMIN_ACTION_TARGET_TYPES = (
     "pricing_config",
     "coupon",
     "dispute",
+    "service_variant",
 )
 
 USER_AGENT_MAX_LENGTH = 512

@@ -805,6 +805,12 @@ ROUTE_ROLES = {
     ("PATCH", "/admin/catalog/services/{service_id}"): ADMIN_OPS,
     ("POST", "/admin/catalog/services/{service_id}/deactivate"): ADMIN_OPS,
     ("POST", "/admin/catalog/services/{service_id}/activate"): ADMIN_OPS,
+    # SVC-481: the variant editor
+    ("POST", "/admin/catalog/services/{service_id}/variants"): ADMIN_OPS,
+    ("PATCH", "/admin/catalog/services/{service_id}/variants/{variant_id}"): ADMIN_OPS,
+    ("POST", "/admin/catalog/services/{service_id}/variants/{variant_id}/deactivate"): ADMIN_OPS,
+    ("POST", "/admin/catalog/services/{service_id}/variants/{variant_id}/activate"): ADMIN_OPS,
+    ("GET", "/admin/catalog/services/{service_id}/variants/{variant_id}/price-impact"): ADMIN_OPS,
     # admin_disputes.py (SVC-431): support writes too, its refunds capped
     ("GET", "/admin/disputes"): ALL,
     ("GET", "/admin/disputes/bookings/{booking_id}"): ALL,

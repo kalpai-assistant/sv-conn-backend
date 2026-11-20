@@ -18,13 +18,14 @@ booking and its items. Payouts, refunds and statements read the stored amounts
 and never recompute them.
 """
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from app.config import get_settings
 from app.models.service_variant import ServiceVariant
 from app.utils.money import to_decimal
 
 HUNDRED = Decimal(100)
+PCT_QUANTUM = Decimal("0.01")
 
 
 def legacy_split(price: Decimal | float | int | str) -> tuple[Decimal, Decimal]:
@@ -72,6 +73,28 @@ def commission_pct(variant: ServiceVariant) -> Decimal:
     if base_price == 0:
         return to_decimal(get_settings().PLATFORM_COMMISSION_PERCENT)
     return to_decimal(variant.platform_commission) * HUNDRED / base_price
+
+
+def rounded_commission_pct(variant: ServiceVariant) -> Decimal:
+    """``commission_pct(variant)`` rounded half up to 2 dp: the "current %" the
+    admin variant editor shows (SVC-481). Most catalogue variants have whole-rupee
+    amounts, so their exact percent isn't a 2 dp number (₹240 on ₹799 is
+    30.0375%, shown as 30.04). An edit that sends this value back is treated as
+    no change of percent, so the stored ratio is kept."""
+    return commission_pct(variant).quantize(PCT_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def split_at_pct(
+    price: Decimal | float | int | str, pct: Decimal | float | int | str
+) -> tuple[Decimal, Decimal]:
+    """``(platform_commission, provider_payout)`` for ``price`` at ``pct`` percent
+    (SVC-481): the commission is ``price × pct / 100`` rounded half up to paise and
+    the payout is the rest, so the two always add up to the price. Used only when an
+    admin sets a variant's commission percent; every other split keeps the
+    variant's stored ratio (``split_at_price``)."""
+    price = to_decimal(price)
+    commission = to_decimal(price * Decimal(pct) / HUNDRED)
+    return commission, price - commission
 
 
 def take_home(

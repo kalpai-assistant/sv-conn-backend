@@ -17,6 +17,7 @@ test's own admin or target.
 
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -50,6 +51,7 @@ from app.models.pricing_config import PricingConfig
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.service import Service
+from app.models.service_variant import ServiceVariant
 from app.models.user import AdminRole, User
 from app.services.admin_audit import (
     AUDIT_FIELDS,
@@ -99,6 +101,7 @@ RECORD_MODELS = {
     "pricing_config": PricingConfig,
     "coupon": Coupon,
     "dispute": BookingDispute,
+    "service_variant": ServiceVariant,
 }
 
 
@@ -169,6 +172,9 @@ class Case:
     before: dict | None = None
     after: dict | None = None
     details: dict | None = None
+    # For a create whose response isn't the created row (a variant create
+    # returns its service): picks the target id out of the response body.
+    target_from: Callable[[dict], str] | None = None
 
 
 async def _deactivate(db) -> Case:
@@ -655,6 +661,96 @@ async def _catalog_service_activate(db) -> Case:
     )
 
 
+async def _catalog_variant(
+    db, *, is_active: bool = True, second: bool = False
+) -> tuple[Service, ServiceVariant]:
+    """A service at 499 with one variant at 499 (20%), and optionally a second
+    active one at 599, so the first can be switched off."""
+    service = await _catalog_service(db)
+    variant = ServiceVariant(
+        service_id=service.id,
+        label="Aud V",
+        base_price=Decimal("499.00"),
+        platform_commission=Decimal("99.80"),
+        provider_payout=Decimal("399.20"),
+        sort_order=0,
+        is_active=is_active,
+    )
+    db.add(variant)
+    if second:
+        db.add(
+            ServiceVariant(
+                service_id=service.id,
+                label="Aud V2",
+                base_price=Decimal("599.00"),
+                platform_commission=Decimal("119.80"),
+                provider_payout=Decimal("479.20"),
+                sort_order=1,
+            )
+        )
+    await db.flush()
+    return service, variant
+
+
+async def _catalog_variant_create(db) -> Case:
+    service = await _catalog_service(db)
+    return Case(
+        url=f"{A}/catalog/services/{service.id}/variants",
+        body={"label": "Aud New", "base_price": "499", "commission_pct": "20"},
+        status=201,
+        action="variant.create",
+        target_type="service_variant",
+        target_from=lambda body: next(v["id"] for v in body["variants"]),
+        after={
+            "label": "Aud New",
+            "base_price": 499.0,
+            "platform_commission": 99.8,
+            "provider_payout": 399.2,
+            "gst_percent": 0.0,
+            "is_active": True,
+        },
+        details={"service_id": str(service.id), "commission_pct": 20.0},
+    )
+
+
+async def _catalog_variant_update(db) -> Case:
+    service, variant = await _catalog_variant(db)
+    return Case(
+        url=f"{A}/catalog/services/{service.id}/variants/{variant.id}",
+        body={"commission_pct": "25", "confirm": True},
+        action="variant.update",
+        target_type="service_variant",
+        target_id=variant.id,
+        before={"platform_commission": 99.8, "provider_payout": 399.2},
+        after={"platform_commission": 124.75, "provider_payout": 374.25},
+        details={"old_pct": 20.0, "new_pct": 25.0, "confirm": True},
+    )
+
+
+async def _catalog_variant_deactivate(db) -> Case:
+    service, variant = await _catalog_variant(db, second=True)
+    return Case(
+        url=f"{A}/catalog/services/{service.id}/variants/{variant.id}/deactivate",
+        action="variant.deactivate",
+        target_type="service_variant",
+        target_id=variant.id,
+        before={"is_active": True, "service_base_price": 499.0},
+        after={"is_active": False, "service_base_price": 599.0},
+    )
+
+
+async def _catalog_variant_activate(db) -> Case:
+    service, variant = await _catalog_variant(db, is_active=False, second=True)
+    return Case(
+        url=f"{A}/catalog/services/{service.id}/variants/{variant.id}/activate",
+        action="variant.activate",
+        target_type="service_variant",
+        target_id=variant.id,
+        before={"is_active": False},
+        after={"is_active": True},
+    )
+
+
 async def _disputed_booking(db, status="RAISED") -> tuple[Booking, BookingDispute]:
     _, booking = await _unpaid_booking(db, status=BookingStatus.CANCELLED)
     dispute = BookingDispute(
@@ -807,6 +903,19 @@ AUDITED_WRITE_ROUTES = {
     ("PATCH", "/admin/catalog/services/{service_id}"): _catalog_service_update,
     ("POST", "/admin/catalog/services/{service_id}/deactivate"): _catalog_service_deactivate,
     ("POST", "/admin/catalog/services/{service_id}/activate"): _catalog_service_activate,
+    ("POST", "/admin/catalog/services/{service_id}/variants"): _catalog_variant_create,
+    (
+        "PATCH",
+        "/admin/catalog/services/{service_id}/variants/{variant_id}",
+    ): _catalog_variant_update,
+    (
+        "POST",
+        "/admin/catalog/services/{service_id}/variants/{variant_id}/deactivate",
+    ): _catalog_variant_deactivate,
+    (
+        "POST",
+        "/admin/catalog/services/{service_id}/variants/{variant_id}/activate",
+    ): _catalog_variant_activate,
     ("POST", "/admin/disputes"): _dispute_create,
     ("POST", "/admin/disputes/{dispute_id}/review"): _dispute_review,
     ("POST", "/admin/disputes/{dispute_id}/resolve"): _dispute_resolve,
@@ -829,7 +938,7 @@ def test_every_admin_write_route_has_an_audit_case():
             if is_admin or path.startswith("/services"):
                 found.add((method, path))
     assert found == set(AUDITED_WRITE_ROUTES)
-    assert len(found) == 36
+    assert len(found) == 40
 
 
 @pytest.fixture
@@ -881,7 +990,10 @@ async def test_write_route_writes_exactly_one_correct_row(
     assert r.status_code == case.status, r.text
 
     [row] = await _rows(db_session, admin_user_id=admin.id)
-    target_id = case.target_id if case.target_id is not None else r.json()["id"]
+    if case.target_from is not None:
+        target_id = case.target_from(r.json())
+    else:
+        target_id = case.target_id if case.target_id is not None else r.json()["id"]
     assert (row.action, row.target_type, row.target_id) == (
         case.action,
         case.target_type,
