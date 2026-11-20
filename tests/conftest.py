@@ -34,10 +34,23 @@ def razorpayx_enabled_in_tests(monkeypatch):
     service-layer gates in ``preflight_payout`` / ``create_provider_payout``
     / ``handle_payout_webhook`` / ``reconcile_payouts``.
 
+    Patches each module's bound ``settings`` reference rather than the
+    shared singleton. In principle both routes lead to the same instance,
+    but the module-level patches are what the existing test suite uses
+    (e.g. ``test_fcm_fallback.py`` on ``fcm_client.settings``) — matching
+    that pattern avoids any ordering / import-time edge case where a
+    module's cached reference could shadow a singleton mutation.
+
     A dedicated kill-switch test in ``tests/test_razorpayx_kill_switch.py``
-    flips this False locally via ``monkeypatch.setattr`` to verify each gate.
+    flips this back False locally via the same pattern.
     """
-    monkeypatch.setattr(get_settings(), "RAZORPAYX_ENABLED", True)
+    from app.routers import payments as payments_router
+    from app.services import payout_service as payout_service_module
+    from app.utils import razorpayx_client
+
+    monkeypatch.setattr(razorpayx_client.settings, "RAZORPAYX_ENABLED", True)
+    monkeypatch.setattr(payout_service_module.settings, "RAZORPAYX_ENABLED", True)
+    monkeypatch.setattr(payments_router.settings, "RAZORPAYX_ENABLED", True)
 
 
 @pytest.fixture
