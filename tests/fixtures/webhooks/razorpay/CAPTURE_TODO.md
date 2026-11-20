@@ -24,11 +24,11 @@ which is which at a glance.
 
 ## Still TODO
 
-- `settlement-processed__*.json` — Razorpay's docs page for this event is
-  404 at the time of writing. Capture from beta CloudWatch when the first
-  settlement lands, or sub in a docs example if Razorpay restores the page.
 - Replace `__docs_*` payloads with real `__captured_*` as beta traffic
   accumulates. The schema lives + doesn't change — only the fixtures swap.
+  `settlement-processed` was recovered from a cached Razorpay example after
+  the primary docs page went 404 (2026-11-19); still worth capturing a real
+  one once settlements fire on beta, in case the US-region variant diverges.
 
 ## Why docs-sourced is OK as an interim
 
