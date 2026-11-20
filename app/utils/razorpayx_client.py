@@ -38,6 +38,27 @@ _MAX_ATTEMPTS = 3
 _BACKOFF_BASE_SECONDS = 0.5
 
 
+class RazorpayXDisabledError(RuntimeError):
+    """Raised when a RazorpayX call is attempted while the integration is gated
+    off (``settings.RAZORPAYX_ENABLED is False``).
+
+    Distinct from a vendor-side failure so callers can short-circuit cleanly —
+    an "unknown" audit outcome is for responses that might have landed; a
+    disabled-flag refusal is for a call that never left our process.
+    """
+
+
+def _ensure_enabled(operation: str) -> None:
+    """Refuse an outbound call when the kill switch is off. The message names
+    the specific operation so a disabled-flag log line in production is
+    actionable without a stack trace."""
+    if not settings.RAZORPAYX_ENABLED:
+        raise RazorpayXDisabledError(
+            f"RazorpayX call refused: RAZORPAYX_ENABLED is False (operation={operation}). "
+            "See docs/RAZORPAYX_ACTIVATION.md."
+        )
+
+
 async def create_payout(
     *,
     amount_paise: int,
@@ -71,7 +92,12 @@ async def create_payout(
     to retry — RazorpayX will not create a duplicate payout for the same
     key. Returns the RazorpayX payout entity (includes ``id`` and
     ``status``).
+
+    Raises ``RazorpayXDisabledError`` if ``settings.RAZORPAYX_ENABLED`` is
+    False — refuses before any network call, so no payout can ever fire
+    with the integration gated off.
     """
+    _ensure_enabled("create_payout")
     if vpa:
         fund_account = {
             "account_type": "vpa",
@@ -165,7 +191,10 @@ async def list_payouts(
     ``from_ts`` / ``to_ts`` are Unix seconds filtering ``created_at``. Follows
     pagination (``skip``) until a short page, and retries transient failures with
     backoff — same policy as ``create_payout``. Returns the raw payout entities.
+
+    Raises ``RazorpayXDisabledError`` if ``settings.RAZORPAYX_ENABLED`` is False.
     """
+    _ensure_enabled("list_payouts")
     all_items: list[dict] = []
     skip = 0
     # Defensive cap so a misbehaving API (always-full pages) can't loop forever.

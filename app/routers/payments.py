@@ -211,7 +211,16 @@ async def razorpayx_payout_webhook(
     ``get_db`` commits. If this delivery rolls back, RazorpayX retries it and the
     retry settles the same bookings — pushing inline would notify the provider once
     per attempt.
+
+    When ``RAZORPAYX_ENABLED`` is False the endpoint accepts + logs without
+    verifying the signature or touching state. The empty-secret guard
+    (SVC-465) would otherwise 500 and make RazorpayX retry forever; a clean
+    200 stops the retry and leaves a log line for an operator to notice.
     """
+    if not settings.RAZORPAYX_ENABLED:
+        logger.warning("payout_webhook.ignored RAZORPAYX_ENABLED=False")
+        return {"status": "ok", "ignored": "RAZORPAYX_ENABLED is False"}
+
     payload_data = await _verify_and_parse(request, settings.RAZORPAYX_WEBHOOK_SECRET)
     service = PayoutService(db)
     await service.handle_payout_webhook(

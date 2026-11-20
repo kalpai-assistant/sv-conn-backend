@@ -22,6 +22,24 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 
+@pytest.fixture(autouse=True)
+def razorpayx_enabled_in_tests(monkeypatch):
+    """Flip ``RAZORPAYX_ENABLED`` on for the whole suite.
+
+    Production default is False — the kill switch sits in front of every
+    outbound RazorpayX call, every payout entry point, and the inbound
+    webhook. The existing 3,500 LOC of payout tests all patch
+    ``create_payout`` / ``list_payouts`` at the service layer and never
+    reach the vendor, so they need the flag flipped on to get past the
+    service-layer gates in ``preflight_payout`` / ``create_provider_payout``
+    / ``handle_payout_webhook`` / ``reconcile_payouts``.
+
+    A dedicated kill-switch test in ``tests/test_razorpayx_kill_switch.py``
+    flips this False locally via ``monkeypatch.setattr`` to verify each gate.
+    """
+    monkeypatch.setattr(get_settings(), "RAZORPAYX_ENABLED", True)
+
+
 @pytest.fixture
 async def db_session():
     import app.models  # noqa: F401

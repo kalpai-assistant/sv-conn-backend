@@ -414,7 +414,17 @@ class PayoutService:
         returned 202 "queued", and the task's refusal was rolled back with no audit
         row: the admin saw "queued" and nothing happened. Raises ``PayoutRefused``
         (402); returns the amount and booking count the task will pay.
+
+        The ``RAZORPAYX_ENABLED`` check sits in front so an admin clicking
+        "Pay out" with the integration gated off gets an immediate 402 instead of
+        a 202 → task-side refusal round-trip.
         """
+        if not settings.RAZORPAYX_ENABLED:
+            raise PayoutRefused(
+                "RazorpayX is disabled by RAZORPAYX_ENABLED. "
+                "Enable the integration in SSM before paying out."
+            )
+
         payable = await self._check_payable(provider_id, lock=False)
         return {
             "amount_paise": payable.amount_paise,
@@ -549,7 +559,22 @@ class PayoutService:
         recorded in ``payout_audits`` — an ``attempting`` row is committed before the
         RazorpayX call and resolved to the final outcome, so a crash mid-flight still
         leaves a locatable record for reconciliation.
+
+        Refuses early (no audit row) when ``settings.RAZORPAYX_ENABLED`` is False —
+        there is no payout to resolve, so the ``attempting`` → ``unknown`` audit path
+        (meant for lost-response races) would be a misleading record.
         """
+        if not settings.RAZORPAYX_ENABLED:
+            logger.info(
+                "payout.refused.disabled admin=%s provider=%s",
+                admin_user_id,
+                provider_id,
+            )
+            raise PayoutRefused(
+                "RazorpayX is disabled by RAZORPAYX_ENABLED. "
+                "Enable the integration in SSM before retrying."
+            )
+
         try:
             payable = await self._check_payable(provider_id, lock=True)
         except PayoutRefused as exc:
@@ -798,7 +823,21 @@ class PayoutService:
         Bookings are matched on the RazorpayX payout id (``settlement_payout_id``), so
         concurrent payouts settle independently. Idempotent: only bookings in a
         transitionable state for that payout are touched.
+
+        Accepts + logs (no side effect) when ``settings.RAZORPAYX_ENABLED`` is False.
+        Returning 500 would make RazorpayX retry every misdirected webhook forever
+        — inbound webhooks during a disabled window are either late deliveries from
+        before the flag flipped off or vendor-side misrouting; both deserve a clean
+        200 so vendor retries stop and an operator can investigate from logs.
         """
+        if not settings.RAZORPAYX_ENABLED:
+            logger.warning(
+                "payout.webhook.ignored RAZORPAYX_ENABLED=False event=%s payout_id=%s",
+                event,
+                (payload.get("payout") or {}).get("entity", {}).get("id"),
+            )
+            return
+
         handled = {
             "payout.processed",
             "payout.failed",
@@ -985,7 +1024,22 @@ class PayoutService:
         rolls all of them back; a push already sent for an earlier repair could not be
         taken back, and would tell a provider their money arrived when the repair never
         landed. Pass the list to ``dispatch_notifications`` once the commit succeeds.
+
+        Short-circuits to an empty report when ``settings.RAZORPAYX_ENABLED`` is False
+        — nothing can have drifted against a vendor we aren't talking to, and the
+        nightly Celery task shouldn't log scary "0 payouts checked" output.
         """
+        if not settings.RAZORPAYX_ENABLED:
+            logger.info("payout.reconcile.skipped RAZORPAYX_ENABLED=False")
+            return {
+                "checked": 0,
+                "case_a": 0,
+                "case_b": 0,
+                "unresolved": 0,
+                "notifications": [],
+                "skipped_reason": "RAZORPAYX_ENABLED is False",
+            }
+
         payouts = await list_payouts(from_ts=since_ts, to_ts=until_ts)
         report = {"checked": 0, "case_a": 0, "case_b": 0, "unresolved": 0}
         self._pending_notifications = []
