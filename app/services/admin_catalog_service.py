@@ -58,7 +58,12 @@ from app.schemas.admin_catalog import (
 from app.seed_data.catalog_icons import CATALOG_ICON_KEYS
 from app.services.account_service import _LIVE_STATUSES
 from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
-from app.services.standard_variant import standard_variant, sync_single_variant_price
+from app.services.commission import rounded_commission_pct
+from app.services.standard_variant import (
+    refuse_price_on_multi_variant,
+    standard_variant,
+    sync_single_variant_price,
+)
 from app.utils.money import to_decimal
 
 # What a category create records. SVC-428's pricing fields are on the same
@@ -381,9 +386,14 @@ class AdminCatalogService:
                     duration_minutes=v.duration_minutes,
                     sort_order=v.sort_order,
                     is_active=v.is_active,
+                    platform_commission=float(v.platform_commission),
+                    provider_payout=float(v.provider_payout),
+                    commission_pct=float(rounded_commission_pct(v)),
+                    gst_percent=float(v.gst_percent),
                 )
                 for v in variant_rows
             ],
+            priced_per_variant=len(variant_rows) >= 2,
         )
 
     # -- category writes --------------------------------------------------------
@@ -580,6 +590,9 @@ class AdminCatalogService:
         _unit_and_qty(new["price_unit"], new["min_qty"])
 
         changed = [f for f in SERVICE_EDITABLE if new[f] != old[f]]
+        if "base_price" in changed:
+            # SVC-481: 2+ variants are priced per variant. The same value is fine.
+            await refuse_price_on_multi_variant(self.db, service.id)
         if "category_id" in changed:
             await self._check_service_category(new["category_id"], active=service.is_active)
         elif "name" in changed:

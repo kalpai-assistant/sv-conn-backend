@@ -18,9 +18,11 @@ for a service whose variants are all switched off.
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import select
+from fastapi import status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.exceptions import AppException
 from app.models.service import Service
 from app.models.service_variant import ServiceVariant
 from app.services.commission import legacy_split, split_at_price
@@ -54,6 +56,29 @@ def repriced_split(variant: ServiceVariant, new_price: Decimal) -> tuple[Decimal
     ``app/services/commission.py``, which a chosen SP's booking uses too
     (SVC-411)."""
     return split_at_price(variant, new_price)
+
+
+class PricedPerVariant(AppException):
+    """SVC-481: a service with 2+ variant rows takes its price from the cheapest
+    active variant, so its own base_price can't be set directly."""
+
+    def __init__(self):
+        super().__init__(
+            "Priced per variant: edit the variants' prices instead",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            code="CATALOG_INVALID",
+            details={"field": "base_price"},
+        )
+
+
+async def refuse_price_on_multi_variant(db: AsyncSession, service_id: uuid.UUID) -> None:
+    """Raise ``PricedPerVariant`` when the service has 2+ variant rows, active or
+    not (SVC-481). Both admin price paths call it when ``base_price`` actually
+    changes, after locking the service, so a variant added concurrently (which
+    locks the service too) can't slip past the count."""
+    count = await db.scalar(select(func.count()).where(ServiceVariant.service_id == service_id))
+    if count >= 2:
+        raise PricedPerVariant()
 
 
 async def sync_single_variant_price(

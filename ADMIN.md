@@ -81,7 +81,7 @@ this table and fails if a new `/admin` route isn't in it.
 | Roles | Routes |
 |---|---|
 | admin, ops, support | `GET /admin/providers/kyc/pending`, `/providers/kyc/pending/count`, `/providers/{id}/kyc`, `/pros/{id}/kyc`, `/bookings`, `/bookings/{id}`, `/bookings/{id}/timeline`, `/providers`, `/providers/{id}`, `/providers/{id}/team`, `/providers/{id}/invites`, `/pros`, `/pros/{id}`, `/actions`, `/providers/pending-settlements`, `/providers/{id}/payouts`, `/providers/{id}/payout-bookings`, `/payouts/providers`, `/payouts/export.csv`, `/pricing/categories`, `/pricing/config`, `/coupons`, `/coupons/{code}`, `/catalog`, `/catalog/categories/{id}`, `/catalog/services/{id}`, `/disputes`, `/disputes/bookings/{id}`; `POST /admin/disputes`, `/disputes/{id}/review`, `/disputes/{id}/resolve` (SVC-431; support's refunds are capped); the support console (SVC-433): `GET /admin/support/lookup`, `/support/customers/{id}`, `/bookings/{id}/notes`, `/bookings/{id}/eligible-pros`; `POST /admin/bookings/{id}/notes`, `/bookings/{id}/contacted`, `/bookings/{id}/retry-dispatch`, `/bookings/{id}/reassign-pro` |
-| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428), `POST /admin/coupons`, `PATCH /admin/coupons/{code}`, `POST /admin/coupons/{code}/deactivate` + `activate` (SVC-429), `POST /admin/catalog/categories` + `/catalog/services`, `PATCH /admin/catalog/categories/{id}` + `/catalog/services/{id}`, `POST .../deactivate` + `activate` on both (SVC-430), `GET /admin/analytics/overview` + `/analytics/supply` (read-only dashboards, SVC-432) |
+| admin, ops | `POST /admin/providers/{id}/kyc/verify` + `reject`, `POST /admin/pros/{id}/kyc/verify` + `reject`, `POST /admin/bookings/{id}/cancel`, `POST /admin/providers/{id}/payout` + `requeue-failed`, `POST /admin/pros/{id}/force-remove` + `reassign` (team edits, SVC-427), `POST /services`, `PATCH` + `DELETE /services/{id}`, `PATCH /admin/pricing/categories/{id}` + `/pricing/config/{key}` (SVC-428), `POST /admin/coupons`, `PATCH /admin/coupons/{code}`, `POST /admin/coupons/{code}/deactivate` + `activate` (SVC-429), `POST /admin/catalog/categories` + `/catalog/services`, `PATCH /admin/catalog/categories/{id}` + `/catalog/services/{id}`, `POST .../deactivate` + `activate` on both (SVC-430), `POST /admin/catalog/services/{id}/variants`, `PATCH .../variants/{id}`, `POST .../variants/{id}/deactivate` + `activate`, `GET .../variants/{id}/price-impact` (SVC-481), `GET /admin/analytics/overview` + `/analytics/supply` (read-only dashboards, SVC-432) |
 | admin, support | `GET /admin/users` |
 | admin | `GET /admin/audit`, `/audit/filters`, `PATCH /admin/users/{id}/deactivate`, `POST /admin/providers/{id}/payout/requeue-reversed` (a reversal is a compliance signal, SVC-426), `POST /admin/app-versions/{platform}/release` (also the CI token) |
 
@@ -208,8 +208,8 @@ edited and switched, but not created here.
 `/admin/catalog` adds and edits categories and services without SQL. `GET /admin/catalog`
 is the whole tree, inactive rows included: L1 (home tile) → its L2s → their services.
 Each service row carries its active-variant count and its active bookings (requested,
-accepted, en route or in progress). Variants are read-only here, and SVC-428's pricing
-columns are edited at `/admin/pricing`, not here.
+accepted, en route or in progress). Variants are edited under the service (SVC-481,
+below), and SVC-428's pricing columns are edited at `/admin/pricing`, not here.
 
 - **Nothing is deleted.** Deactivate / activate are the only way a row is switched, and
   PATCH has no `is_active`, so the active-bookings warning can't be skipped.
@@ -231,6 +231,33 @@ columns are edited at `/admin/pricing`, not here.
 - **Refusals:** 422 `CATALOG_INVALID` with `details.field`. On PATCH a field's own rule
   runs only when it's sent, so an old row holding a value the rules now refuse can still
   be edited.
+
+### Variants (SVC-481)
+
+`/admin/catalog/services/{id}/variants` adds a variant (`POST`, 201), edits one
+(`PATCH .../{variant_id}`) and switches it off or on (`POST .../deactivate`, `activate`).
+`GET .../price-impact?base_price=X` feeds the confirm dialog. Every one returns the service
+detail. Rules live in `app/services/admin_variant_service.py`.
+
+- **Commission is a percent** (`commission_pct`, 0 to below 100, 2 dp). The amounts are
+  stored, commission rounded half up to paise, so commission + payout = price. A price-only
+  edit keeps the variant's exact ratio. Sending back the percent the screen shows (rounded
+  to 2 dp, e.g. 30.04 for ₹240 on ₹799) counts as no change.
+- **Raising the commission** is a 409 `COMMISSION_INCREASE_NEEDS_NOTICE` ("Give pros at least
+  14 days' notice before saving", `details.old_pct` / `new_pct` / `notice_days`) unless the
+  body has `confirm: true`. Same 14 days in every city. Decreases apply at once.
+- **Customer GST** (`gst_percent`) is read-only: a new variant copies the service's first
+  variant's.
+- **Label** unique per service in any case: 409 `VARIANT_LABEL_TAKEN`.
+- **Nothing is deleted.** Switching off the service's last active variant is a 409
+  `LAST_ACTIVE_VARIANT`; switch the service off instead. SP prices on a switched-off
+  variant are kept and come back when it's switched on.
+- **The service's base price** follows its cheapest active variant after every variant
+  write. On a service with 2+ variants it can't be set directly, on either PATCH route (422
+  `CATALOG_INVALID`, field `base_price`); `priced_per_variant` says which.
+- SP prices and existing bookings never move. `price-impact` counts the SPs with an active
+  price on the variant (KYC verified, active account, any area) and who would cross the
+  recommended range.
 
 ## Disputes and refunds (SVC-431)
 
@@ -465,6 +492,7 @@ passes them: `password_hash`, `totp_secret`, `fcm_token`, every `*_encrypted` co
 | `service.create`, `service.update`, `service.delete` | `service` | `POST`, `PATCH`, `DELETE /services` |
 | `service.create`, `service.update`, `service.deactivate`, `service.activate` | `service` | `POST /admin/catalog/services`, `PATCH /admin/catalog/services/{id}`, `.../deactivate`, `activate` (`details` on a deactivate: `active_bookings`, `confirm`) |
 | `category.create`, `category.update`, `category.deactivate`, `category.activate` | `category` | `POST /admin/catalog/categories`, `PATCH /admin/catalog/categories/{id}`, `.../deactivate`, `activate` |
+| `variant.create`, `variant.update`, `variant.deactivate`, `variant.activate` | `service_variant` | `POST /admin/catalog/services/{id}/variants`, `PATCH .../variants/{id}`, `.../deactivate`, `activate` (`details.service_id`; a percent change adds `old_pct`, `new_pct`, `confirm`; `service_base_price` in before/after when it followed) |
 | `pricing.category_update` | `category` | `PATCH /admin/pricing/categories/{id}` |
 | `pricing.config_update` | `pricing_config` (`target_id` is the key) | `PATCH /admin/pricing/config/{key}` |
 | `coupon.create`, `coupon.update` | `coupon` | `POST /admin/coupons`, `PATCH /admin/coupons/{code}` |

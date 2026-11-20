@@ -110,6 +110,20 @@ AUDIT_FIELDS: dict[str, tuple[str, ...]] = {
         "is_active",
         "user_id",
     ),
+    # SVC-481: a create records all of these, an update only the ones it changed.
+    # Every variant write adds "service_base_price" when the service's price
+    # followed its cheapest active variant.
+    "service_variant": (
+        "label",
+        "subcategory",
+        "base_price",
+        "platform_commission",
+        "provider_payout",
+        "gst_percent",
+        "duration_minutes",
+        "sort_order",
+        "is_active",
+    ),
     # SVC-431. Never the description or notes: free text about a customer.
     "dispute": (
         "booking_id",

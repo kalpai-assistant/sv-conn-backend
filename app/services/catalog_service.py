@@ -27,7 +27,11 @@ from app.schemas.service import (
     ServiceResponse,
     ServiceVariantResponse,
 )
-from app.services.standard_variant import standard_variant, sync_single_variant_price
+from app.services.standard_variant import (
+    refuse_price_on_multi_variant,
+    standard_variant,
+    sync_single_variant_price,
+)
 from app.utils.money import to_decimal
 
 # SVC-400 (Vipul, 2026-10-29): below this many qualifying reviews a service
@@ -257,13 +261,24 @@ class CatalogService:
         for the caller's audit row, else None."""
         # Load with variants eagerly so the response can render them
         # without a raise_on_sql fault at serialisation time.
+        # FOR UPDATE: the service before its variant (sync_single_variant_price),
+        # the lock order every variant write uses (SVC-481), so a variant added
+        # meanwhile can't slip past the 2+-variant check below.
         stmt = (
-            select(Service).where(Service.id == service_id).options(selectinload(Service.variants))
+            select(Service)
+            .where(Service.id == service_id)
+            .options(selectinload(Service.variants))
+            .with_for_update(of=Service)
+            # The route read the row before the lock: re-read it under the lock.
+            .execution_options(populate_existing=True)
         )
         service = (await self.db.execute(stmt)).scalar_one_or_none()
         if not service:
             raise ServiceNotFound(service_id)
         old_price = to_decimal(service.base_price)
+        new_price = fields.get("base_price")
+        if new_price is not None and to_decimal(new_price) != old_price:
+            await refuse_price_on_multi_variant(self.db, service.id)
         for key, value in fields.items():
             if value is not None and hasattr(service, key):
                 setattr(service, key, value)

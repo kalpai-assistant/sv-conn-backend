@@ -5,12 +5,16 @@ audited (``category.create`` / ``update`` / ``deactivate`` / ``activate``,
 ``service.create`` / ``update`` / ``deactivate`` / ``activate``). Nothing is
 deleted, a slug never changes, and only deactivate / activate switch a row.
 
-The old ``POST/PATCH/DELETE /services`` stay as they were.
+SVC-481 adds the variant editor (``variant.create`` / ``update`` / ``deactivate``
+/ ``activate``): rules in ``app/services/admin_variant_service.py``.
+
+The old ``POST/PATCH/DELETE /services`` stay as they were, except that neither
+PATCH can change the price of a service with 2+ variants (SVC-481).
 """
 
 import uuid
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db, require_roles
@@ -24,9 +28,13 @@ from app.schemas.admin_catalog import (
     AdminServiceDeactivate,
     AdminServiceDetail,
     AdminServiceUpdate,
+    AdminVariantCreate,
+    AdminVariantPriceImpact,
+    AdminVariantUpdate,
 )
 from app.services.admin_audit import audit_actor
 from app.services.admin_catalog_service import AdminCatalogService
+from app.services.admin_variant_service import AdminVariantService
 
 router = APIRouter(prefix="/admin/catalog", tags=["Admin"])
 
@@ -176,3 +184,95 @@ async def activate_service(
     """Refused (422 on ``category_id``) while its category is inactive. Already
     on: 200, no audit row."""
     return await AdminCatalogService(db).activate_service(audit_actor(request, admin), service_id)
+
+
+# -- variants (SVC-481) ---------------------------------------------------------
+
+
+@router.post(
+    "/services/{service_id}/variants",
+    response_model=AdminServiceDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_variant(
+    service_id: uuid.UUID,
+    body: AdminVariantCreate,
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
+    db: AsyncSession = Depends(get_db),
+):
+    """A new active variant: label, price and commission percent, optionally
+    duration and sort order. GST is copied from the service's first variant.
+    409 ``VARIANT_LABEL_TAKEN`` if the service has that label in any case. The
+    service's base_price then follows its cheapest active variant."""
+    return await AdminVariantService(db).create(audit_actor(request, admin), service_id, body)
+
+
+@router.patch("/services/{service_id}/variants/{variant_id}", response_model=AdminServiceDetail)
+async def update_variant(
+    service_id: uuid.UUID,
+    variant_id: uuid.UUID,
+    body: AdminVariantUpdate,
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Change label, price, commission percent, duration or sort order. A price
+    on its own keeps the commission percent. Raising the percent is a 409
+    ``COMMISSION_INCREASE_NEEDS_NOTICE`` unless ``confirm: true``. SP prices and
+    existing bookings are not touched. A save that changes nothing is a 200 with
+    no audit row."""
+    return await AdminVariantService(db).update(
+        audit_actor(request, admin), service_id, variant_id, body
+    )
+
+
+@router.post(
+    "/services/{service_id}/variants/{variant_id}/deactivate", response_model=AdminServiceDetail
+)
+async def deactivate_variant(
+    service_id: uuid.UUID,
+    variant_id: uuid.UUID,
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Switch a variant off: it can't be booked and drops out of the SP lists.
+    409 ``LAST_ACTIVE_VARIANT`` for the service's last active one. Already off:
+    200, no audit row."""
+    return await AdminVariantService(db).set_active(
+        audit_actor(request, admin), service_id, variant_id, False
+    )
+
+
+@router.post(
+    "/services/{service_id}/variants/{variant_id}/activate", response_model=AdminServiceDetail
+)
+async def activate_variant(
+    service_id: uuid.UUID,
+    variant_id: uuid.UUID,
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Switch a variant back on, with the SP prices it had. Already on: 200, no
+    audit row."""
+    return await AdminVariantService(db).set_active(
+        audit_actor(request, admin), service_id, variant_id, True
+    )
+
+
+@router.get(
+    "/services/{service_id}/variants/{variant_id}/price-impact",
+    response_model=AdminVariantPriceImpact,
+    dependencies=[Depends(require_roles("admin", "ops"))],
+)
+async def variant_price_impact(
+    service_id: uuid.UUID,
+    variant_id: uuid.UUID,
+    base_price: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """For the confirm dialog: how many SPs price this variant, and how many sit
+    outside the recommended range now and at ``base_price``. Read-only."""
+    return await AdminVariantService(db).price_impact(service_id, variant_id, base_price)
