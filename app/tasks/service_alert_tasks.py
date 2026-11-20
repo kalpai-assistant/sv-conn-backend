@@ -9,7 +9,7 @@ sent):
    holding a push token, the service active, and the kind's rule true at the
    alert's own point (``coming_soon``: served; ``no_pros_online``: listable
    with an SP online for 10 continuous minutes). ``FOR UPDATE SKIP LOCKED``,
-   so an overlapping sweep skips these rows. At most ``BATCH_USERS`` worth of
+   so an overlapping sweep skips these rows. At most ``BATCH_ALERTS`` worth of
    alerts, cut on whole customers, so nobody's alerts split over two pushes.
 2. One push per customer, however many alerts came due.
 3. One UPDATE stamping ``notified_at`` on the alerts whose push went out,
