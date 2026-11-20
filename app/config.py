@@ -79,8 +79,21 @@ class Settings(BaseSettings):
     # a binary-approximated 20.0 would seed rounding error into provider_payout
     # before it is ever stored (SVC-150).
     PLATFORM_COMMISSION_PERCENT: Decimal = Decimal("20.0")
+    # Explicit kill switch for RazorpayX integration. False (default) refuses
+    # every outbound call (``create_payout`` / ``list_payouts``) and accepts +
+    # logs any inbound webhook without side effects. Set to True only when
+    # ``RAZORPAYX_ACCOUNT_NUMBER`` + ``RAZORPAYX_WEBHOOK_SECRET`` + the
+    # Razorpay API key/secret are all populated in SSM for the environment.
+    #
+    # Why a separate flag from "creds are empty": a dev who copies prod creds
+    # onto their laptop would otherwise accidentally fire a live payout the
+    # first time they ran the task locally. The flag makes the activation
+    # decision explicit, atomic, and env-controlled.
+    #
+    # See docs/RAZORPAYX_ACTIVATION.md for the pre-flight checklist.
+    RAZORPAYX_ENABLED: bool = False
     # RazorpayX virtual account that funds provider payouts. Blank until RazorpayX
-    # is activated; payout creation requires it.
+    # is activated; payout creation requires it (and also ``RAZORPAYX_ENABLED``).
     RAZORPAYX_ACCOUNT_NUMBER: str = ""
     # RazorpayX (payouts) is a separate product with its own webhook secret,
     # configured in the RazorpayX dashboard independently of the Payments webhook.
