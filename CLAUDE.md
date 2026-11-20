@@ -140,6 +140,10 @@ Doorstep OTP (4-digit, stored in Redis) is required to transition from `en_route
 
 `service_alerts` holds a customer's "Notify me" on a tile that shows no price. `GET` / `PUT` / `DELETE /users/me/service-alerts[/{service_id}]` (`PUT` body `{lat, lng}`). The server picks the kind from the tile's rules at the point: not served → `coming_soon`, served but not listable → `no_pros_online`, listable → 409 `SERVICE_ALREADY_AVAILABLE`. One open alert per user + service (partial unique index); a second `PUT` moves it and restarts the 45 days. Nothing is written on expiry; readers filter `expires_at > now`. The rules (`served_at`, `listable_at` in `app/services/service_alert_service.py`) read the same join as the tile (`from_price_service.serving_prices`) and pick stages by name from `provider_matching`. The beat sweep `notify_service_alerts` (120 s) is 2 statements per run: `coming_soon` fires when served; `no_pros_online` when listable with "online" swapped for `is_online AND online_since <= now − 10 min`. One English push per customer, nothing 22:00–08:00 IST, once per alert; no token / failed push leaves it open. After commit it deletes the from-prices cache key at each notified point. `provider_profiles.online_since` is written only on the off → on switch in `ProviderService.set_online_status`. Account deletion deletes the user's alerts.
 
+### New-variant push (SVC-487)
+
+When ops creates a variant (`AdminVariantService.create`) on an **active** service, `send_variant_added_notification` is enqueued after commit and asks that service's SPs to price it: everyone in `provider_services` for the service with KYC verified, an active account, the provider role and a token. Team Pros never get it (prices are per SP). Nothing fires on a switched-off service, a PATCH or a switch off/on. One multicast per push language (key `variant_added`); data `{type: "pricing", event: "variant_added", service_id, variant_id}`. The task retries only its reads, never after a send, and skips a variant or service switched off since.
+
 ### Auth Flow
 
 1. `POST /send-otp` — generates 6-digit OTP, stores in Redis with 10-min TTL, sends via SMS

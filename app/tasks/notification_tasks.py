@@ -4,6 +4,7 @@ Uses a synchronous DB session (SyncSessionLocal) because Celery workers are not 
 """
 
 import logging
+import uuid
 
 from firebase_admin import messaging as _fcm_messaging
 
@@ -231,6 +232,14 @@ KYC_REJECTED_TEMPLATE: dict[str, str] = {
     "body": "Open the app to see why and submit them again.",
 }
 
+# SVC-487: ops added a variant to an active service; its SPs have no price for
+# it yet. The service name and label are the DB's, never translated. The title
+# has no placeholder because provider_push_copy formats the body only.
+VARIANT_ADDED_TEMPLATE: dict[str, str] = {
+    "title": "New option to price",
+    "body": '{service} now has "{label}". Set your price so customers can book it.',
+}
+
 # SVC-374: the events whose push goes out in the recipient's language. They
 # are the provider/Pro ones only: customer copy is always English, so a Pro
 # booking a service for themselves reads "Booking Confirmed" in English
@@ -250,6 +259,7 @@ _PROVIDER_PUSH_ENGLISH: dict[str, dict[str, str]] = {
     **{f"payout.{status}": dict(t) for status, t in PAYOUT_NOTIFICATION_TEMPLATES.items()},
     "update_available": dict(UPDATE_AVAILABLE_TEMPLATE),
     "kyc_rejected": dict(KYC_REJECTED_TEMPLATE),
+    "variant_added": dict(VARIANT_ADDED_TEMPLATE),
 }
 _PROVIDER_PUSH_ENGLISH["new_request"]["service_fallback"] = "A new service request"
 _PROVIDER_PUSH_ENGLISH["new_request"]["more_services"] = "{service} + {count} more"
@@ -315,6 +325,10 @@ PROVIDER_PUSH_TRANSLATIONS: dict[str, dict[str, dict[str, str]]] = {
             "title": "आपके दस्तावेज़ नामंज़ूर हो गए",
             "body": "कारण देखने और इन्हें फिर से जमा करने के लिए ऐप खोलें।",
         },
+        "variant_added": {
+            "title": "नए विकल्प का दाम तय करें",
+            "body": '{service} में अब "{label}" है। अपना दाम तय करें ताकि ग्राहक इसे बुक कर सकें।',
+        },
     },
     "mr": {
         "new_request": {
@@ -369,6 +383,10 @@ PROVIDER_PUSH_TRANSLATIONS: dict[str, dict[str, dict[str, str]]] = {
         "kyc_rejected": {
             "title": "तुमची कागदपत्रे नामंजूर झाली",
             "body": "कारण पाहण्यासाठी आणि ती पुन्हा सबमिट करण्यासाठी ॲप उघडा.",
+        },
+        "variant_added": {
+            "title": "नव्या पर्यायाचा दर ठरवा",
+            "body": '{service} मध्ये आता "{label}" आहे. ग्राहकांना बुक करता यावे म्हणून तुमचा दर ठरवा.',
         },
     },
 }
@@ -1332,6 +1350,109 @@ def send_kyc_rejected_notification(self, user_id: str):
 
     except Exception as exc:
         self.retry(exc=exc)
+
+
+# SVC-487: who is asked to price a new variant, besides offering the service
+# and having the provider role. Named stages of provider_matching, never
+# rewritten here (test_offer_and_broadcast_use_one_eligibility_definition).
+_VARIANT_ADDED_STAGES: tuple[str, ...] = ("kyc_verified", "account_active", "has_push_token")
+
+
+@celery_app.task(
+    bind=True,
+    # One retry, and only for the reads below: once a multicast has gone out,
+    # a retry would push the same SPs twice.
+    max_retries=1,
+    default_retry_delay=30,
+    name="app.tasks.notification_tasks.send_variant_added_notification",
+)
+def send_variant_added_notification(self, variant_id: str):
+    """Ask a service's SPs to price the variant ops just added (SVC-487).
+
+    Enqueued after ``AdminVariantService.create`` commits, only when the
+    service is active. Sends nothing if the variant or its service is gone or
+    switched off by the time this runs, since the pricing screen
+    (``GET /providers/me/pricing``) lists active ones only.
+
+    Recipients: every SP who offers the service (``provider_services``), with
+    KYC verified, an active account, the provider role and a push token. Prices
+    are per SP, so team Pros never get it; a Pro working for themselves is the
+    SP. ``provider_services`` is unique per (SP, service), so one row per SP.
+
+    One multicast per push language. The send loop never retries: a failed
+    language is logged and the rest still go. Dead tokens aren't cleared here.
+    """
+    from sqlalchemy import select
+
+    from app.database import SyncSessionLocal
+    from app.models.provider_profile import ProviderProfile
+    from app.models.provider_service import ProviderService
+    from app.models.service import Service
+    from app.models.service_variant import ServiceVariant
+    from app.models.user import User, UserRole
+    from app.services.provider_matching import stage_conditions, subscribed_to
+
+    summary = {"recipient_count": 0, "success_count": 0, "failure_count": 0}
+    try:
+        with SyncSessionLocal() as db:
+            variant = db.get(ServiceVariant, uuid.UUID(variant_id))
+            service = db.get(Service, variant.service_id) if variant else None
+            if not variant or not variant.is_active or not service or not service.is_active:
+                logger.info("variant_added_push_skipped variant_id=%s", variant_id)
+                return summary
+            service_id, service_name, label = str(service.id), service.name, variant.label
+            rows = db.execute(
+                select(User.fcm_token, User.preferred_language, User.phone)
+                .join(ProviderProfile, ProviderProfile.user_id == User.id)
+                .join(ProviderService, ProviderService.provider_id == ProviderProfile.user_id)
+                .where(
+                    subscribed_to(service.id),
+                    # The broadcast's own definitions, so the two can't drift.
+                    *stage_conditions(None, _VARIANT_ADDED_STAGES),
+                    User.role == UserRole.PROVIDER,
+                )
+            ).all()
+    except Exception as exc:
+        # Nothing has been sent yet, so a retry can't double-push.
+        raise self.retry(exc=exc) from exc
+
+    by_language: dict[str, list[str]] = {}
+    # The row carries ``phone``, which is all the kill switch reads.
+    for row in rows:
+        by_language.setdefault(push_language(row), []).append(row.fcm_token)
+
+    data = {
+        "type": "pricing",
+        "event": "variant_added",
+        "service_id": service_id,
+        "variant_id": str(variant_id),
+    }
+    for lang, tokens in by_language.items():
+        title, body = provider_push_copy("variant_added", lang, service=service_name, label=label)
+        summary["recipient_count"] += len(tokens)
+        try:
+            sent = send_multicast(tokens=tokens, title=title, body=body, data=data)
+        except Exception:
+            logger.exception(
+                "variant_added_push_failed variant_id=%s lang=%s tokens=%d",
+                variant_id,
+                lang,
+                len(tokens),
+            )
+            summary["failure_count"] += len(tokens)
+            continue
+        summary["success_count"] += sent["success_count"]
+        summary["failure_count"] += sent["failure_count"]
+
+    logger.info(
+        "variant_added_push_sent variant_id=%s service_id=%s recipients=%d success=%d failure=%d",
+        variant_id,
+        service_id,
+        summary["recipient_count"],
+        summary["success_count"],
+        summary["failure_count"],
+    )
+    return summary
 
 
 # SVC-371: a release's ``app_versions.platform`` → the ``users.fcm_platform``
