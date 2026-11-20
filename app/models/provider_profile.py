@@ -130,6 +130,11 @@ class ProviderProfile(Base):
     )
 
     is_online: Mapped[bool] = mapped_column(Boolean, default=False)
+    # SVC-484: when the SP's switch last went from off to on. Written only by
+    # ``ProviderService.set_online_status`` on that change, and never cleared
+    # (``is_online`` says whether it still holds). NULL = never switched on
+    # since the column existed, so it doesn't count as "online 10 min".
+    online_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # SVC-408: new-SP boost state (epic SVC-406). Lives on the SP row because it
     # is 1:1 and needs no history at v1. NULL = the boost window hasn't started.

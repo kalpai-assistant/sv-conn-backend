@@ -51,6 +51,18 @@ class ServiceNotFound(AppException):
         )
 
 
+class ServiceAlreadyAvailable(AppException):
+    """A "Notify me" for a service whose tile already shows a price at the
+    point (SVC-484): there's nothing to wait for."""
+
+    def __init__(self, service_id: UUID):
+        super().__init__(
+            f"Service {service_id} is already available here",
+            status_code=status.HTTP_409_CONFLICT,
+            code="SERVICE_ALREADY_AVAILABLE",
+        )
+
+
 class ServiceVariantNotFound(AppException):
     """A ``variant_id`` that isn't an active variant of the service asked about
     (SVC-480): unknown, inactive, or another service's."""

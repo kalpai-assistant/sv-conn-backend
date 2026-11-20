@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user, get_redis
 from app.models.user import User
+from app.schemas.service_alert import ServiceAlertRequest, ServiceAlertResponse
 from app.schemas.user import (
     AddressResponse,
     CreateAddressRequest,
@@ -22,6 +23,7 @@ from app.schemas.user import (
 )
 from app.services.account_service import AccountService, delete_objects
 from app.services.auth_service import AuthService
+from app.services.service_alert_service import ServiceAlertService
 from app.services.user_service import AddressDetails, UserService
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -138,6 +140,51 @@ async def report_push_capability(
         report.token_obtained,
         report.interactive,
     )
+
+
+# --- "Notify me" service alerts (SVC-484) -----------------------------------
+
+
+@router.get("/me/service-alerts", response_model=list[ServiceAlertResponse])
+async def list_service_alerts(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The caller's open "Notify me" alerts, newest first. Notified,
+    cancelled and expired ones aren't listed."""
+    return await ServiceAlertService(db).list_open(current_user.id)
+
+
+@router.put("/me/service-alerts/{service_id}", response_model=ServiceAlertResponse)
+async def put_service_alert(
+    service_id: uuid.UUID,
+    body: ServiceAlertRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ask to be told when this service is available at this point ("Notify me").
+
+    The server picks ``kind`` from the tile's state there now: ``coming_soon``
+    when nobody serves it, ``no_pros_online`` when it's served but nobody is
+    listable. 409 ``SERVICE_ALREADY_AVAILABLE`` when the tile would already
+    show a price; 404 ``SERVICE_NOT_FOUND`` for an unknown or inactive service.
+
+    One open alert per service: calling it again (say from another address)
+    moves it to the new point and restarts the 45 days. It pushes once, between
+    08:00 and 22:00 IST.
+    """
+    return await ServiceAlertService(db).upsert(current_user.id, service_id, body.lat, body.lng)
+
+
+@router.delete("/me/service-alerts/{service_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def cancel_service_alert(
+    service_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel the caller's open alert for this service. 204 even if there is
+    none (idempotent)."""
+    await ServiceAlertService(db).cancel(current_user.id, service_id)
 
 
 @router.get("/me/addresses", response_model=list[AddressResponse])

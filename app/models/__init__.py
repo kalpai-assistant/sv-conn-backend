@@ -41,6 +41,7 @@ from app.models.provider_service import ProviderService  # noqa: F401
 from app.models.provider_team_invite import InviteStatus, ProviderTeamInvite  # noqa: F401
 from app.models.review import Review  # noqa: F401
 from app.models.service import Service  # noqa: F401
+from app.models.service_alert import ServiceAlert  # noqa: F401
 from app.models.service_relationship import RelationshipType, ServiceRelationship  # noqa: F401
 from app.models.service_variant import ServiceVariant  # noqa: F401
 from app.models.settlement_statement import SettlementStatement  # noqa: F401

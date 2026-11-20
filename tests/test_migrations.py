@@ -2805,3 +2805,63 @@ def test_svc_419_creates_marketplace_events_and_downgrade_drops_it(scratch_db):
         == []
     )
     assert {t: _shape(scratch_db, t) for t in referenced} == before
+
+
+SVC_484 = "d562ae3ff172"
+BEFORE_SVC_484 = SVC_419
+
+
+def test_svc_484_creates_service_alerts_and_online_since_and_downgrade_drops_both(scratch_db):
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_484)
+    referenced = ("users", "services")
+    before = {t: _shape(scratch_db, t) for t in referenced}
+    profiles_before = _shape(scratch_db, "provider_profiles")
+
+    _alembic(scratch_db, "upgrade", SVC_484)
+    shape = _shape(scratch_db, "service_alerts")
+    assert {n: (t, nl) for n, t, nl in shape["columns"]} == {
+        "id": ("UUID", False),
+        "user_id": ("UUID", False),
+        "service_id": ("UUID", False),
+        "location": ("geography(POINT,4326)", False),
+        "kind": ("VARCHAR(20)", False),
+        "created_at": ("TIMESTAMP", False),
+        "expires_at": ("TIMESTAMP", False),
+        "notified_at": ("TIMESTAMP", True),
+        "cancelled_at": ("TIMESTAMP", True),
+    }
+    assert shape["primary_key"] == ["id"]
+    assert {(cols, table, ondelete) for _, cols, table, _, ondelete in shape["foreign_keys"]} == {
+        (("user_id",), "users", None),
+        (("service_id",), "services", None),
+    }
+    indexes = {name: (cols, unique, where) for name, cols, unique, where in shape["indexes"]}
+    open_where = "((notified_at IS NULL) AND (cancelled_at IS NULL))"
+    assert indexes["uq_service_alerts_open_user_service"] == (
+        ("user_id", "service_id"),
+        True,
+        open_where,
+    )
+    assert indexes["ix_service_alerts_open_expires_at"] == (("expires_at",), False, open_where)
+    [check] = _query(
+        scratch_db,
+        "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint "
+        "WHERE conname = 'ck_service_alerts_kind'",
+    )
+    assert "'coming_soon'" in check["def"] and "'no_pros_online'" in check["def"]
+    profiles = _shape(scratch_db, "provider_profiles")
+    assert set(profiles["columns"]) - set(profiles_before["columns"]) == {
+        ("online_since", "TIMESTAMP", True)
+    }
+    assert {t: _shape(scratch_db, t) for t in referenced} == before
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_484)
+    assert (
+        _query(
+            scratch_db,
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'service_alerts'",
+        )
+        == []
+    )
+    assert _shape(scratch_db, "provider_profiles") == profiles_before
+    assert {t: _shape(scratch_db, t) for t in referenced} == before
