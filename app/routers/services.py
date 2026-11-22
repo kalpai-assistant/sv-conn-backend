@@ -69,6 +69,13 @@ async def service_from_prices(
     - ``served``: some SP covers this point with an active price, online or
       not. Null ``from_price`` + ``served`` = "No pros online right now";
       not ``served`` = "Coming soon".
+    - ``variants`` (SVC-496): every active variant, in sort_order, with its own
+      ``from_price`` by the same rule (its lowest in-range price, else its
+      lowest), or null when nobody listable prices it: grey that option out.
+      ``outside_recommended_range`` is true when that value is the lowest
+      out-of-range price because no listable SP is in range for the option.
+      The header uses the service ``from_price``, not the lowest variant: an
+      in-range price wins over another variant's cheaper out-of-range one.
 
     A service_id missing from the list is an inactive service: show its
     catalogue price. Cached per point (lat/lng to 4 decimals) for 10 minutes.
