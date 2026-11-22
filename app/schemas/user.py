@@ -1,8 +1,9 @@
+import re
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 from app.models.user import UserRole
 from app.utils.i18n import i18n_enabled as _i18n_enabled_for
@@ -10,6 +11,10 @@ from app.utils.i18n import i18n_enabled as _i18n_enabled_for
 # SVC-374: the values of ``users.preferred_language``. Kept in step with
 # ``SUPPORTED_LANGUAGES`` in the model, which the DB's CHECK mirrors.
 Language = Literal["en", "hi", "mr"]
+
+# SVC-486: a plain shape check, no deliverability (email-validator is not a
+# dependency): one "@", no spaces, a dot in the domain.
+_EMAIL_SHAPE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 
 class UserResponse(BaseModel):
@@ -37,8 +42,23 @@ class UserResponse(BaseModel):
 
 
 class UpdateProfileRequest(BaseModel):
+    """``email`` (SVC-486): left out or null leaves it as it is. An empty string
+    clears it (saved as NULL). Otherwise it is trimmed, checked for a simple
+    ``name@domain.tld`` shape (a bad one is a 422), and saved lower-cased.
+    Commission-change notices go to it."""
+
     name: str | None = Field(None, max_length=100)
     email: str | None = Field(None, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def _email_shape(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().lower()
+        if value and not _EMAIL_SHAPE.fullmatch(value):
+            raise ValueError("Enter a valid email address")
+        return value
 
 
 class PushCapabilityReport(BaseModel):

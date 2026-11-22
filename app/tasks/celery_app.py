@@ -178,6 +178,13 @@ celery_app.conf.update(
             "task": "app.tasks.service_alert_tasks.notify_service_alerts",
             "schedule": 120.0,
         },
+        # SVC-486: scheduled commission changes. A booking on the service
+        # applies a due change itself, so this only decides how soon the SP
+        # pricing screen and the admin editor catch up. One indexed read a run.
+        "apply-commission-changes": {
+            "task": "app.tasks.commission_tasks.apply_commission_changes",
+            "schedule": 60.0,
+        },
         "reconcile-payouts": {
             "task": "app.tasks.payment_tasks.reconcile_payouts",
             "schedule": crontab(hour=2, minute=0),  # Nightly at 02:00 (hits RazorpayX API)

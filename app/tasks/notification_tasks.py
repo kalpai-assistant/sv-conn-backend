@@ -240,6 +240,33 @@ VARIANT_ADDED_TEMPLATE: dict[str, str] = {
     "body": '{service} now has "{label}". Set your price so customers can book it.',
 }
 
+# SVC-486: a commission change on an option the SP prices. Percents are plain
+# numbers ("20", "30.04") and the date reads "06 Dec 2026" in every language.
+# ``commission_change_today`` is a decrease that took effect at once.
+COMMISSION_CHANGE_TEMPLATES: dict[str, dict[str, str]] = {
+    "commission_change": {
+        "title": "Commission change notice",
+        "body": (
+            '{service} - "{label}": the platform commission changes from {old_pct}% '
+            "to {new_pct}% from {date}. This is your notice."
+        ),
+    },
+    "commission_change_today": {
+        "title": "Commission lowered",
+        "body": (
+            '{service} - "{label}": the platform commission is now {new_pct}% '
+            "(was {old_pct}%), from today."
+        ),
+    },
+    "commission_change_cancelled": {
+        "title": "Commission change cancelled",
+        "body": (
+            '{service} - "{label}": the change to {new_pct}% from {date} is cancelled. '
+            "Your commission stays at {old_pct}%."
+        ),
+    },
+}
+
 # SVC-374: the events whose push goes out in the recipient's language. They
 # are the provider/Pro ones only: customer copy is always English, so a Pro
 # booking a service for themselves reads "Booking Confirmed" in English
@@ -260,6 +287,7 @@ _PROVIDER_PUSH_ENGLISH: dict[str, dict[str, str]] = {
     "update_available": dict(UPDATE_AVAILABLE_TEMPLATE),
     "kyc_rejected": dict(KYC_REJECTED_TEMPLATE),
     "variant_added": dict(VARIANT_ADDED_TEMPLATE),
+    **{key: dict(t) for key, t in COMMISSION_CHANGE_TEMPLATES.items()},
 }
 _PROVIDER_PUSH_ENGLISH["new_request"]["service_fallback"] = "A new service request"
 _PROVIDER_PUSH_ENGLISH["new_request"]["more_services"] = "{service} + {count} more"
@@ -329,6 +357,24 @@ PROVIDER_PUSH_TRANSLATIONS: dict[str, dict[str, dict[str, str]]] = {
             "title": "नए विकल्प का दाम तय करें",
             "body": '{service} में अब "{label}" है। अपना दाम तय करें ताकि ग्राहक इसे बुक कर सकें।',
         },
+        "commission_change": {
+            "title": "कमीशन बदलाव की सूचना",
+            "body": (
+                '{service} - "{label}": प्लेटफ़ॉर्म कमीशन {date} से {old_pct}% से बदलकर '
+                "{new_pct}% होगा। यह आपकी सूचना है।"
+            ),
+        },
+        "commission_change_today": {
+            "title": "कमीशन घटा",
+            "body": ('{service} - "{label}": प्लेटफ़ॉर्म कमीशन आज से {new_pct}% है ' "(पहले {old_pct}%)।"),
+        },
+        "commission_change_cancelled": {
+            "title": "कमीशन बदलाव रद्द",
+            "body": (
+                '{service} - "{label}": {date} से {new_pct}% का बदलाव रद्द हो गया है। '
+                "आपका कमीशन {old_pct}% ही रहेगा।"
+            ),
+        },
     },
     "mr": {
         "new_request": {
@@ -387,6 +433,26 @@ PROVIDER_PUSH_TRANSLATIONS: dict[str, dict[str, dict[str, str]]] = {
         "variant_added": {
             "title": "नव्या पर्यायाचा दर ठरवा",
             "body": '{service} मध्ये आता "{label}" आहे. ग्राहकांना बुक करता यावे म्हणून तुमचा दर ठरवा.',
+        },
+        "commission_change": {
+            "title": "कमिशन बदलाची सूचना",
+            "body": (
+                '{service} - "{label}": प्लॅटफॉर्म कमिशन {date} पासून {old_pct}% वरून '
+                "{new_pct}% होईल. ही तुमची सूचना आहे."
+            ),
+        },
+        "commission_change_today": {
+            "title": "कमिशन कमी झाले",
+            "body": (
+                '{service} - "{label}": प्लॅटफॉर्म कमिशन आजपासून {new_pct}% आहे ' "(आधी {old_pct}%)."
+            ),
+        },
+        "commission_change_cancelled": {
+            "title": "कमिशन बदल रद्द",
+            "body": (
+                '{service} - "{label}": {date} पासूनचा {new_pct}% चा बदल रद्द झाला आहे. '
+                "तुमचे कमिशन {old_pct}% च राहील."
+            ),
         },
     },
 }

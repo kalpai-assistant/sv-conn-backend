@@ -9,7 +9,7 @@ row, so the active-bookings warning can't be skipped.
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -83,6 +83,16 @@ class AdminCategoryDetail(BaseModel):
     active_service_count: int
 
 
+class AdminPendingCommissionChange(BaseModel):
+    """A commission change scheduled on a variant and not yet applied (SVC-486).
+    It takes effect at 00:00 IST on ``effective_from``."""
+
+    id: uuid.UUID
+    new_pct: float
+    effective_from: date
+    created_at: datetime
+
+
 class AdminServiceVariantRow(BaseModel):
     """One variant, active or not, edited through ``/variants`` (SVC-481).
 
@@ -102,6 +112,8 @@ class AdminServiceVariantRow(BaseModel):
     provider_payout: float
     commission_pct: float
     gst_percent: float
+    # SVC-486: null when nothing is scheduled. At most one per variant.
+    pending_commission_change: AdminPendingCommissionChange | None
 
 
 class AdminServiceDetail(AdminCatalogServiceRow):
@@ -209,9 +221,15 @@ class AdminVariantCreate(BaseModel):
 
 
 class AdminVariantUpdate(BaseModel):
-    """Any subset of the editable fields; ``null`` is refused. Raising
-    ``commission_pct`` above the current (rounded) percent needs
-    ``confirm: true``, after the 14 days' notice to pros."""
+    """Any subset of the editable fields; ``null`` is refused.
+
+    SVC-486: raising ``commission_pct`` above the current (rounded) percent is
+    always a 409 ``COMMISSION_INCREASE_NEEDS_NOTICE``. An increase is scheduled
+    instead (``POST .../commission-changes``). A lower percent still applies at
+    once, and is recorded and notified like a scheduled change. Any change of
+    percent while a change is scheduled is a 409 ``COMMISSION_CHANGE_SCHEDULED``.
+    ``confirm`` is deprecated and ignored. It is still accepted so an older
+    console that sends it doesn't get a 422."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -222,6 +240,34 @@ class AdminVariantUpdate(BaseModel):
     sort_order: int | None = None
     confirm: StrictBool = False
     gst_percent: Any = None
+
+
+class AdminCommissionChangeCreate(BaseModel):
+    """Schedule a change of a variant's commission percent (SVC-486). It takes
+    effect at 00:00 IST on ``effective_from``. An increase needs that date at
+    least 14 days after today (IST). A decrease can be dated today, and then it
+    applies at once."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_pct: Decimal
+    effective_from: date
+
+
+class AdminCommissionChange(BaseModel):
+    """One commission change. ``status`` is ``scheduled``, ``applied`` or
+    ``cancelled``. ``old_pct`` is the percent when it was scheduled. Once it is
+    applied, the amounts it set are what the variant row shows."""
+
+    id: uuid.UUID
+    service_variant_id: uuid.UUID
+    old_pct: float
+    new_pct: float
+    effective_from: date
+    status: str
+    created_at: datetime
+    applied_at: datetime | None
+    cancelled_at: datetime | None
 
 
 class AdminVariantPriceImpact(BaseModel):

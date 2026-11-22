@@ -49,6 +49,8 @@ ADMIN_ACTIONS = (
     "variant.update",
     "variant.deactivate",
     "variant.activate",
+    "commission_change.schedule",
+    "commission_change.cancel",
 )
 ADMIN_ACTION_TARGET_TYPES = (
     "user",
@@ -62,6 +64,7 @@ ADMIN_ACTION_TARGET_TYPES = (
     "coupon",
     "dispute",
     "service_variant",
+    "commission_change",
 )
 
 USER_AGENT_MAX_LENGTH = 512

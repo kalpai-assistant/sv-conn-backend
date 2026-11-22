@@ -1,6 +1,7 @@
 from app.tasks.analytics_tasks import refresh_analytics_views
 from app.tasks.celery_app import celery_app
 from app.tasks.cleanup_tasks import expire_stale_bookings
+from app.tasks.commission_tasks import apply_commission_changes
 from app.tasks.notification_tasks import send_booking_notification, send_payout_notification
 from app.tasks.payment_tasks import process_cash_payment
 from app.tasks.service_alert_tasks import notify_service_alerts
@@ -13,4 +14,5 @@ __all__ = [
     "expire_stale_bookings",
     "refresh_analytics_views",
     "notify_service_alerts",
+    "apply_commission_changes",
 ]

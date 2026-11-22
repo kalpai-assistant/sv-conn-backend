@@ -811,6 +811,16 @@ ROUTE_ROLES = {
     ("POST", "/admin/catalog/services/{service_id}/variants/{variant_id}/deactivate"): ADMIN_OPS,
     ("POST", "/admin/catalog/services/{service_id}/variants/{variant_id}/activate"): ADMIN_OPS,
     ("GET", "/admin/catalog/services/{service_id}/variants/{variant_id}/price-impact"): ADMIN_OPS,
+    # SVC-486: scheduled commission changes
+    (
+        "POST",
+        "/admin/catalog/services/{service_id}/variants/{variant_id}/commission-changes",
+    ): ADMIN_OPS,
+    (
+        "POST",
+        "/admin/catalog/services/{service_id}/variants/{variant_id}"
+        "/commission-changes/{change_id}/cancel",
+    ): ADMIN_OPS,
     # admin_disputes.py (SVC-431): support writes too, its refunds capped
     ("GET", "/admin/disputes"): ALL,
     ("GET", "/admin/disputes/bookings/{booking_id}"): ALL,

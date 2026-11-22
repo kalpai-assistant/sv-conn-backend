@@ -5,7 +5,8 @@ SVC-481: the admin variant editor (/admin/catalog/services/{id}/variants*).
   body), label unique per service in any case, empty and no-op saves;
 - the commission percent: amounts rounded half up to paise (a half-paisa case),
   the "current %" rule on a whole-rupee variant (₹240 on ₹799 = 30.0375%), and
-  the 14-day-notice 409 on an increase, with confirm;
+  the 14-day-notice 409 on any increase (SVC-486: confirm is ignored; the
+  scheduling itself is in tests/test_commission_changes.py);
 - switch off / on: the last-active 409, idempotence;
 - the service's base_price follows its cheapest active variant after every
   write, in the same audit row;
@@ -131,6 +132,7 @@ async def test_create_stores_amounts_copies_gst_and_goes_last(client, db_session
         "provider_payout": 2624.25,
         "commission_pct": 25.0,
         "gst_percent": 18.0,
+        "pending_commission_change": None,
     }
     [row] = await _audit(db_session, admin)
     assert (row.action, row.target_type, row.target_id) == (
@@ -450,7 +452,7 @@ async def test_a_decrease_applies_at_once(client, db_session):
         "service_id": str(service.id),
         "old_pct": 30.04,
         "new_pct": 25.0,
-        "confirm": False,
+        "commission_change_id": row.details["commission_change_id"],
     }
     assert row.before_json == {"platform_commission": 240.0, "provider_payout": 559.0}
     assert row.after_json == {"platform_commission": 199.75, "provider_payout": 599.25}
@@ -467,16 +469,21 @@ async def test_an_increase_needs_notice(client, db_session, new_pct):
     )
     assert r.status_code == 409, r.text
     body = r.json()
-    assert (body["code"], body["details"]) == (
-        NOTICE,
-        {"old_pct": 30.04, "new_pct": float(new_pct), "notice_days": 14},
-    )
-    assert "Give pros at least 14 days' notice before saving" in body.values()
+    assert body["code"] == NOTICE
+    assert body["details"] == {
+        "old_pct": 30.04,
+        "new_pct": float(new_pct),
+        "notice_days": 14,
+        "earliest_effective_from": body["details"]["earliest_effective_from"],
+        "schedule_path": "commission-changes",
+    }
+    assert "Schedule a commission increase at least 14 days ahead" in body.values()
     assert _money(await _fresh(db_session, v))[0] == Decimal("799.00")
     assert await _audit(db_session, admin) == []
 
 
-async def test_an_increase_with_confirm_saves_and_records_it(client, db_session):
+async def test_confirm_no_longer_lets_an_increase_through(client, db_session):
+    """SVC-486: ``confirm`` is still accepted (no 422) but never read."""
     admin = await _admin(db_session)
     service, (v,) = await _ac_installation(db_session)
     r = await client.patch(
@@ -484,20 +491,15 @@ async def test_an_increase_with_confirm_saves_and_records_it(client, db_session)
         headers=_session(admin),
         json={"commission_pct": "35", "base_price": "800", "confirm": True},
     )
-    assert r.status_code == 200, r.text
-    assert _money(await _fresh(db_session, v)) == (
-        Decimal("800.00"),
-        Decimal("280.00"),
-        Decimal("520.00"),
+    assert r.status_code == 409, r.text
+    assert r.json()["code"] == NOTICE
+    assert _money(await _fresh(db_session, v))[0] == Decimal("799.00")
+    assert await _audit(db_session, admin) == []
+
+    ok = await client.patch(
+        _url(service, v), headers=_session(admin), json={"label": "AC", "confirm": True}
     )
-    assert _row(r.json(), v.id)["commission_pct"] == 35.0
-    [row] = await _audit(db_session, admin)
-    assert row.details == {
-        "service_id": str(service.id),
-        "old_pct": 30.04,
-        "new_pct": 35.0,
-        "confirm": True,
-    }
+    assert ok.status_code == 200, ok.text
 
 
 async def test_a_label_clash_is_reported_before_the_notice(client, db_session):
@@ -528,9 +530,9 @@ async def test_the_commission_rounds_half_up_at_a_half_paisa(client, db_session)
 
 async def test_commission_plus_payout_is_always_the_price(client, db_session):
     admin = await _admin(db_session)
-    service, (v,) = await _service_with(db_session, ("1.00", "0.00"), base="1.00")
+    service, (v,) = await _service_with(db_session, ("1.00", "0.99"), base="1.00")
     for body in (
-        {"base_price": "333.33", "commission_pct": "33.33", "confirm": True},
+        {"base_price": "333.33", "commission_pct": "33.33"},
         {"base_price": "0.03"},
         {"base_price": "999999.99", "commission_pct": "0.01"},
     ):
