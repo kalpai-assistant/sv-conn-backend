@@ -61,6 +61,7 @@ from app.schemas.booking import (
 )
 from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
 from app.services.commission import commission_gst, split_at_price
+from app.services.commission_changes import apply_due_commission_changes
 from app.services.marketplace_events import money, record_server_event
 from app.services.provider_matching import (
     is_eligible_provider_multi_stmt,
@@ -392,6 +393,13 @@ class BookingService:
         # worse if a client ever pushes to the ``quantity <= 10`` limit
         # across ten distinct services.
         service_ids = [i.service_id for i in items]
+        # SVC-486: make any commission change that is due on these services
+        # live first, so a booking made at or after 00:00 IST on its date is
+        # split at the new percent even before the sweep runs. Nothing due (the
+        # normal case): one unlocked read. Something due: services, then
+        # variants, then the change rows FOR UPDATE, in id order. That is the
+        # admin editor's order, and it is taken before _lock_sp_prices below.
+        await apply_due_commission_changes(self.db, service_ids=service_ids)
         rows = await self.db.execute(
             select(Service)
             .where(Service.id.in_(service_ids))

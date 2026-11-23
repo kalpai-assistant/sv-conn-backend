@@ -46,6 +46,7 @@ from app.models.app_version import AppPlatform, AppVersion
 from app.models.booking import Booking, BookingStatus, PaymentStatus, SettlementStatus
 from app.models.booking_dispute import BookingDispute
 from app.models.category import Category
+from app.models.commission_change import CommissionChange
 from app.models.coupon import Coupon
 from app.models.pricing_config import PricingConfig
 from app.models.professional import Professional
@@ -61,6 +62,7 @@ from app.services.admin_audit import (
     is_blocked_field,
     snapshot,
 )
+from app.services.commission_changes import NOTICE_DAYS, today_ist
 from tests.conftest import TEST_DATABASE_URL
 from tests.factories.user_factory import UserFactory
 from tests.test_accept_contract import _booking, _eligible_provider, _service
@@ -102,6 +104,7 @@ RECORD_MODELS = {
     "coupon": Coupon,
     "dispute": BookingDispute,
     "service_variant": ServiceVariant,
+    "commission_change": CommissionChange,
 }
 
 
@@ -717,13 +720,61 @@ async def _catalog_variant_update(db) -> Case:
     service, variant = await _catalog_variant(db)
     return Case(
         url=f"{A}/catalog/services/{service.id}/variants/{variant.id}",
-        body={"commission_pct": "25", "confirm": True},
+        # SVC-486: an increase is never a PATCH, so this is a decrease.
+        body={"commission_pct": "15"},
         action="variant.update",
         target_type="service_variant",
         target_id=variant.id,
         before={"platform_commission": 99.8, "provider_payout": 399.2},
-        after={"platform_commission": 124.75, "provider_payout": 374.25},
-        details={"old_pct": 20.0, "new_pct": 25.0, "confirm": True},
+        after={"platform_commission": 74.85, "provider_payout": 424.15},
+        details={"old_pct": 20.0, "new_pct": 15.0},
+    )
+
+
+async def _commission_change_schedule(db) -> Case:
+    service, variant = await _catalog_variant(db)
+    effective = (today_ist() + timedelta(days=NOTICE_DAYS)).isoformat()
+    return Case(
+        url=f"{A}/catalog/services/{service.id}/variants/{variant.id}/commission-changes",
+        body={"new_pct": "25", "effective_from": effective},
+        status=201,
+        action="commission_change.schedule",
+        target_type="commission_change",
+        before=None,
+        after={
+            "service_variant_id": str(variant.id),
+            "old_pct": 20.0,
+            "new_pct": 25.0,
+            "effective_from": effective,
+            "status": "scheduled",
+        },
+        details={"service_variant_id": str(variant.id), "applied_now": False},
+    )
+
+
+async def _commission_change_cancel(db) -> Case:
+    service, variant = await _catalog_variant(db)
+    author = await UserFactory.create(db, role="admin")
+    change = CommissionChange(
+        service_variant_id=variant.id,
+        old_pct=Decimal("20"),
+        new_pct=Decimal("25"),
+        effective_from=today_ist() + timedelta(days=NOTICE_DAYS),
+        status="scheduled",
+        created_by=author.id,
+    )
+    db.add(change)
+    await db.flush()
+    return Case(
+        url=(
+            f"{A}/catalog/services/{service.id}/variants/{variant.id}"
+            f"/commission-changes/{change.id}/cancel"
+        ),
+        action="commission_change.cancel",
+        target_type="commission_change",
+        target_id=change.id,
+        before={"status": "scheduled"},
+        after={"status": "cancelled"},
     )
 
 
@@ -916,6 +967,15 @@ AUDITED_WRITE_ROUTES = {
         "POST",
         "/admin/catalog/services/{service_id}/variants/{variant_id}/activate",
     ): _catalog_variant_activate,
+    (
+        "POST",
+        "/admin/catalog/services/{service_id}/variants/{variant_id}/commission-changes",
+    ): _commission_change_schedule,
+    (
+        "POST",
+        "/admin/catalog/services/{service_id}/variants/{variant_id}"
+        "/commission-changes/{change_id}/cancel",
+    ): _commission_change_cancel,
     ("POST", "/admin/disputes"): _dispute_create,
     ("POST", "/admin/disputes/{dispute_id}/review"): _dispute_review,
     ("POST", "/admin/disputes/{dispute_id}/resolve"): _dispute_resolve,
@@ -938,7 +998,7 @@ def test_every_admin_write_route_has_an_audit_case():
             if is_admin or path.startswith("/services"):
                 found.add((method, path))
     assert found == set(AUDITED_WRITE_ROUTES)
-    assert len(found) == 40
+    assert len(found) == 42
 
 
 @pytest.fixture

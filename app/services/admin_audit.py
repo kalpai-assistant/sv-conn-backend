@@ -124,6 +124,15 @@ AUDIT_FIELDS: dict[str, tuple[str, ...]] = {
         "sort_order",
         "is_active",
     ),
+    # SVC-486: a scheduled or cancelled commission change. The apply writes no
+    # audit row (no admin acted); its amounts are on the change row itself.
+    "commission_change": (
+        "service_variant_id",
+        "old_pct",
+        "new_pct",
+        "effective_from",
+        "status",
+    ),
     # SVC-431. Never the description or notes: free text about a customer.
     "dispute": (
         "booking_id",

@@ -15,11 +15,12 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine, delete
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
 from app.models.category import Category
+from app.models.commission_change import CommissionChange
 from app.models.professional import Professional
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.provider_service import ProviderService
@@ -46,6 +47,16 @@ def i18n_off(monkeypatch):
     monkeypatch.setattr(get_settings(), "I18N_TESTER_PHONES", "")
 
 
+@pytest.fixture(autouse=True)
+def no_commission_notice_enqueue():
+    """SVC-486: a PATCH decrease commits a commission notice too; never let it
+    reach the broker."""
+    from app.tasks.commission_tasks import send_commission_change_notices
+
+    with patch.object(send_commission_change_notices, "delay"):
+        yield
+
+
 @pytest.fixture
 async def catalog_cleanup(db_session):
     """These tests commit for real; drop their catalogue rows afterwards. Plain
@@ -54,6 +65,14 @@ async def catalog_cleanup(db_session):
     yield ids
     await db_session.rollback()
     for service_id, category_id in ids:
+        # SVC-486: a PATCH decrease records an applied commission change.
+        await db_session.execute(
+            delete(CommissionChange).where(
+                CommissionChange.service_variant_id.in_(
+                    select(ServiceVariant.id).where(ServiceVariant.service_id == service_id)
+                )
+            )
+        )
         await db_session.execute(
             delete(ServiceVariant).where(ServiceVariant.service_id == service_id)
         )

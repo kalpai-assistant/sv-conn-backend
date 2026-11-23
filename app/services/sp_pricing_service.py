@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import AppException, SubscriptionNotFound
 from app.models.category import Category
+from app.models.commission_change import CommissionChange
 from app.models.provider_service import ProviderService as ProviderServiceModel
 from app.models.service import Service
 from app.models.service_variant import ServiceVariant
@@ -35,8 +36,10 @@ from app.schemas.sp_pricing import (
     SpVariantPricing,
     SpVariantPricingUpdateResponse,
     TakeHome,
+    UpcomingCommission,
 )
 from app.services.commission import commission_pct, take_home
+from app.services.commission_changes import scheduled_changes
 from app.services.marketplace_events import money, record_server_event
 from app.services.price_range import is_outside_range, recommended_range
 
@@ -56,8 +59,10 @@ def variant_pricing(
     gst_pct: Decimal,
     price_amount: Decimal | None,
     is_active: bool | None,
+    upcoming: CommissionChange | None,
 ) -> dict:
-    """One variant's row on the SP's screen, as ``SpVariantPricing`` fields."""
+    """One variant's row on the SP's screen, as ``SpVariantPricing`` fields.
+    ``upcoming`` is the variant's scheduled commission change, if any (SVC-486)."""
     price_range = recommended_range(
         variant.base_price, is_sensitive, bounds_pct, category_id=category_id
     )
@@ -85,6 +90,13 @@ def variant_pricing(
         "take_home": breakdown,
         "commission_pct": float(commission_pct(variant)),
         "gst_pct": float(gst_pct),
+        "upcoming_commission": (
+            None
+            if upcoming is None
+            else UpcomingCommission(
+                new_pct=float(upcoming.new_pct), effective_from=upcoming.effective_from
+            )
+        ),
     }
 
 
@@ -142,6 +154,9 @@ class SpPricingService:
             )
         ).all()
 
+        upcoming = await scheduled_changes(
+            self.db, [row.ServiceVariant.id for row in rows if row.ServiceVariant is not None]
+        )
         groups: dict[uuid.UUID, SpServicePricingGroup] = {}
         for row in rows:
             group = groups.get(row.service_id)
@@ -165,6 +180,7 @@ class SpPricingService:
                         gst_pct=row.commission_gst_pct,
                         price_amount=row.price_amount,
                         is_active=row.price_active,
+                        upcoming=upcoming.get(row.ServiceVariant.id),
                     )
                 )
             )
@@ -305,6 +321,7 @@ class SpPricingService:
             gst_pct=found.commission_gst_pct,
             price_amount=saved.price_amount,
             is_active=saved.is_active,
+            upcoming=(await scheduled_changes(self.db, [variant_id])).get(variant_id),
         )
         logger.info(
             "sp.price_set sp_id=%s service_id=%s variant_id=%s price_amount=%s "

@@ -195,6 +195,62 @@ async def send_team_invite(phone: str, business_name: str, code: str) -> None:
     _raise_for_msg91_failure(response)
 
 
+async def send_commission_change(
+    phone: str, service: str, option: str, old_pct: str, new_pct: str, effective: str
+) -> bool:
+    """Text ``phone`` a commission-change notice (SVC-486). Returns True when
+    MSG91 accepted it, False in mock mode.
+
+    Template (DLT, Service Implicit, English): "EazyServ: Commission on {#var#} -
+    {#var#} changes from {#var#}% to {#var#}% from {#var#}. Details in the
+    EazyServ app." The vars are in that order: service, option, old %, new %, and
+    the date as "06 Dec 2026". Each is cut to DLT's 30 characters. There is no
+    template for a cancellation, so a cancel sends no SMS.
+
+    With ``MSG91_COMMISSION_TEMPLATE_ID`` empty, this logs
+    ``[MOCK COMMISSION SMS]`` and makes no HTTP call. Setting the SSM parameter
+    turns real sends on, with no code change.
+
+    Raises ``SMSDeliveryError`` when MSG91 rejects the send.
+    """
+    values = [service, option, old_pct, new_pct, effective]
+    var1, var2, var3, var4, var5 = (v[:_DLT_VAR_MAX_CHARS] for v in values)
+    if not settings.MSG91_COMMISSION_TEMPLATE_ID:
+        logger.info(
+            "[MOCK COMMISSION SMS] phone=%s service=%s option=%s old=%s%% new=%s%% from=%s",
+            phone,
+            var1,
+            var2,
+            var3,
+            var4,
+            var5,
+        )
+        return False
+
+    body = {
+        "template_id": settings.MSG91_COMMISSION_TEMPLATE_ID,
+        "recipients": [
+            {
+                "mobiles": phone.lstrip("+"),
+                "var1": var1,
+                "var2": var2,
+                "var3": var3,
+                "var4": var4,
+                "var5": var5,
+            },
+        ],
+    }
+    headers = {
+        "authkey": settings.MSG91_AUTH_KEY,
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(_MSG91_FLOW_URL, json=body, headers=headers)
+
+    _raise_for_msg91_failure(response)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Twilio implementation
 # ---------------------------------------------------------------------------

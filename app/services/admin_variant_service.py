@@ -12,9 +12,14 @@ is where an admin sets what a customer pays and how it splits.
   amounts (₹240 on ₹799 = 30.0375%, shown 30.04), so a sent percent equal to it is
   no change of percent and the stored ratio stays. Only a different value
   re-splits.
-* **Raising the commission** needs ``confirm: true``, after 14 days' notice to
-  pros (Vipul 2026-11-20: the same in every city). Decreases, an unchanged
-  percent, price-only edits and creates never need it.
+* **Raising the commission** is never a PATCH (SVC-486). It is scheduled at
+  least 14 days ahead (Vipul 2026-11-20: the same in every city) through
+  ``schedule_commission_change``, which sends the SPs their notice. A PATCH
+  decrease still applies at once, but it is recorded as an applied
+  ``commission_changes`` row and notified the same way, so every change of
+  percent has one paper trail. While a change is scheduled, no other change of
+  percent can be made (cancel it first). ``confirm`` is accepted and ignored.
+  Creates, price-only edits and an unchanged percent never need any of this.
 * **Customer GST** (``gst_percent``) is read-only: a new variant copies the
   service's first variant's, and sending it is refused.
 * **Nothing is deleted** (SP prices and bookings reference variants). Switching
@@ -29,7 +34,10 @@ is where an admin sets what a customer pays and how it splits.
 Locks: the service ``FOR UPDATE``, then the variant, the same order as
 ``update_service`` → ``sync_single_variant_price``. Every variant write takes the
 service lock first, so the last-active count and the 2+-variant price lock can't
-race another variant write.
+race another variant write. Right after the service lock, every write applies the
+service's commission changes that are due
+(``commission_changes.apply_due_commission_changes``, the same lock order), so an
+edit never lands on top of a change that is due but not yet applied.
 
 Check order on a write: the field rules (422 ``CATALOG_INVALID``), then the label
 (409 ``VARIANT_LABEL_TAKEN``), then the notice (409
@@ -37,6 +45,7 @@ Check order on a write: the field rules (422 ``CATALOG_INVALID``), then the labe
 """
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 from fastapi import status
@@ -48,12 +57,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import call_after_commit
 from app.exceptions import AppException, ServiceNotFound, ServiceVariantNotFound
 from app.models.category import Category
+from app.models.commission_change import (
+    KIND_CANCELLED,
+    KIND_SCHEDULED,
+    STATUS_APPLIED,
+    STATUS_CANCELLED,
+    STATUS_SCHEDULED,
+    CommissionChange,
+)
 from app.models.provider_profile import KYCStatus, ProviderProfile
 from app.models.service import Service
 from app.models.service_variant import ServiceVariant
 from app.models.sp_service_pricing import SpServicePricing
 from app.models.user import User
 from app.schemas.admin_catalog import (
+    AdminCommissionChange,
+    AdminCommissionChangeCreate,
     AdminServiceDetail,
     AdminVariantCreate,
     AdminVariantPriceImpact,
@@ -69,13 +88,20 @@ from app.services.admin_catalog_service import (
     _in_range,
 )
 from app.services.commission import rounded_commission_pct, split_at_pct
+from app.services.commission_changes import (
+    NOTICE_DAYS,
+    apply_change,
+    apply_due_commission_changes,
+    earliest_increase_date,
+    enqueue_notices,
+    today_ist,
+)
 from app.services.price_range import is_outside_range, recommended_range
 from app.services.standard_variant import repriced_split
 from app.utils.money import to_decimal
 
 VARIANT_LABEL_LENGTH = (1, 200)
 PCT_LIMIT = Decimal(100)
-NOTICE_DAYS = 14
 _VARIANT_FIELDS = AUDIT_FIELDS["service_variant"]
 
 
@@ -90,16 +116,56 @@ class VariantLabelTaken(AppException):
 
 
 class CommissionIncreaseNeedsNotice(AppException):
+    """SVC-486: a PATCH can't raise the commission. ``schedule_path`` is the
+    endpoint that can, relative to the variant."""
+
     def __init__(self, old_pct: Decimal, new_pct: Decimal):
         super().__init__(
-            "Give pros at least 14 days' notice before saving",
+            f"Schedule a commission increase at least {NOTICE_DAYS} days ahead",
             status_code=status.HTTP_409_CONFLICT,
             code="COMMISSION_INCREASE_NEEDS_NOTICE",
             details={
                 "old_pct": float(old_pct),
                 "new_pct": float(new_pct),
                 "notice_days": NOTICE_DAYS,
+                "earliest_effective_from": earliest_increase_date().isoformat(),
+                "schedule_path": "commission-changes",
             },
+        )
+
+
+class CommissionChangeScheduled(AppException):
+    """A change of percent while one is already scheduled on the variant."""
+
+    def __init__(self, change: CommissionChange):
+        super().__init__(
+            "This option already has a commission change scheduled; cancel it first",
+            status_code=status.HTTP_409_CONFLICT,
+            code="COMMISSION_CHANGE_SCHEDULED",
+            details={
+                "change_id": str(change.id),
+                "new_pct": float(change.new_pct),
+                "effective_from": change.effective_from.isoformat(),
+            },
+        )
+
+
+class CommissionChangeNotScheduled(AppException):
+    def __init__(self, change_status: str):
+        super().__init__(
+            f"This commission change is {change_status} and can't be cancelled",
+            status_code=status.HTTP_409_CONFLICT,
+            code="COMMISSION_CHANGE_NOT_SCHEDULED",
+            details={"status": change_status},
+        )
+
+
+class CommissionChangeNotFound(AppException):
+    def __init__(self, change_id: uuid.UUID):
+        super().__init__(
+            f"Commission change {change_id} not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="COMMISSION_CHANGE_NOT_FOUND",
         )
 
 
@@ -123,14 +189,28 @@ def _label(raw: str) -> str:
     return label
 
 
-def _commission_pct(value: Decimal) -> Decimal:
+def _commission_pct(value: Decimal, field: str = "commission_pct") -> Decimal:
     if not value.is_finite():
-        raise CatalogInvalid("commission_pct", "commission_pct must be a number")
+        raise CatalogInvalid(field, f"{field} must be a number")
     if value != value.quantize(Decimal("0.01")):
-        raise CatalogInvalid("commission_pct", "commission_pct takes at most 2 decimal places")
+        raise CatalogInvalid(field, f"{field} takes at most 2 decimal places")
     if not Decimal(0) <= value < PCT_LIMIT:
-        raise CatalogInvalid("commission_pct", "commission_pct must be at least 0 and below 100")
+        raise CatalogInvalid(field, f"{field} must be at least 0 and below 100")
     return value.quantize(Decimal("0.01"))
+
+
+def _change_response(change: CommissionChange) -> AdminCommissionChange:
+    return AdminCommissionChange(
+        id=change.id,
+        service_variant_id=change.service_variant_id,
+        old_pct=float(change.old_pct),
+        new_pct=float(change.new_pct),
+        effective_from=change.effective_from,
+        status=change.status,
+        created_at=change.created_at,
+        applied_at=change.applied_at,
+        cancelled_at=change.cancelled_at,
+    )
 
 
 def _refuse_gst(body: BaseModel) -> None:
@@ -237,6 +317,7 @@ class AdminVariantService:
         body: AdminVariantUpdate,
     ) -> AdminServiceDetail:
         _refuse_gst(body)
+        # ``confirm`` is deprecated (SVC-486): accepted, never read.
         sent = {f: getattr(body, f) for f in body.model_fields_set if f != "confirm"}
         if not sent:
             raise CatalogInvalid("body", "Send at least one field to change")
@@ -258,6 +339,7 @@ class AdminVariantService:
         )
 
         service = await self.catalog._lock_service(service_id)
+        await apply_due_commission_changes(self.db, service_ids=[service.id])
         variant = await self._lock_variant(service.id, variant_id)
         old = _fields(variant)
 
@@ -267,8 +349,14 @@ class AdminVariantService:
         old_pct = rounded_commission_pct(variant)
         # The same percent as shown is no change: the stored ratio stays.
         pct_changed = pct is not None and pct != old_pct
-        if pct_changed and pct > old_pct and not body.confirm:
-            raise CommissionIncreaseNeedsNotice(old_pct, pct)
+        if pct_changed:
+            # SVC-486: the scheduled change would overwrite this one when it
+            # applies. ``confirm`` no longer lets an increase through.
+            pending = await self._scheduled_change(variant.id)
+            if pending is not None:
+                raise CommissionChangeScheduled(pending)
+            if pct > old_pct:
+                raise CommissionIncreaseNeedsNotice(old_pct, pct)
 
         new_price = price if price is not None else to_decimal(variant.base_price)
         if pct_changed:
@@ -301,7 +389,26 @@ class AdminVariantService:
             before["service_base_price"], after["service_base_price"] = followed
         details = {"service_id": str(service.id)}
         if pct_changed:
-            details.update(old_pct=old_pct, new_pct=pct, confirm=body.confirm)
+            # SVC-486: a decrease, live now. Recorded like a scheduled change
+            # that applied today, and the SPs get the same notice.
+            change = CommissionChange(
+                id=uuid.uuid4(),
+                service_variant_id=variant.id,
+                old_pct=old_pct,
+                new_pct=pct,
+                effective_from=today_ist(),
+                status=STATUS_APPLIED,
+                created_by=actor.admin_id,
+                applied_at=datetime.now(UTC),
+                old_platform_commission=old["platform_commission"],
+                old_provider_payout=old["provider_payout"],
+                new_platform_commission=commission,
+                new_provider_payout=payout,
+            )
+            self.db.add(change)
+            await self.db.flush()
+            details.update(old_pct=old_pct, new_pct=pct, commission_change_id=str(change.id))
+            enqueue_notices(self.db, change.id, KIND_SCHEDULED)
         await audit_admin_action(
             self.db,
             actor,
@@ -314,6 +421,136 @@ class AdminVariantService:
         )
         return await self.catalog.service_detail(service.id)
 
+    async def schedule_commission_change(
+        self,
+        actor: AuditActor,
+        service_id: uuid.UUID,
+        variant_id: uuid.UUID,
+        body: AdminCommissionChangeCreate,
+    ) -> AdminCommissionChange:
+        """Schedule a change of the variant's commission percent (SVC-486).
+
+        - 422 ``CATALOG_INVALID`` on ``new_pct``: not a 2 dp number in [0, 100),
+          or the option's current (rounded) percent.
+        - 422 ``CATALOG_INVALID`` on ``effective_from``: before today (IST), or an
+          increase dated less than 14 days after today.
+        - 409 ``COMMISSION_CHANGE_SCHEDULED``: the variant already has one.
+
+        A decrease dated today applies in this transaction. Either way the SPs
+        with an active price on the variant get their notice once it commits.
+        """
+        new_pct = _commission_pct(body.new_pct, "new_pct")
+        today = today_ist()
+        if body.effective_from < today:
+            raise CatalogInvalid("effective_from", "effective_from can't be in the past")
+
+        service = await self.catalog._lock_service(service_id)
+        await apply_due_commission_changes(self.db, service_ids=[service.id])
+        variant = await self._lock_variant(service.id, variant_id)
+        pending = await self._scheduled_change(variant.id)
+        if pending is not None:
+            raise CommissionChangeScheduled(pending)
+        old_pct = rounded_commission_pct(variant)
+        if new_pct == old_pct:
+            raise CatalogInvalid("new_pct", "new_pct is already this option's commission")
+        earliest = earliest_increase_date()
+        if new_pct > old_pct and body.effective_from < earliest:
+            raise CatalogInvalid(
+                "effective_from",
+                f"An increase needs {NOTICE_DAYS} days' notice: "
+                f"effective_from must be {earliest.isoformat()} or later",
+            )
+
+        change = CommissionChange(
+            id=uuid.uuid4(),
+            service_variant_id=variant.id,
+            old_pct=old_pct,
+            new_pct=new_pct,
+            effective_from=body.effective_from,
+            status=STATUS_SCHEDULED,
+            created_by=actor.admin_id,
+        )
+        self.db.add(change)
+        # Every schedule holds the service lock, so the one-scheduled index is
+        # only a backstop here.
+        await self.db.flush()
+        applied_now = body.effective_from <= today
+        if applied_now:
+            apply_change(change, variant)
+            await self.db.flush()
+        await self.db.refresh(change, ["created_at"])
+
+        details = {
+            "service_id": str(service.id),
+            "service_variant_id": str(variant.id),
+            "applied_now": applied_now,
+        }
+        if applied_now:
+            details.update(
+                old_platform_commission=change.old_platform_commission,
+                new_platform_commission=change.new_platform_commission,
+            )
+        await audit_admin_action(
+            self.db,
+            actor,
+            action="commission_change.schedule",
+            target_type="commission_change",
+            target_id=change.id,
+            details=details,
+            before=None,
+            after=snapshot("commission_change", change),
+        )
+        enqueue_notices(self.db, change.id, KIND_SCHEDULED)
+        return _change_response(change)
+
+    async def cancel_commission_change(
+        self,
+        actor: AuditActor,
+        service_id: uuid.UUID,
+        variant_id: uuid.UUID,
+        change_id: uuid.UUID,
+    ) -> AdminCommissionChange:
+        """Cancel a scheduled change (SVC-486). 404 ``COMMISSION_CHANGE_NOT_FOUND``
+        for another variant's or an unknown id. 409
+        ``COMMISSION_CHANGE_NOT_SCHEDULED`` once it is applied (including one
+        whose date came and that this call applied first) or already cancelled.
+        The SPs get a cancellation push and email once it commits. There is no
+        SMS, because there is no template for one."""
+        service = await self.catalog._lock_service(service_id)
+        await apply_due_commission_changes(self.db, service_ids=[service.id])
+        variant = await self._lock_variant(service.id, variant_id)
+        change = await self.db.scalar(
+            select(CommissionChange)
+            .where(
+                CommissionChange.id == change_id,
+                CommissionChange.service_variant_id == variant.id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if change is None:
+            raise CommissionChangeNotFound(change_id)
+        if change.status != STATUS_SCHEDULED:
+            raise CommissionChangeNotScheduled(change.status)
+
+        before = snapshot("commission_change", change)
+        change.status = STATUS_CANCELLED
+        change.cancelled_by = actor.admin_id
+        change.cancelled_at = datetime.now(UTC)
+        await self.db.flush()
+        await audit_admin_action(
+            self.db,
+            actor,
+            action="commission_change.cancel",
+            target_type="commission_change",
+            target_id=change.id,
+            details={"service_id": str(service.id), "service_variant_id": str(variant.id)},
+            before=before,
+            after=snapshot("commission_change", change),
+        )
+        enqueue_notices(self.db, change.id, KIND_CANCELLED)
+        return _change_response(change)
+
     async def set_active(
         self, actor: AuditActor, service_id: uuid.UUID, variant_id: uuid.UUID, active: bool
     ) -> AdminServiceDetail:
@@ -321,6 +558,7 @@ class AdminVariantService:
         are, and come back when it's switched on; in-flight bookings carry on.
         Already in that state: 200, no audit row."""
         service = await self.catalog._lock_service(service_id)
+        await apply_due_commission_changes(self.db, service_ids=[service.id])
         variant = await self._lock_variant(service.id, variant_id)
         if variant.is_active != active:
             if not active:
@@ -423,6 +661,16 @@ class AdminVariantService:
                     .order_by(ServiceVariant.sort_order, ServiceVariant.id)
                 )
             ).all()
+        )
+
+    async def _scheduled_change(self, variant_id: uuid.UUID) -> CommissionChange | None:
+        """The variant's scheduled change. The caller holds the service lock,
+        which every schedule takes, so none can appear meanwhile."""
+        return await self.db.scalar(
+            select(CommissionChange).where(
+                CommissionChange.service_variant_id == variant_id,
+                CommissionChange.status == STATUS_SCHEDULED,
+            )
         )
 
     async def _lock_variant(self, service_id: uuid.UUID, variant_id: uuid.UUID) -> ServiceVariant:

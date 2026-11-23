@@ -237,6 +237,7 @@ async def test_get_lists_each_active_variant_unpriced(client, db_session, auth_h
         "take_home": None,
         "commission_pct": pytest.approx(30.012004801920768),
         "gst_pct": 18.0,
+        "upcoming_commission": None,
     }
     assert other  # silence: made only to prove it isn't listed
 

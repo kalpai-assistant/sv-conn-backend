@@ -6,6 +6,7 @@ string), as on ``RankedProvider``. Response fields have no defaults, so every
 one stays ``required`` in the OpenAPI schema; "not set" is an explicit null.
 """
 
+from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
@@ -30,6 +31,15 @@ class TakeHome(BaseModel):
     sp_receives: float
 
 
+class UpcomingCommission(BaseModel):
+    """A commission change scheduled on the variant (SVC-486). From 00:00 IST
+    on ``effective_from``, the platform takes ``new_pct`` percent of this
+    option's price, and ``take_home`` changes with it."""
+
+    new_pct: float
+    effective_from: date
+
+
 class SpVariantPricing(BaseModel):
     variant_id: UUID
     label: str
@@ -52,6 +62,8 @@ class SpVariantPricing(BaseModel):
     # The saved breakdown is always take_home, from the server.
     commission_pct: float
     gst_pct: float
+    # SVC-486: NULL when no change is scheduled on this variant.
+    upcoming_commission: UpcomingCommission | None
 
 
 class SpServicePricingGroup(BaseModel):

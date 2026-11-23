@@ -67,6 +67,16 @@ class Settings(BaseSettings):
     # means mock mode: the invite URL is logged as "[MOCK INVITE]" and MSG91 is
     # never called. Beta reads it from SSM /eazyserv/beta/MSG91_INVITE_TEMPLATE_ID.
     MSG91_INVITE_TEMPLATE_ID: str = ""
+    # SVC-486: the commission-change notice, a flow template (##var1##..##var5##:
+    # service, option, old %, new %, date). Empty means mock mode: logged as
+    # "[MOCK COMMISSION SMS]", MSG91 never called. Beta reads it from SSM
+    # /eazyserv/beta/MSG91_COMMISSION_TEMPLATE_ID once DLT + MSG91 approve it.
+    MSG91_COMMISSION_TEMPLATE_ID: str = ""
+    # SVC-486: email through AWS SES (Mumbai). Empty EMAIL_FROM means mock mode:
+    # logged as "[MOCK EMAIL]", SES never called. Setting it (a verified
+    # no-reply sender on eazyserv.com) turns real sends on, no code change.
+    EMAIL_FROM: str = ""
+    EMAIL_SES_REGION: str = "ap-south-1"
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_PHONE_NUMBER: str = ""

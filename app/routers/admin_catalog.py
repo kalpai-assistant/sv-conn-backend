@@ -6,7 +6,8 @@ audited (``category.create`` / ``update`` / ``deactivate`` / ``activate``,
 deleted, a slug never changes, and only deactivate / activate switch a row.
 
 SVC-481 adds the variant editor (``variant.create`` / ``update`` / ``deactivate``
-/ ``activate``): rules in ``app/services/admin_variant_service.py``.
+/ ``activate``): rules in ``app/services/admin_variant_service.py``. SVC-486 adds
+scheduled commission changes (``commission_change.schedule`` / ``cancel``).
 
 The old ``POST/PATCH/DELETE /services`` stay as they were, except that neither
 PATCH can change the price of a service with 2+ variants (SVC-481).
@@ -24,6 +25,8 @@ from app.schemas.admin_catalog import (
     AdminCategoryCreate,
     AdminCategoryDetail,
     AdminCategoryUpdate,
+    AdminCommissionChange,
+    AdminCommissionChangeCreate,
     AdminServiceCreate,
     AdminServiceDeactivate,
     AdminServiceDetail,
@@ -218,12 +221,59 @@ async def update_variant(
     db: AsyncSession = Depends(get_db),
 ):
     """Change label, price, commission percent, duration or sort order. A price
-    on its own keeps the commission percent. Raising the percent is a 409
-    ``COMMISSION_INCREASE_NEEDS_NOTICE`` unless ``confirm: true``. SP prices and
-    existing bookings are not touched. A save that changes nothing is a 200 with
-    no audit row."""
+    on its own keeps the commission percent. Raising the percent is always a 409
+    ``COMMISSION_INCREASE_NEEDS_NOTICE``: schedule it with ``POST
+    .../commission-changes`` (SVC-486; ``confirm`` is ignored). A lower percent
+    applies at once and the SPs pricing the option get a notice. Any change of
+    percent while a change is scheduled is a 409 ``COMMISSION_CHANGE_SCHEDULED``.
+    SP prices and existing bookings are not touched. A save that changes nothing
+    is a 200 with no audit row."""
     return await AdminVariantService(db).update(
         audit_actor(request, admin), service_id, variant_id, body
+    )
+
+
+@router.post(
+    "/services/{service_id}/variants/{variant_id}/commission-changes",
+    response_model=AdminCommissionChange,
+    status_code=status.HTTP_201_CREATED,
+)
+async def schedule_commission_change(
+    service_id: uuid.UUID,
+    variant_id: uuid.UUID,
+    body: AdminCommissionChangeCreate,
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Schedule a new commission percent from ``effective_from`` (00:00 IST)
+    (SVC-486). An increase needs that date at least 14 days after today (IST),
+    else 422 ``CATALOG_INVALID`` on ``effective_from``. A decrease dated today
+    applies at once. 409 ``COMMISSION_CHANGE_SCHEDULED`` while another one is
+    scheduled. Every SP with an active price on the option gets a push, an
+    email (when they have one) and an SMS. Each one is recorded."""
+    return await AdminVariantService(db).schedule_commission_change(
+        audit_actor(request, admin), service_id, variant_id, body
+    )
+
+
+@router.post(
+    "/services/{service_id}/variants/{variant_id}/commission-changes/{change_id}/cancel",
+    response_model=AdminCommissionChange,
+)
+async def cancel_commission_change(
+    service_id: uuid.UUID,
+    variant_id: uuid.UUID,
+    change_id: uuid.UUID,
+    request: Request,
+    admin: User = Depends(require_roles("admin", "ops")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel a scheduled commission change (SVC-486). 409
+    ``COMMISSION_CHANGE_NOT_SCHEDULED`` once it has applied or been cancelled.
+    The SPs who were told get a cancellation push and email."""
+    return await AdminVariantService(db).cancel_commission_change(
+        audit_actor(request, admin), service_id, variant_id, change_id
     )
 
 

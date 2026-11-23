@@ -128,10 +128,17 @@ def send_multicast(
     title: str,
     body: str,
     data: dict[str, str] | None = None,
-) -> dict[str, int]:
+    *,
+    per_token: bool = False,
+) -> dict:
     """
     Fan out one push to many device tokens (SVC-227). Used by
     ``broadcast_update_available`` and any future admin broadcast.
+
+    ``per_token=True`` (SVC-486, the commission notices' paper trail) adds two
+    keys: ``results``, one ``(ok, error)`` per token in ``tokens`` order (error
+    None on success), and ``mocked``, True when nothing went to FCM. Without
+    it the return is exactly the two counts, as every older caller expects.
 
     Chunked at 500 (FCM's per-call cap). Returns a summary
     ``{"success_count": N, "failure_count": N}`` so the caller can log
@@ -147,7 +154,10 @@ def send_multicast(
     the return is aggregate to keep the caller's log line short.
     """
     if not tokens:
-        return {"success_count": 0, "failure_count": 0}
+        empty: dict = {"success_count": 0, "failure_count": 0}
+        if per_token:
+            empty.update(results=[], mocked=False)
+        return empty
 
     if not is_configured():
         if settings.ENVIRONMENT == "production":
@@ -163,11 +173,15 @@ def send_multicast(
             data=data or {},
             environment=settings.ENVIRONMENT,
         )
-        return {"success_count": len(tokens), "failure_count": 0}
+        mocked: dict = {"success_count": len(tokens), "failure_count": 0}
+        if per_token:
+            mocked.update(results=[(True, None)] * len(tokens), mocked=True)
+        return mocked
 
     _get_app()
     success = 0
     failure = 0
+    results: list[tuple[bool, str | None]] = []
     for start in range(0, len(tokens), _MULTICAST_CHUNK_SIZE):
         chunk = tokens[start : start + _MULTICAST_CHUNK_SIZE]
         message = messaging.MulticastMessage(
@@ -182,6 +196,7 @@ def send_multicast(
         success += batch.success_count
         failure += batch.failure_count
         for i, resp in enumerate(batch.responses):
+            results.append((True, None) if resp.success else (False, str(resp.exception)))
             if not resp.success:
                 # Token itself is not logged — the logging pipeline
                 # redacts anything with "token" in the key anyway (SVC-46).
@@ -190,4 +205,7 @@ def send_multicast(
                     chunk_index=start + i,
                     error=str(resp.exception),
                 )
-    return {"success_count": success, "failure_count": failure}
+    summary: dict = {"success_count": success, "failure_count": failure}
+    if per_token:
+        summary.update(results=results, mocked=False)
+    return summary

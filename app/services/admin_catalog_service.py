@@ -50,6 +50,7 @@ from app.schemas.admin_catalog import (
     AdminCategoryCreate,
     AdminCategoryDetail,
     AdminCategoryUpdate,
+    AdminPendingCommissionChange,
     AdminServiceCreate,
     AdminServiceDetail,
     AdminServiceUpdate,
@@ -59,6 +60,7 @@ from app.seed_data.catalog_icons import CATALOG_ICON_KEYS
 from app.services.account_service import _LIVE_STATUSES
 from app.services.admin_audit import AuditActor, audit_admin_action, snapshot
 from app.services.commission import rounded_commission_pct
+from app.services.commission_changes import scheduled_changes
 from app.services.standard_variant import (
     refuse_price_on_multi_variant,
     standard_variant,
@@ -256,6 +258,18 @@ _SERVICE_ROW_COLUMNS = (
 )
 
 
+def _pending(change) -> AdminPendingCommissionChange | None:
+    """A variant's scheduled commission change for the editor (SVC-486)."""
+    if change is None:
+        return None
+    return AdminPendingCommissionChange(
+        id=change.id,
+        new_pct=float(change.new_pct),
+        effective_from=change.effective_from,
+        created_at=change.created_at,
+    )
+
+
 def _service_row(row, variants: dict, bookings: dict) -> AdminCatalogServiceRow:
     return AdminCatalogServiceRow(
         id=row.id,
@@ -362,6 +376,7 @@ class AdminCatalogService:
             )
         ).all()
         active_bookings = await self._active_bookings(service_id)
+        pending = await scheduled_changes(self.db, [v.id for v in variant_rows])
         return AdminServiceDetail(
             id=service.id,
             category_id=service.category_id,
@@ -390,6 +405,7 @@ class AdminCatalogService:
                     provider_payout=float(v.provider_payout),
                     commission_pct=float(rounded_commission_pct(v)),
                     gst_percent=float(v.gst_percent),
+                    pending_commission_change=_pending(pending.get(v.id)),
                 )
                 for v in variant_rows
             ],

@@ -86,7 +86,8 @@ class UserService:
         if name is not None:
             user.name = name
         if email is not None:
-            user.email = email
+            # SVC-486: "" clears it. The schema has already trimmed and lower-cased it.
+            user.email = email or None
         await self.db.commit()
         await self.db.refresh(user)
         return user
