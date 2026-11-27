@@ -51,6 +51,18 @@ class ServiceNotFound(AppException):
         )
 
 
+class ProviderNotFound(AppException):
+    """The user has no ``provider_profiles`` row (SVC-436). Calling an SP-only
+    helper for a non-SP is a caller bug, not a normal answer."""
+
+    def __init__(self, user_id: UUID):
+        super().__init__(
+            f"Provider {user_id} not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="PROVIDER_NOT_FOUND",
+        )
+
+
 class UserNotFound(AppException):
     def __init__(self, user_id: UUID):
         super().__init__(
