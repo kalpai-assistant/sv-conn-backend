@@ -41,8 +41,10 @@ from app.models.provider_team_invite import InviteStatus, ProviderTeamInvite  # 
 from app.models.review import Review  # noqa: F401
 from app.models.service import Service  # noqa: F401
 from app.models.service_relationship import RelationshipType, ServiceRelationship  # noqa: F401
+from app.models.service_request import ServiceRequest, ServiceRequestStatus  # noqa: F401
 from app.models.service_variant import ServiceVariant  # noqa: F401
 from app.models.settlement_statement import SettlementStatement  # noqa: F401
+from app.models.sp_request_ban import SpRequestBan  # noqa: F401
 from app.models.user import User, UserRole  # noqa: F401
 
 register_create_all_hook(Base.metadata)

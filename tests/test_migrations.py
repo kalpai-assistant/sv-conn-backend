@@ -18,6 +18,7 @@ which ``env.py`` honours in online mode.
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -1597,6 +1598,79 @@ def test_svc_433_adds_notes_and_the_retry_column_and_round_trips(scratch_db):
     engine = create_engine(scratch_db)
     try:
         assert not inspect(engine).has_table("booking_support_notes")
+    finally:
+        engine.dispose()
+    assert _matviews(scratch_db) == views_before
+
+
+# SVC-436: service_requests + sp_request_bans. Pinned like the others.
+SVC_436 = "6d50518b92ec"
+BEFORE_SVC_436 = SVC_433
+
+
+def _check_values(url: URL, table: str) -> dict[str, set[str]]:
+    """Each CHECK's name, and the quoted values its IN list allows."""
+    engine = create_engine(url)
+    try:
+        return {
+            c["name"]: set(re.findall(r"'(\w+)'", c["sqltext"]))
+            for c in inspect(engine).get_check_constraints(table)
+        }
+    finally:
+        engine.dispose()
+
+
+def test_svc_436_creates_both_tables_and_downgrade_drops_them(scratch_db):
+    """FAILURE CAUGHT: the migration drifting from the model (FK ondelete, the DESC
+    queue index, CHECK values out of step with the enums), a unique sneaking onto
+    sp_request_bans.sp_id (which would lose ban history), or a downgrade that
+    leaves a table behind."""
+    from app.models.price_unit import PriceUnit
+    from app.models.service_request import ServiceRequestStatus
+
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_436)
+    views_before = _matviews(scratch_db)
+    _alembic(scratch_db, "upgrade", SVC_436)
+
+    requests = _shape(scratch_db, "service_requests")
+    assert requests["primary_key"] == ["id"]
+    assert sorted(fk[1:] for fk in requests["foreign_keys"]) == [
+        (("created_service_id",), "services", ("id",), None),
+        (("proposed_category_id",), "categories", ("id",), None),
+        (("recommended_service_id",), "services", ("id",), None),
+        (("resolved_by",), "users", ("id",), "SET NULL"),
+        (("sp_id",), "provider_profiles", ("user_id",), None),
+    ]
+    assert _check_values(scratch_db, "service_requests") == {
+        "ck_service_requests_status": {s.value for s in ServiceRequestStatus},
+        "ck_service_requests_proposed_price_unit": {u.value for u in PriceUnit},
+    }
+    engine = create_engine(scratch_db)
+    try:
+        indexes = {i["name"]: i for i in inspect(engine).get_indexes("service_requests")}
+    finally:
+        engine.dispose()
+    assert indexes["ix_service_requests_sp_id_status"]["column_names"] == ["sp_id", "status"]
+    queue = indexes["ix_service_requests_status_created_at"]
+    assert queue["column_names"] == ["status", "created_at"]
+    assert queue["column_sorting"] == {"created_at": ("desc",)}
+
+    bans = _shape(scratch_db, "sp_request_bans")
+    assert sorted(fk[1:] for fk in bans["foreign_keys"]) == [
+        (("cleared_by",), "users", ("id",), "SET NULL"),
+        (("sp_id",), "provider_profiles", ("user_id",), None),
+    ]
+    # One row per ban: nothing unique but the id.
+    assert bans["unique_constraints"] == []
+    assert bans["indexes"] == [("ix_sp_request_bans_sp_id", ("sp_id",), False, "None")]
+    assert _matviews(scratch_db) == views_before
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_436)
+    engine = create_engine(scratch_db)
+    try:
+        insp = inspect(engine)
+        assert not insp.has_table("service_requests")
+        assert not insp.has_table("sp_request_bans")
     finally:
         engine.dispose()
     assert _matviews(scratch_db) == views_before
