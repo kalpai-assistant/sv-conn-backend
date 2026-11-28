@@ -3,6 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    DDL,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    event,
     func,
     text,
 )
@@ -30,6 +32,20 @@ class Service(Base):
     __table_args__ = (
         # Partial index: fast catalog browsing by category for active services only
         Index("idx_services_category_active", "category_id", postgresql_where="is_active = true"),
+        # SVC-437: trigram indexes for duplicate detection. They need pg_trgm:
+        # the migration creates it on deployed DBs, the listener below on create_all.
+        Index(
+            "ix_services_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_services_description_trgm",
+            "description",
+            postgresql_using="gin",
+            postgresql_ops={"description": "gin_trgm_ops"},
+        ),
         CheckConstraint(PRICE_UNIT_CHECK, name="ck_services_price_unit"),
         CheckConstraint(MIN_QTY_CHECK, name="ck_services_min_qty_unit"),
     )
@@ -106,3 +122,9 @@ class Service(Base):
         lazy="raise_on_sql",
         order_by="ServiceVariant.sort_order",
     )
+
+
+# SVC-437: the trigram indexes above need pg_trgm before create_all builds this
+# table (the suite, and the tests that call create_all directly on a fresh DB).
+# Deployed DBs get it from the SVC-437 migration; this never runs there.
+event.listen(Service.__table__, "before_create", DDL("CREATE EXTENSION IF NOT EXISTS pg_trgm"))

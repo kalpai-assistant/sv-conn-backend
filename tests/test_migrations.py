@@ -1676,6 +1676,58 @@ def test_svc_436_creates_both_tables_and_downgrade_drops_them(scratch_db):
     assert _matviews(scratch_db) == views_before
 
 
+# SVC-437: pg_trgm + GIN trigram indexes on services. Pinned like the others.
+SVC_437 = "1bcf8b1ed482"
+BEFORE_SVC_437 = SVC_436
+SVC_437_INDEXES = {
+    "ix_services_name_trgm": "CREATE INDEX ix_services_name_trgm ON public.services "
+    "USING gin (name gin_trgm_ops)",
+    "ix_services_description_trgm": "CREATE INDEX ix_services_description_trgm ON "
+    "public.services USING gin (description gin_trgm_ops)",
+}
+
+
+def _trgm_state(url: URL) -> tuple[bool, dict[str, str]]:
+    """Whether pg_trgm is installed, and the services trigram indexes' definitions."""
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            installed = bool(
+                conn.scalar(text("SELECT count(*) FROM pg_extension WHERE extname = 'pg_trgm'"))
+            )
+            indexes = dict(
+                conn.execute(
+                    text(
+                        "SELECT indexname, indexdef FROM pg_indexes "
+                        "WHERE tablename = 'services' AND indexname LIKE '%_trgm'"
+                    )
+                ).all()
+            )
+    finally:
+        engine.dispose()
+    return installed, indexes
+
+
+def test_svc_437_adds_trgm_indexes_and_downgrade_keeps_extension(scratch_db):
+    """FAILURE CAUGHT: the migration drifting from the model (btree instead of gin,
+    gin_trgm_ops missing), a downgrade that leaves an index behind, a downgrade
+    that drops pg_trgm (correction 9: it stays), or a re-upgrade that fails
+    because the extension already exists."""
+    _alembic(scratch_db, "upgrade", BEFORE_SVC_437)
+    views_before = _matviews(scratch_db)
+    assert _trgm_state(scratch_db) == (False, {})
+
+    _alembic(scratch_db, "upgrade", SVC_437)
+    assert _trgm_state(scratch_db) == (True, SVC_437_INDEXES)
+    assert _matviews(scratch_db) == views_before
+
+    _alembic(scratch_db, "downgrade", BEFORE_SVC_437)
+    assert _trgm_state(scratch_db) == (True, {})
+
+    _alembic(scratch_db, "upgrade", SVC_437)
+    assert _trgm_state(scratch_db) == (True, SVC_437_INDEXES)
+
+
 # --- SVC-457 (G1): full-chain reversibility -----------------------------------
 #
 # The tests above pin individual migrations' round-trips at specific points in
